@@ -1,0 +1,10 @@
+[project]
+name = "smart-room-backend"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.129.0",
+    "pyside6>=6.10.2",
+    "uvicorn[standard]>=0.40.0",
+    "websockets>=16.0",
+]

@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# Local virtual environments
+.venv/
+backend/.venv/
+
+# Tool caches
+.ruff_cache/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Build artifacts and archives
+*.zip
+*.apk
+*.aab
+*.unitypackage
+
+# Unity transient/build output outside project-root ignore defaults
+unity/**/.utmp/
+unity/**/BackUpThisFolder_ButDontShipItWithYourGame/
+unity/**/*BackUpThisFolder_ButDontShipItWithYourGame/
+unity/**/il2cppOutput/
+unity/**/Bee/
+unity/**/新建文件夹/
+unity/**/Quest3Client.slnx
+unity/**/Assets/TextMesh Pro/Examples & Extras/
+
+# Keep legacy snapshots out of main history
+archive_code/
