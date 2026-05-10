@@ -10,29 +10,39 @@ namespace SmartRoom.Networking
 {
     public class BackendCommunicationManager : MonoBehaviour
     {
+        public event Action<string> ControlMessageReceived;
         [Header("Transport")]
         [SerializeField] private StreamTransportSwitcher transportSwitcher;
         [SerializeField] private string controlPath = "/ws/heartbeat";
         [SerializeField] private string rgbPath = "/ws/rgb";
+        [SerializeField] private string depthPath = "/ws/depth";
         [SerializeField] private float reconnectDelaySeconds = 2f;
 
         private ClientWebSocket _controlSocket;
         private ClientWebSocket _rgbSocket;
+        private ClientWebSocket _depthSocket;
         private CancellationTokenSource _cts;
 
         private readonly ConcurrentQueue<string> _controlQueue = new ConcurrentQueue<string>();
         private byte[] _latestRgbPacket;
+        private byte[] _latestDepthPacket;
+        private long _latestRgbTimestampMs;
 
         private bool _controlConnecting;
         private bool _rgbConnecting;
+        private bool _depthConnecting;
         private bool _controlSending;
         private bool _rgbSending;
+        private bool _depthSending;
         private bool _isQuitting;
         private float _nextControlReconnectAt;
         private float _nextRgbReconnectAt;
+        private float _nextDepthReconnectAt;
 
         public bool IsControlConnected => _controlSocket != null && _controlSocket.State == WebSocketState.Open;
         public bool IsRgbConnected => _rgbSocket != null && _rgbSocket.State == WebSocketState.Open;
+        public bool IsDepthConnected => _depthSocket != null && _depthSocket.State == WebSocketState.Open;
+        public long LatestRgbTimestampMs => _latestRgbTimestampMs;
 
         private void Awake()
         {
@@ -47,6 +57,7 @@ namespace SmartRoom.Networking
             _cts = new CancellationTokenSource();
             _nextControlReconnectAt = Time.time;
             _nextRgbReconnectAt = Time.time;
+            _nextDepthReconnectAt = Time.time;
         }
 
         private void Update()
@@ -68,6 +79,12 @@ namespace SmartRoom.Networking
                 _ = EnsureRgbConnectedAsync();
             }
 
+            if (!IsDepthConnected && Time.time >= _nextDepthReconnectAt)
+            {
+                _nextDepthReconnectAt = Time.time + reconnectDelaySeconds;
+                _ = EnsureDepthConnectedAsync();
+            }
+
             if (IsControlConnected && !_controlSending)
             {
                 _ = FlushControlQueueAsync();
@@ -76,6 +93,11 @@ namespace SmartRoom.Networking
             if (IsRgbConnected && !_rgbSending && _latestRgbPacket != null)
             {
                 _ = FlushLatestRgbAsync();
+            }
+
+            if (IsDepthConnected && !_depthSending && _latestDepthPacket != null)
+            {
+                _ = FlushLatestDepthAsync();
             }
         }
 
@@ -97,6 +119,21 @@ namespace SmartRoom.Networking
             }
 
             _latestRgbPacket = packet;
+        }
+
+        public void PublishLatestRgbTimestamp(long timestampMs)
+        {
+            _latestRgbTimestampMs = timestampMs;
+        }
+
+        public void QueueDepthPacket(byte[] packet)
+        {
+            if (packet == null || packet.Length == 0)
+            {
+                return;
+            }
+
+            _latestDepthPacket = packet;
         }
 
         private async Task EnsureControlConnectedAsync()
@@ -155,6 +192,35 @@ namespace SmartRoom.Networking
             finally
             {
                 _rgbConnecting = false;
+            }
+        }
+
+        private async Task EnsureDepthConnectedAsync()
+        {
+            if (_depthConnecting || _isQuitting)
+            {
+                return;
+            }
+
+            _depthConnecting = true;
+            try
+            {
+                transportSwitcher.RefreshActiveTransport();
+                string url = transportSwitcher.BuildWebSocketUrl(depthPath);
+
+                _depthSocket?.Dispose();
+                _depthSocket = new ClientWebSocket();
+                await _depthSocket.ConnectAsync(new Uri(url), _cts.Token);
+
+                QueueUnityLog("INFO", $"Depth websocket connected: {url}");
+            }
+            catch (Exception ex)
+            {
+                QueueUnityLog("WARNING", $"Depth websocket connect retry: {ex.Message}", stackTrace: ex.ToString());
+            }
+            finally
+            {
+                _depthConnecting = false;
             }
         }
 
@@ -217,6 +283,36 @@ namespace SmartRoom.Networking
             }
         }
 
+        private async Task FlushLatestDepthAsync()
+        {
+            if (_depthSocket == null || _depthSocket.State != WebSocketState.Open)
+            {
+                return;
+            }
+
+            byte[] packet = _latestDepthPacket;
+            if (packet == null)
+            {
+                return;
+            }
+
+            _latestDepthPacket = null;
+            _depthSending = true;
+            try
+            {
+                await _depthSocket.SendAsync(new ArraySegment<byte>(packet), WebSocketMessageType.Binary, true, _cts.Token);
+            }
+            catch (Exception ex)
+            {
+                QueueUnityLog("WARNING", $"Depth websocket send failed: {ex.Message}", stackTrace: ex.ToString());
+                TryCloseSocket(_depthSocket);
+            }
+            finally
+            {
+                _depthSending = false;
+            }
+        }
+
         private async Task ReceiveControlLoopAsync()
         {
             if (_controlSocket == null)
@@ -234,6 +330,19 @@ namespace SmartRoom.Networking
                     {
                         QueueUnityLog("WARNING", "Control websocket closed by server");
                         break;
+                    }
+
+                    if (result.MessageType == WebSocketMessageType.Text)
+                    {
+                        string message = Encoding.UTF8.GetString(buffer, 0, result.Count);
+                        try
+                        {
+                            ControlMessageReceived?.Invoke(message);
+                        }
+                        catch (Exception ex)
+                        {
+                            QueueUnityLog("WARNING", $"Control message handler failed: {ex.Message}");
+                        }
                     }
                 }
             }
@@ -316,6 +425,19 @@ namespace SmartRoom.Networking
                 }
 
                 _rgbSocket.Dispose();
+            }
+
+            if (_depthSocket != null)
+            {
+                try
+                {
+                    await _depthSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Quit", CancellationToken.None);
+                }
+                catch
+                {
+                }
+
+                _depthSocket.Dispose();
             }
 
             _cts?.Dispose();

@@ -429,6 +429,7 @@ GameObject:
   - component: {fileID: 570327734}
   - component: {fileID: 570327733}
   - component: {fileID: 570327732}
+  - component: {fileID: 570327737}
   m_Layer: 0
   m_Name: '[BuildingBlock] Camera Rig'
   m_TagString: Untagged
@@ -475,7 +476,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   _monoscopic: 0
   _sharpenType: 0
-  _enableDynamicResolution: 0
+  _enableDynamicResolution: 1
   minDynamicResolutionScale: 1
   maxDynamicResolutionScale: 1
   quest2MinDynamicResolutionScale: 0.7
@@ -597,6 +598,22 @@ Transform:
   - {fileID: 1887851517}
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &570327737
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 570327731}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 71a155ece80369d4e99bdaf5e59169b5, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Meta.XR.EnvironmentDepth::Meta.XR.EnvironmentDepth.EnvironmentDepthManager
+  _occlusionShadersMode: 2
+  _removeHands: 0
+  CustomTrackingSpace: {fileID: 0}
+  <MaskMeshFilters>k__BackingField: []
 --- !u!1 &736496065
 GameObject:
   m_ObjectHideFlags: 0
@@ -1438,6 +1455,8 @@ GameObject:
   - component: {fileID: 1313628475}
   - component: {fileID: 1313628474}
   - component: {fileID: 1313628473}
+  - component: {fileID: 1313628476}
+  - component: {fileID: 1313628477}
   m_Layer: 0
   m_Name: NetworkBootstrap
   m_TagString: Untagged
@@ -1499,8 +1518,8 @@ MonoBehaviour:
   outputWidth: 640
   outputHeight: 360
   jpegQuality: 65
-  usePcaMaxFramerate: 1
-  fallbackIntervalSeconds: 0.1
+  targetFrameRateHz: 10
+  clampToPcaMaxFramerate: 1
 --- !u!114 &1313628474
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -1533,7 +1552,48 @@ MonoBehaviour:
   transportSwitcher: {fileID: 1313628471}
   controlPath: /ws/heartbeat
   rgbPath: /ws/rgb
+  depthPath: /ws/depth
   reconnectDelaySeconds: 2
+--- !u!114 &1313628476
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1313628469}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 2f4a0c744ea349f4a2448a5acb8f54d5, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::SmartRoom.Networking.DepthStreamModule
+  manager: {fileID: 1313628475}
+  environmentDepthManager: {fileID: 570327737}
+  depthArraySliceShader: {fileID: 0}
+  targetFrameRateHz: 10
+  maxPixelsPerFrame: 19200
+  usePreprocessedDepthTexture: 0
+  flipVertical: 1
+  syncTimestampWithLatestRgb: 1
+--- !u!114 &1313628477
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1313628469}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 3a39cfb3a2563bc4daca894e2322e91b, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::SmartRoom.Networking.RaycastQueryModule
+  manager: {fileID: 1313628475}
+  depthStreamModule: {fileID: 1313628476}
+  rayCamera: {fileID: 1000850322}
+  fallbackToPhysicsRaycast: 0
+  maxDistanceMeters: 10
+  raycastLayerMask:
+    serializedVersion: 2
+    m_Bits: 4294967295
 --- !u!1 &1359161931
 GameObject:
   m_ObjectHideFlags: 0

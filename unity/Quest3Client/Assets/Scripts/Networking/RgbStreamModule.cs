@@ -12,8 +12,8 @@ namespace SmartRoom.Networking
         [SerializeField] private int outputWidth = 640;
         [SerializeField] private int outputHeight = 360;
         [SerializeField] private int jpegQuality = 65;
-        [SerializeField] private bool usePcaMaxFramerate = true;
-        [SerializeField] private float fallbackIntervalSeconds = 0.1f;
+        [SerializeField] private int targetFrameRateHz = 60;
+        [SerializeField] private bool clampToPcaMaxFramerate = true;
 
         private float _nextAt;
         private float _nextWarnAt;
@@ -38,13 +38,15 @@ namespace SmartRoom.Networking
             jpegQuality = Mathf.Clamp(jpegQuality, 1, 100);
             outputWidth = Mathf.Max(16, outputWidth);
             outputHeight = Mathf.Max(16, outputHeight);
+            targetFrameRateHz = Mathf.Clamp(targetFrameRateHz, 1, 60);
         }
 
         private void Start()
         {
             _nextAt = Time.time + ResolveInterval();
             _nextWarnAt = Time.time + 2f;
-            manager?.QueueUnityLog("INFO", $"RgbStreamModule started. interval={ResolveInterval():F3}s source={(passthroughCameraAccess != null ? "found" : "null")}");
+            int pcaMax = passthroughCameraAccess != null ? Mathf.Max(1, passthroughCameraAccess.MaxFramerate) : -1;
+            manager?.QueueUnityLog("INFO", $"RgbStreamModule started. requested_fps={Mathf.Clamp(targetFrameRateHz,1,60)}, effective_fps={ResolveTargetFps()}, pca_max={(pcaMax > 0 ? pcaMax.ToString() : "unknown")}, interval={ResolveInterval():F3}s source={(passthroughCameraAccess != null ? "found" : "null")}");
         }
 
         private void Update()
@@ -77,6 +79,7 @@ namespace SmartRoom.Networking
             }
 
             _frameId++;
+            manager.PublishLatestRgbTimestamp(timestampMs);
             manager.QueueRgbPacket(BuildPacket(_frameId, timestampMs, width, height, jpegBytes));
             _sentCount++;
 
@@ -88,14 +91,20 @@ namespace SmartRoom.Networking
 
         private float ResolveInterval()
         {
-            float interval = Mathf.Max(0.01f, fallbackIntervalSeconds);
-            if (!usePcaMaxFramerate || passthroughCameraAccess == null)
+            int fps = ResolveTargetFps();
+            return Mathf.Clamp(1f / fps, 1f / 120f, 1f);
+        }
+
+        private int ResolveTargetFps()
+        {
+            int fps = Mathf.Clamp(targetFrameRateHz, 1, 60);
+            if (!clampToPcaMaxFramerate || passthroughCameraAccess == null)
             {
-                return interval;
+                return fps;
             }
 
-            int fps = Mathf.Max(1, passthroughCameraAccess.MaxFramerate);
-            return Mathf.Clamp(1f / fps, 1f / 120f, 1f);
+            int pcaMax = Mathf.Clamp(passthroughCameraAccess.MaxFramerate, 1, 120);
+            return Mathf.Min(fps, pcaMax);
         }
 
         private bool TryGetJpegFrame(out byte[] jpegBytes, out int width, out int height, out long timestampMs)
