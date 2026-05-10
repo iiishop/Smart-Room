@@ -18,6 +18,19 @@ backend/.venv/
 Thumbs.db
 .idea/
 .vscode/
+.vs/
+
+# Logs
+*.log
+
+# Python distribution
+*.egg-info/
+dist/
+*.whl
+.eggs/
+
+# Environment files (keep .env.example)
+.env
 
 # Build artifacts and archives
 *.zip
