@@ -1,0 +1,20 @@
+{
+  "pair_index": 73,
+  "matched_timestamp_ms": 1771537385710,
+  "timestamp_delta_ms": 0,
+  "rgb": {
+    "frame_id": 1516,
+    "timestamp_ms": 1771537385710,
+    "width": 640,
+    "height": 360
+  },
+  "depth": {
+    "frame_id": 1516,
+    "timestamp_ms": 1771537385710,
+    "width": 106,
+    "height": 106,
+    "row_stride": 424,
+    "pixel_stride": 4,
+    "payload_bytes": 44944
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "pair_dir": "D:\\FromGithub\\UCL\\CASA0022\\Smart Room\\backend\\calib_capture\\pair_000120",
+  "points_used": 10,
+  "inliers": 5,
+  "rgb_size": [
+    640,
+    360
+  ],
+  "depth_size": [
+    106,
+    106
+  ],
+  "valid_depth_to_rgb_ratio": 0.39791740833036665,
+  "valid_rgb_to_depth_ratio": 0.7850086805555555,
+  "lut_path": "D:\\FromGithub\\UCL\\CASA0022\\Smart Room\\backend\\calib_capture\\manual_plane_lut.npz"
+}

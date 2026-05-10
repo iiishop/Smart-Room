@@ -1,0 +1,24 @@
+{
+  "capture_dir": "D:\\FromGithub\\UCL\\CASA0022\\Smart Room\\backend\\calib_capture",
+  "samples_used": 80,
+  "score": 2.3511561804702765,
+  "params_rgb_to_depth": {
+    "a": 0.08251150657857532,
+    "b": 0.014239820303423793,
+    "c": 34.84502362925918,
+    "d": 0.0035363381504010995,
+    "e": 0.03,
+    "f": 63.071861732020025
+  },
+  "rgb_size": [
+    640,
+    360
+  ],
+  "depth_size": [
+    106,
+    106
+  ],
+  "valid_rgb_to_depth_ratio": 1.0,
+  "valid_depth_to_rgb_ratio": 0.056069775720897115,
+  "lut_path": "D:\\FromGithub\\UCL\\CASA0022\\Smart Room\\backend\\calib_capture\\rgb_depth_lut.npz"
+}

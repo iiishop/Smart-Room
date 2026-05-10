@@ -1,0 +1,14 @@
+{
+  "capture_dir": "D:\\FromGithub\\UCL\\CASA0022\\Smart Room\\backend\\calib_capture",
+  "samples_used": 120,
+  "score": 16.773100974856977,
+  "params": {
+    "sx": 2.0,
+    "sy": 1.5,
+    "tx": 269.6878206528711,
+    "ty": 183.22477823822044,
+    "shx": -0.06990935442235395,
+    "shy": 0.23460014626962544
+  },
+  "lut_path": "D:\\FromGithub\\UCL\\CASA0022\\Smart Room\\backend\\calib_capture\\depth_to_rgb_lut.npz"
+}
