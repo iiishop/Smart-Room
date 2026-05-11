@@ -1,18 +1,37 @@
 from __future__ import annotations
 
-import base64
 import asyncio
+import base64
 import json
 import struct
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from threading import Lock
 
 from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 
 from log_manager import add_log, add_python_log, list_logs
+from wifi_module import WifiCollector, create_router
 
 
-app = FastAPI(title="Smart Room Receiver Backend")
+_wifi_collector: WifiCollector | None = None
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    global _wifi_collector
+    _wifi_collector = WifiCollector()
+    await _wifi_collector.start()
+    add_python_log("info", "WiFi collector started on lifespan startup")
+    yield
+    if _wifi_collector:
+        await _wifi_collector.stop()
+        add_python_log("info", "WiFi collector stopped on lifespan shutdown")
+
+
+app = FastAPI(title="Smart Room Receiver Backend", lifespan=_lifespan)
+
+app.include_router(create_router(lambda: _wifi_collector))
 
 _lock = Lock()
 _state = {
