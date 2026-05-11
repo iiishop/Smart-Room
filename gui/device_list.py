@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import tkinter as tk
-from tkinter import ttk
+from tkinter import messagebox, ttk
 from typing import Any
 
 
@@ -28,9 +28,10 @@ class DeviceListFrame(tk.Frame):
         "unknown": "UNK",
     }
 
-    def __init__(self, parent: tk.Widget, device_manager: Any):
+    def __init__(self, parent: tk.Widget, device_manager: Any, io_loop: asyncio.AbstractEventLoop | None = None):
         super().__init__(parent)
         self._device_manager = device_manager
+        self._io_loop = io_loop
         self._all_devices: list[Any] = []
         self._selected_entity_id: str | None = None
 
@@ -220,15 +221,38 @@ class DeviceListFrame(tk.Frame):
         rest_method = getattr(rest, method_name, None) if rest is not None else None
         if callable(rest_method):
             self._call_method_threadsafe(rest_method, entity_id, *args)
+            return
+
+        messagebox.showinfo(
+            "Not implemented",
+            f"Control '{method_name}' is not available yet for {entity_id}.",
+        )
 
     def _call_method_threadsafe(self, method: Any, *args: Any) -> None:
         def runner() -> None:
             try:
                 result = method(*args)
                 if asyncio.iscoroutine(result):
-                    asyncio.run(result)
-            except Exception:
-                pass
+                    if self._io_loop is None:
+                        self.after(
+                            0,
+                            lambda: messagebox.showwarning(
+                                "Missing event loop",
+                                "Async control needs a shared event loop and is not wired yet.",
+                            ),
+                        )
+                        result.close()
+                        return
+                    future = asyncio.run_coroutine_threadsafe(result, self._io_loop)
+                    future.result(timeout=10)
+            except Exception as exc:
+                self.after(
+                    0,
+                    lambda: messagebox.showerror(
+                        "Control failed",
+                        f"Failed to run control action: {exc}",
+                    ),
+                )
 
         threading.Thread(target=runner, daemon=True).start()
 

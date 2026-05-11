@@ -51,7 +51,8 @@ class MainWindow:
         container.grid_columnconfigure(0, weight=1)
         container.grid_rowconfigure(0, weight=1)
 
-        self.device_list_frame = DeviceListFrame(container, self.device_manager)
+        io_loop = self._resolve_io_loop()
+        self.device_list_frame = DeviceListFrame(container, self.device_manager, io_loop=io_loop)
         self.device_list_frame.grid(row=0, column=0, sticky="nsew")
 
         self.status_var = tk.StringVar(value="Connecting...")
@@ -96,3 +97,12 @@ class MainWindow:
 
     def _on_close(self) -> None:
         self.root.destroy()
+
+    def _resolve_io_loop(self):
+        conn_mgr = getattr(self.device_manager, "connection_mgr", None)
+        ws = getattr(conn_mgr, "ws", None) if conn_mgr is not None else None
+        for attr in ("loop", "_loop"):
+            loop = getattr(ws, attr, None)
+            if loop is not None:
+                return loop
+        return None
