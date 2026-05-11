@@ -53,6 +53,8 @@ class HAWebSocketClient:
             return True
 
         try:
+            if self._session and not self._session.closed:
+                await self._session.close()
             self._session = aiohttp.ClientSession()
             self._ws = await self._session.ws_connect(
                 f"{self._config.ws_url}/api/websocket",
@@ -60,7 +62,7 @@ class HAWebSocketClient:
             )
 
             auth_msg = await self._ws.receive_json()
-            if auth_msg.get("type") != "auth_required":
+            if auth_msg is None or auth_msg.get("type") != "auth_required":
                 logger.error(f"Unexpected auth message: {auth_msg}")
                 return False
 
@@ -194,7 +196,7 @@ class HAWebSocketClient:
     async def _send_command(self, message: JsonDict) -> JsonDict:
         msg_id = message.get("id")
         if msg_id is not None:
-            future: asyncio.Future[JsonDict] = asyncio.get_event_loop().create_future()
+            future: asyncio.Future[JsonDict] = asyncio.get_running_loop().create_future()
             self._pending[msg_id] = future
 
         await self._send_queue.put(message)
@@ -238,7 +240,7 @@ class HAWebSocketClient:
                     )
                 except asyncio.TimeoutError:
                     continue
-                except aiohttp.ClientConnectionError as e:
+                except (aiohttp.ClientConnectionError, aiohttp.WebSocketError) as e:
                     logger.warning(f"WebSocket read error: {e}")
                     self._connected = False
                     self._authenticated = False

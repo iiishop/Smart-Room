@@ -55,12 +55,12 @@ class ConnectionManager:
         self._shutting_down = False
         self._stop_reconnect.clear()
 
+        self._start_reconnect_loop()
+
         success = await self._connect_ws()
 
         if success:
             self._set_online(True)
-        else:
-            self._start_reconnect_loop()
 
     async def stop(self):
         self._shutting_down = True
