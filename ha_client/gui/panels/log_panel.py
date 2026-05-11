@@ -19,6 +19,17 @@ LOG_LEVEL_COLORS: dict[str, str] = {
 }
 
 
+class LogPanelHandler(logging.Handler):
+    def __init__(self, log_panel: LogPanel) -> None:
+        super().__init__()
+        self._log_panel = log_panel
+
+    def emit(self, record: logging.LogRecord) -> None:
+        msg = self.format(record)
+        level = record.levelname
+        self._log_panel._append(level, msg)
+
+
 class LogPanel(ttk.Frame):
     def __init__(
         self,

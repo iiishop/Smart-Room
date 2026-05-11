@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-import signal
+import os
 import sys
 
 from ha_client.config import load_config
@@ -14,7 +14,12 @@ def main() -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-    config = load_config("config.yaml")
+    config_path = (
+        sys.argv[sys.argv.index("--config") + 1]
+        if "--config" in sys.argv
+        else os.environ.get("HA_CONFIG", "config.yaml")
+    )
+    config = load_config(config_path)
     app = HADebugApp(config)
     app.run()
 

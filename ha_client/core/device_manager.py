@@ -12,10 +12,17 @@ logger = logging.getLogger(__name__)
 
 
 class DeviceManager:
-    def __init__(self, config: HAConfig, event_bus: EventBus, ha_client: HAClient) -> None:
+    def __init__(
+        self,
+        config: HAConfig,
+        event_bus: EventBus,
+        ha_client: HAClient,
+        loop: asyncio.AbstractEventLoop,
+    ) -> None:
         self._config = config
         self._event_bus = event_bus
         self._ha_client = ha_client
+        self._loop = loop
         self._devices: dict[str, dict[str, Any]] = {}
         self._domains: dict[str, list[str]] = {}
         self._initialized: bool = False
@@ -94,7 +101,7 @@ class DeviceManager:
             self._domains[domain].sort()
 
     def _on_connected(self, **data: Any) -> None:
-        asyncio.ensure_future(self.refresh())
+        self._loop.create_task(self.refresh())
 
     def _on_disconnected(self, **data: Any) -> None:
         self._initialized = False

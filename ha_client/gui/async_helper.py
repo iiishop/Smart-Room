@@ -59,11 +59,4 @@ class AsyncTkHelper:
 
     def _run_loop(self) -> None:
         asyncio.set_event_loop(self.loop)
-        self._loop.call_soon(self._poll_tk)
         self._loop.run_forever()
-
-    def _poll_tk(self) -> None:
-        if not self._running:
-            self.loop.stop()
-            return
-        self.loop.call_later(self._interval, self._poll_tk)

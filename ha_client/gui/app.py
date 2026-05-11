@@ -14,7 +14,7 @@ from ..core.ha_api import HAClient
 from .async_helper import AsyncTkHelper
 from .panels.control_panel import ControlPanel
 from .panels.device_list import DeviceListPanel
-from .panels.log_panel import LogPanel
+from .panels.log_panel import LogPanel, LogPanelHandler
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,6 @@ class HADebugApp:
 
         self._event_bus = EventBus()
         self._ha_client = HAClient(config, self._event_bus)
-        self._device_manager = DeviceManager(config, self._event_bus, self._ha_client)
         self._device_controller = DeviceController(config, self._event_bus, self._ha_client)
 
         self._root = tk.Tk()
@@ -35,6 +34,10 @@ class HADebugApp:
         self._root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self._async_helper = AsyncTkHelper(self._root)
+
+        self._device_manager = DeviceManager(
+            config, self._event_bus, self._ha_client, self._async_helper.loop
+        )
 
         self._build_ui()
         self._bind_events()
@@ -79,6 +82,8 @@ class HADebugApp:
         )
         self._log_panel.pack(fill=tk.BOTH, expand=True, padx=4, pady=(0, 4))
 
+        self._setup_logging_handler()
+
         self._log_panel.append_info("Application started. Connecting to Home Assistant...")
 
         self._status_frame = ttk.Frame(self._root, relief=tk.SUNKEN, padding=(8, 2))
@@ -106,6 +111,15 @@ class HADebugApp:
 
         self._ha_url_var = tk.StringVar(value=self._config.url)
         ttk.Label(self._status_frame, textvariable=self._ha_url_var).pack(side=tk.LEFT)
+
+    def _setup_logging_handler(self) -> None:
+        handler = LogPanelHandler(self._log_panel)
+        handler.setLevel(logging.DEBUG)
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", "%H:%M:%S")
+        )
+        root_logger = logging.getLogger()
+        root_logger.addHandler(handler)
 
     def _bind_events(self) -> None:
         self._event_bus.subscribe_sync(EventType.CONNECTED, self._update_status_connected)
