@@ -8,6 +8,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 import numpy as np
 import uvicorn
@@ -220,17 +221,14 @@ class DashboardWindow(QMainWindow):
         self.load_alignment_lut()
 
     def load_alignment_lut(self) -> None:
+        base_dir = Path(__file__).resolve().parents[1]
         candidates = [
-            os.path.join(
-                os.path.dirname(__file__), "calib_capture", "manual_plane_lut.npz"
-            ),
-            os.path.join(
-                os.path.dirname(__file__), "calib_capture", "rgb_depth_lut.npz"
-            ),
+            base_dir / "calib_capture" / "manual_plane_lut.npz",
+            base_dir / "calib_capture" / "rgb_depth_lut.npz",
         ]
 
         for path in candidates:
-            if not os.path.exists(path):
+            if not path.exists():
                 continue
             try:
                 data = np.load(path)
