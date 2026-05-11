@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from abc import ABC
 from dataclasses import dataclass, field
 
-from ha_client.models.entity import EntityDomain
+from ha_client.models.entity import EntityDomain, EntityState
 
 
 @dataclass
-class Device(ABC):
+class Device:
     entity_id: str
     name: str
     domain: EntityDomain = EntityDomain.UNKNOWN
@@ -22,6 +21,10 @@ class Device(ABC):
     @property
     def is_available(self) -> bool:
         return self.state != "unavailable"
+
+    def update_state(self, entity_state: EntityState) -> None:
+        self.state = entity_state.state
+        self.attributes = dict(entity_state.attributes)
 
 
 @dataclass
@@ -65,10 +68,7 @@ class Sensor(Device):
             return None
 
 
-def create_device(entity_state) -> Device:
-    from ha_client.models.entity import EntityDomain, EntityState
-
-    entity_state: EntityState = entity_state
+def create_device(entity_state: EntityState) -> Device:
     domain = entity_state.domain
     attrs = entity_state.attributes
     features = set(attrs.get("supported_features", []))

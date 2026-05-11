@@ -6,7 +6,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from ha_client.api.exceptions import HAError
-from ha_client.core.event_bus import EventType
+from ha_client.core.event_bus import EventBus, EventType
 
 if TYPE_CHECKING:
     from ha_client.core.device_manager import DeviceManager
@@ -17,9 +17,9 @@ logger = logging.getLogger(__name__)
 class DeviceController:
     """Device control interface, wraps REST service calls via DeviceManager."""
 
-    def __init__(self, device_manager: DeviceManager):
+    def __init__(self, device_manager: DeviceManager, event_bus: EventBus):
         self._device_manager = device_manager
-        self._event_bus = device_manager.event_bus
+        self._event_bus = event_bus
 
     @property
     def _rest(self):
@@ -69,7 +69,7 @@ class DeviceController:
         b = max(0, min(255, brightness))
         try:
             result = await self._rest.call_service(
-                domain, "turn_on", entity_id, {"brightness": b}
+                domain, "turn_on", entity_id=entity_id, service_data={"brightness": b}
             )
             self._event_bus.emit(
                 EventType.STATE_CHANGED,
@@ -88,8 +88,8 @@ class DeviceController:
             result = await self._rest.call_service(
                 domain,
                 "turn_on",
-                entity_id,
-                {"rgb_color": list(rgb)},
+                entity_id=entity_id,
+                service_data={"rgb_color": list(rgb)},
             )
             self._event_bus.emit(
                 EventType.STATE_CHANGED,
@@ -111,7 +111,7 @@ class DeviceController:
     ) -> bool:
         try:
             result = await self._rest.call_service(
-                domain, service, entity_id, data
+                domain, service, entity_id=entity_id, service_data=data
             )
             self._event_bus.emit(
                 EventType.STATE_CHANGED,
