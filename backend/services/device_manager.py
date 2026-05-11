@@ -4,8 +4,7 @@ import asyncio
 import logging
 from collections.abc import Callable, Awaitable
 
-from ha_client.api.exceptions import HAConnectionError
-from ha_client.models.entity import EntityState, EntityDomain
+from ha_client.models.entity import EntityState
 
 logger = logging.getLogger(__name__)
 
@@ -100,43 +99,31 @@ class DeviceManager:
         except ValueError:
             pass
 
-    async def turn_on(self, entity_id: str, brightness: int = None) -> None:
+    async def call_service(
+        self,
+        entity_id: str,
+        service: str,
+        service_data: dict | None = None,
+    ) -> None:
         domain = self._extract_domain(entity_id)
-        service_data = {}
-        if brightness is not None:
-            service_data["brightness"] = brightness
-        if self._ws_client:
-            await self._ws_client.call_service(
-                domain=domain,
-                service="turn_on",
-                target={"entity_id": entity_id},
-                service_data=service_data or None,
-            )
+        if not self._ws_client:
+            raise RuntimeError("ws_client is required for call_service")
 
-    async def turn_off(self, entity_id: str) -> None:
-        domain = self._extract_domain(entity_id)
-        if self._ws_client:
-            await self._ws_client.call_service(
-                domain=domain,
-                service="turn_off",
-                target={"entity_id": entity_id},
-            )
+        await self._ws_client.call_service(
+            domain=domain,
+            service=service,
+            target={"entity_id": entity_id},
+            service_data=service_data,
+        )
 
-    async def set_brightness(self, entity_id: str, brightness: int) -> None:
-        domain = self._extract_domain(entity_id)
-        if self._ws_client:
-            await self._ws_client.call_service(
-                domain=domain,
-                service="turn_on",
-                target={"entity_id": entity_id},
-                service_data={"brightness": brightness},
-            )
+    async def get_services(self) -> dict:
+        if self._ws_client and hasattr(self._ws_client, "get_services"):
+            services = await self._ws_client.get_services()
+            if isinstance(services, dict) and services:
+                return services
 
-    async def toggle(self, entity_id: str) -> None:
-        domain = self._extract_domain(entity_id)
-        if self._ws_client:
-            await self._ws_client.call_service(
-                domain=domain,
-                service="toggle",
-                target={"entity_id": entity_id},
-            )
+        if self._rest_client and hasattr(self._rest_client, "get_services"):
+            services = await self._rest_client.get_services()
+            return services if isinstance(services, dict) else {}
+
+        return {}
