@@ -9,6 +9,8 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import Any
 
+from gui.control_panel import ControlPanel
+
 logger = logging.getLogger(__name__)
 
 
@@ -98,6 +100,7 @@ class DeviceListFrame(tk.Frame):
             self._tree.tag_configure(tag, **style)
 
         self._tree.bind("<<TreeviewSelect>>", self._on_device_selected)
+        self._tree.bind("<Double-1>", self._on_device_double_click)
 
     def _build_controls(self) -> None:
         controls = ttk.Frame(self)
@@ -144,6 +147,28 @@ class DeviceListFrame(tk.Frame):
 
         self._selected_entity_id = entity_id
         self._set_control_enabled(True)
+
+    def _on_device_double_click(self, _event: tk.Event) -> None:
+        entity_id = self._selected_entity_id
+        if entity_id is None:
+            return
+
+        device = None
+        for d in self._all_devices:
+            if str(getattr(d, "entity_id", "")) == entity_id:
+                device = d
+                break
+
+        if device is None:
+            return
+
+        ControlPanel(
+            self.winfo_toplevel(),
+            entity_id=entity_id,
+            device=device,
+            device_manager=self._device_manager,
+            io_loop=self._io_loop,
+        )
 
     def _filter_and_refresh(self) -> None:
         domain_filter = self._domain_var.get().strip().lower()
@@ -207,7 +232,26 @@ class DeviceListFrame(tk.Frame):
         self._invoke_control("toggle")
 
     def _on_dimmer(self) -> None:
-        self._invoke_control("set_brightness", 128)
+        entity_id = self._selected_entity_id
+        if entity_id is None:
+            return
+
+        device = None
+        for d in self._all_devices:
+            if str(getattr(d, "entity_id", "")) == entity_id:
+                device = d
+                break
+
+        if device is None:
+            return
+
+        ControlPanel(
+            self.winfo_toplevel(),
+            entity_id=entity_id,
+            device=device,
+            device_manager=self._device_manager,
+            io_loop=self._io_loop,
+        )
 
     def _invoke_control(self, method_name: str, *args: Any) -> None:
         entity_id = self._selected_entity_id
