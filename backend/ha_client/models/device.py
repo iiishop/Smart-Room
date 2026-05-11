@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from abc import ABC
 from dataclasses import dataclass, field
 
-from ha_client.models.entity import EntityDomain
+from ha_client.models.entity import EntityDomain, EntityState
 
 
 @dataclass
-class Device(ABC):
+class Device:
     entity_id: str
     name: str
     domain: EntityDomain = EntityDomain.UNKNOWN
@@ -22,6 +21,10 @@ class Device(ABC):
     @property
     def is_available(self) -> bool:
         return self.state != "unavailable"
+
+    def update_state(self, entity_state: EntityState) -> None:
+        self.state = entity_state.state
+        self.attributes = dict(entity_state.attributes)
 
 
 @dataclass
@@ -63,3 +66,41 @@ class Sensor(Device):
             return float(self.state)
         except (ValueError, TypeError):
             return None
+
+
+def create_device(entity_state: EntityState) -> Device:
+    domain = entity_state.domain
+    common = {
+        "entity_id": entity_state.entity_id,
+        "name": entity_state.friendly_name,
+        "domain": domain,
+        "state": entity_state.state,
+        "attributes": dict(entity_state.attributes),
+    }
+    attrs = entity_state.attributes
+    if domain == EntityDomain.LIGHT:
+        extra: dict = {}
+        if "brightness" in attrs:
+            extra["brightness"] = int(attrs["brightness"])
+        if "color_temp" in attrs:
+            extra["color_temp"] = int(attrs["color_temp"])
+        if "rgb_color" in attrs and len(attrs["rgb_color"]) == 3:
+            extra["rgb_color"] = tuple(int(v) for v in attrs["rgb_color"])
+        if "hs_color" in attrs and len(attrs["hs_color"]) == 2:
+            extra["hs_color"] = tuple(float(v) for v in attrs["hs_color"])
+        if "min_mireds" in attrs:
+            extra["min_mireds"] = int(attrs["min_mireds"])
+        if "max_mireds" in attrs:
+            extra["max_mireds"] = int(attrs["max_mireds"])
+        return Light(**{**common, **extra})
+    elif domain == EntityDomain.SWITCH:
+        return Switch(**common)
+    elif domain == EntityDomain.SENSOR:
+        extra = {}
+        if "unit_of_measurement" in attrs:
+            extra["unit_of_measurement"] = attrs["unit_of_measurement"]
+        if "device_class" in attrs:
+            extra["device_class"] = attrs["device_class"]
+        return Sensor(**{**common, **extra})
+    else:
+        return Device(**common)
