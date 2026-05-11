@@ -114,6 +114,45 @@ class HARestClient:
         except Exception as e:
             raise HAConnectionError(f"Unexpected error: {e}") from e
 
+    async def get_services(self) -> dict[str, dict[str, Any]]:
+        try:
+            client = self._get_client()
+            resp = await client.get("/api/services")
+            if resp.status_code == 401 or resp.status_code == 403:
+                raise HAAuthError(f"Authentication failed: {resp.status_code}")
+            if resp.status_code != 200:
+                raise HAResponseError(
+                    f"Failed to get services: {resp.status_code} {resp.text}"
+                )
+
+            raw = resp.json()
+            if isinstance(raw, dict):
+                return {
+                    domain: services if isinstance(services, dict) else {}
+                    for domain, services in raw.items()
+                }
+
+            if isinstance(raw, list):
+                normalized: dict[str, dict[str, Any]] = {}
+                for item in raw:
+                    if not isinstance(item, dict):
+                        continue
+                    domain = item.get("domain")
+                    services = item.get("services", {})
+                    if isinstance(domain, str):
+                        normalized[domain] = services if isinstance(services, dict) else {}
+                return normalized
+
+            return {}
+        except httpx.TimeoutException as e:
+            raise HAConnectionError(f"Request timed out: {e}") from e
+        except httpx.NetworkError as e:
+            raise HAConnectionError(f"Network error: {e}") from e
+        except (HAConnectionError, HAAuthError, HAResponseError):
+            raise
+        except Exception as e:
+            raise HAConnectionError(f"Unexpected error: {e}") from e
+
     async def toggle(self, entity_id: str) -> bool:
         domain = entity_id.split(".")[0]
         return await self.call_service(domain, "toggle", entity_id=entity_id)

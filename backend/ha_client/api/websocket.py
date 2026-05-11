@@ -193,6 +193,21 @@ class HAWebSocketClient:
         except Exception:
             return False
 
+    async def get_services(self) -> dict:
+        try:
+            result = await self._send_command({
+                "id": self._next_id(),
+                "type": "get_services",
+            })
+        except Exception:
+            return {}
+
+        if not result.get("success", False):
+            return {}
+
+        services = result.get("result")
+        return services if isinstance(services, dict) else {}
+
     async def _send_command(self, message: JsonDict) -> JsonDict:
         msg_id = message.get("id")
         if msg_id is not None:
