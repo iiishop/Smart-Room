@@ -31,7 +31,7 @@ API_BASE = "http://127.0.0.1:8000"
 
 
 def start_server() -> None:
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, log_level="info")
+    uvicorn.run("quest3server.main:app", host="0.0.0.0", port=8000, log_level="info")
 
 
 def fetch_status() -> dict:
@@ -291,13 +291,13 @@ class DashboardWindow(QMainWindow):
                 f"Connection Mode: {payload.get('connection_mode', '-')}"
             )
             self.time_label.setText(
-                f"Last Seen (UTC): {data.get('last_seen_utc', '-')}"
+                f"Last Seen (UTC): {data.get('last_seen_utc', '-') }"
             )
             self.rgb_info_label.setText(
-                f"RGB Meta: frame={data.get('last_rgb_frame_id', 0)} size={data.get('last_rgb_size', '-')}"
+                f"RGB Meta: frame={data.get('last_rgb_frame_id', 0)} size={data.get('last_rgb_size', '-') }"
             )
             self.depth_info_label.setText(
-                f"Depth Meta: frame={data.get('last_depth_frame_id', 0)} size={data.get('last_depth_size', '-')}"
+                f"Depth Meta: frame={data.get('last_depth_frame_id', 0)} size={data.get('last_depth_size', '-') }"
             )
         except urllib.error.URLError:
             self.status_label.setText("Backend: disconnected")
@@ -970,7 +970,6 @@ def main() -> int:
     server_thread = threading.Thread(target=start_server, daemon=True)
     server_thread.start()
 
-    # Give server a short warm-up so dashboard doesn't start with immediate errors.
     time.sleep(0.6)
 
     app = QApplication([])

@@ -9,7 +9,7 @@ from threading import Lock
 
 from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 
-from log_manager import add_log, add_python_log, list_logs
+from .log_manager import add_log, add_python_log, list_logs
 
 
 app = FastAPI(title="Smart Room Receiver Backend")
@@ -431,4 +431,4 @@ async def _broadcast_heartbeat_control(payload: dict) -> int:
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("quest3server.main:app", host="0.0.0.0", port=8000, reload=True)
