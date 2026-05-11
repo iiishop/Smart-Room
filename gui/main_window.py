@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import tkinter as tk
+from datetime import datetime, timezone
 from tkinter import messagebox, ttk
 from typing import Any
 
 from ha_client.core.event_bus import EventType
 
 from gui.device_list import DeviceListFrame
+from gui.status_bar import StatusBar
 
 
 class MainWindow:
@@ -55,15 +57,8 @@ class MainWindow:
         self.device_list_frame = DeviceListFrame(container, self.device_manager, io_loop=io_loop)
         self.device_list_frame.grid(row=0, column=0, sticky="nsew")
 
-        self.status_var = tk.StringVar(value="Connecting...")
-        status_bar = ttk.Label(
-            container,
-            textvariable=self.status_var,
-            relief=tk.SUNKEN,
-            anchor="w",
-            padding=(8, 4),
-        )
-        status_bar.grid(row=1, column=0, sticky="ew")
+        self.status_bar = StatusBar(container)
+        self.status_bar.grid(row=1, column=0, sticky="ew")
 
     def _bind_device_events(self) -> None:
         event_bus = getattr(self.device_manager, "event_bus", None)
@@ -84,13 +79,14 @@ class MainWindow:
         devices_map = getattr(self.device_manager, "devices", {})
         devices = list(devices_map.values()) if isinstance(devices_map, dict) else list(devices_map)
         self.device_list_frame.refresh(devices)
-        self.status_var.set(f"Ready - {len(devices)} devices")
+        self.status_bar.set_device_count(len(devices))
+        self.status_bar.set_last_update(datetime.now(timezone.utc).isoformat())
 
     def _on_connect(self) -> None:
-        self.status_var.set("Connecting...")
+        self.status_bar.set_connection_status("connecting")
 
     def _on_disconnect(self) -> None:
-        self.status_var.set("Disconnected")
+        self.status_bar.set_connection_status("disconnected")
 
     def _on_edit_config(self) -> None:
         messagebox.showinfo("Config", "Config editor is not implemented yet.")
