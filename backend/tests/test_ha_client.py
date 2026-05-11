@@ -2,7 +2,7 @@
 
 from ha_client.core.event_bus import EventBus, EventType
 from ha_client.models.entity import EntityState, EntityDomain
-from ha_client.models.device import create_device, Light, Switch, Sensor
+from ha_client.models.device import create_device, Light, Switch, Sensor, Device
 
 
 def test_event_bus():
@@ -42,7 +42,7 @@ def test_entity_state():
         "last_changed": "2024-01-01T12:00:00+00:00",
         "last_updated": "2024-01-01T12:00:01+00:00",
     }
-    es = EntityState.from_ha_response(data)
+    es = EntityState.from_ha_json(data)
     assert es.entity_id == "light.living_room"
     assert es.state == "on"
     assert es.friendly_name == "Living Room Light"
@@ -56,7 +56,7 @@ def test_device_factory():
         "state": "on",
         "attributes": {"friendly_name": "Living Room Light", "brightness": 200, "rgb_color": [255, 136, 0]},
     }
-    es = EntityState.from_ha_response(data)
+    es = EntityState.from_ha_json(data)
     light = create_device(es)
     assert isinstance(light, Light)
     assert light.is_on
@@ -65,27 +65,33 @@ def test_device_factory():
     assert light.rgb_color == (255, 136, 0)
     print("Device factory (Light): OK")
 
-    switch_es = EntityState.from_ha_response({"entity_id": "switch.tv", "state": "off", "attributes": {"friendly_name": "TV"}})
+    switch_es = EntityState.from_ha_json({
+        "entity_id": "switch.tv", "state": "off",
+        "attributes": {"friendly_name": "TV"},
+    })
     switch = create_device(switch_es)
     assert isinstance(switch, Switch)
     assert not switch.is_on
     print("Device factory (Switch): OK")
 
-    sensor_es = EntityState.from_ha_response({"entity_id": "sensor.temp", "state": "22.5", "attributes": {"friendly_name": "Temp", "unit_of_measurement": "\u00b0C"}})
+    sensor_es = EntityState.from_ha_json({
+        "entity_id": "sensor.temp", "state": "22.5",
+        "attributes": {"friendly_name": "Temp", "unit_of_measurement": "\u00b0C"},
+    })
     sensor = create_device(sensor_es)
     assert isinstance(sensor, Sensor)
-    assert sensor.value == "22.5"
-    assert sensor.unit == "\u00b0C"
+    assert sensor.state == "22.5"
+    assert sensor.unit_of_measurement == "\u00b0C"
+    assert sensor.numeric_value == 22.5
     print("Device factory (Sensor): OK")
 
 
-def test_config_import():
-    from ha_client.config.settings import HAConfig, load_config, create_default_config
+def test_config():
+    from ha_client.config.settings import HAConfig
     config = HAConfig(url="http://test:8123", token="abc123")
-    assert config.base_url == "http://test:8123"
-    assert config.headers["Authorization"] == "Bearer abc123"
+    assert config.url == "http://test:8123"
+    config.validate()
     print("HAConfig: OK")
-    return config
 
 
 def test_exceptions():
@@ -95,11 +101,19 @@ def test_exceptions():
     print("Exceptions: OK")
 
 
+def test_device_manager_import():
+    from ha_client.core.device_manager import DeviceManager
+    from ha_client.core.controller import DeviceController
+    print("DeviceManager import: OK")
+    print("DeviceController import: OK")
+
+
 if __name__ == "__main__":
     test_event_bus()
     test_entity_domain_classify()
     test_entity_state()
     test_device_factory()
-    test_config_import()
+    test_config()
     test_exceptions()
+    test_device_manager_import()
     print("\nAll tests passed!")

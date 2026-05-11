@@ -18,15 +18,19 @@ logger = logging.getLogger(__name__)
 class DeviceManager:
     """Maintains device registry, manages device discovery and state cache."""
 
-    def __init__(self, connection_mgr: ConnectionManager, event_bus: EventBus):
+    def __init__(self, connection_mgr: ConnectionManager):
         self._connection_mgr = connection_mgr
-        self._event_bus = event_bus
+        self._event_bus = EventBus()
         self._devices: dict[str, Device] = {}
         self._sync_active: bool = False
 
     @property
     def connection_mgr(self) -> ConnectionManager:
         return self._connection_mgr
+
+    @property
+    def event_bus(self) -> EventBus:
+        return self._event_bus
 
     @property
     def devices(self) -> dict[str, Device]:
@@ -55,13 +59,13 @@ class DeviceManager:
             return
 
         self._sync_active = True
-        ws = self._connection_mgr.ws
 
         async def on_state_change(entity_state: EntityState) -> None:
             await self._handle_state_change(entity_state)
 
-        ws.on_state_change(on_state_change)
+        self._connection_mgr.on_state_change(on_state_change)
 
+        ws = self._connection_mgr.ws
         if ws.connected:
             await ws.subscribe_state_changes()
 
@@ -69,12 +73,12 @@ class DeviceManager:
 
     async def _handle_state_change(self, entity_state: EntityState) -> None:
         entity_id = entity_state.entity_id
+        device = create_device(entity_state)
 
-        if entity_id in self._devices:
-            self._devices[entity_id].update_state(entity_state)
-        else:
-            device = create_device(entity_state)
-            self._devices[entity_id] = device
+        is_new = entity_id not in self._devices
+        self._devices[entity_id] = device
+
+        if is_new:
             self._event_bus.emit(
                 EventType.DEVICE_ADDED, entity_id=entity_id, device=device
             )
@@ -83,9 +87,8 @@ class DeviceManager:
         self._event_bus.emit(
             EventType.STATE_CHANGED,
             entity_id=entity_id,
-            old_state=None,
             new_state=entity_state.state,
-            device=self._devices[entity_id],
+            device=device,
         )
 
     async def stop(self) -> None:

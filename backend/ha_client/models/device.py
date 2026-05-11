@@ -1,145 +1,115 @@
-"""Device models for Home Assistant entities."""
+from __future__ import annotations
 
+from abc import ABC
 from dataclasses import dataclass, field
 
-from ha_client.models.entity import EntityDomain, EntityState
+from ha_client.models.entity import EntityDomain
 
 
-class Device:
-    """Base class for all Home Assistant devices."""
-
-    def __init__(self, entity_state: EntityState):
-        self._state = entity_state
-        self.supported_features: set[int] = set()
-
-    @property
-    def entity_id(self) -> str:
-        return self._state.entity_id
-
-    @property
-    def name(self) -> str:
-        return self._state.friendly_name
-
-    @property
-    def domain(self) -> EntityDomain:
-        return self._state.domain
-
-    @property
-    def state(self) -> str:
-        return self._state.state
-
-    @property
-    def attributes(self) -> dict:
-        return self._state.attributes
+@dataclass
+class Device(ABC):
+    entity_id: str
+    name: str
+    domain: EntityDomain = EntityDomain.UNKNOWN
+    state: str = "unknown"
+    supported_features: set[int] = field(default_factory=set)
+    attributes: dict = field(default_factory=dict)
 
     @property
     def is_on(self) -> bool:
-        return self.state.lower() == "on"
+        return self.state == "on"
 
     @property
     def is_available(self) -> bool:
-        return self.state.lower() != "unavailable"
-
-    def update_state(self, entity_state: EntityState) -> None:
-        self._state = entity_state
-
-    def __repr__(self) -> str:
-        return f"{self.__class__.__name__}(entity_id={self.entity_id!r}, state={self.state!r})"
+        return self.state != "unavailable"
 
 
-class Switch(Device):
-    """Simple on/off switch device."""
-
-    @property
-    def is_on(self) -> bool:
-        return self.state.lower() == "on"
-
-
+@dataclass
 class Light(Device):
-    """Light device with brightness, color temperature, and RGB color support."""
+    brightness: int | None = None
+    color_temp: int | None = None
+    rgb_color: tuple[int, int, int] | None = None
+    hs_color: tuple[float, float] | None = None
+    min_mireds: int = 153
+    max_mireds: int = 500
+
+    def __post_init__(self):
+        self.domain = EntityDomain.LIGHT
 
     @property
-    def is_on(self) -> bool:
-        return self.state.lower() == "on"
-
-    @property
-    def brightness(self) -> int | None:
-        val = self.attributes.get("brightness")
-        if val is not None:
-            return int(val)
-        return None
-
-    @property
-    def brightness_pct(self) -> int | None:
-        b = self.brightness
-        if b is not None:
-            return round(b / 255 * 100)
-        return None
-
-    @property
-    def color_temp(self) -> int | None:
-        val = self.attributes.get("color_temp")
-        if val is not None:
-            return int(val)
-        return None
-
-    @property
-    def rgb_color(self) -> tuple[int, int, int] | None:
-        val = self.attributes.get("rgb_color")
-        if val and len(val) == 3:
-            return (int(val[0]), int(val[1]), int(val[2]))
-        return None
-
-    @property
-    def hs_color(self) -> tuple[float, float] | None:
-        val = self.attributes.get("hs_color")
-        if val and len(val) == 2:
-            return (float(val[0]), float(val[1]))
-        return None
-
-    @property
-    def supported_color_modes(self) -> list[str]:
-        return self.attributes.get("supported_color_modes", [])
-
-    @property
-    def min_mireds(self) -> int | None:
-        val = self.attributes.get("min_mireds")
-        if val is not None:
-            return int(val)
-        return None
-
-    @property
-    def max_mireds(self) -> int | None:
-        val = self.attributes.get("max_mireds")
-        if val is not None:
-            return int(val)
-        return None
+    def brightness_pct(self) -> int:
+        if self.brightness is None:
+            return 0
+        return round(self.brightness / 2.55)
 
 
+@dataclass
+class Switch(Device):
+    def __post_init__(self):
+        self.domain = EntityDomain.SWITCH
+
+
+@dataclass
 class Sensor(Device):
-    """Sensor device that provides a numeric or string reading."""
+    unit_of_measurement: str | None = None
+    device_class: str | None = None
+
+    def __post_init__(self):
+        self.domain = EntityDomain.SENSOR
 
     @property
-    def value(self) -> str:
-        return self.state
-
-    @property
-    def unit(self) -> str | None:
-        return self.attributes.get("unit_of_measurement")
-
-    @property
-    def device_class(self) -> str | None:
-        return self.attributes.get("device_class")
+    def numeric_value(self) -> float | None:
+        try:
+            return float(self.state)
+        except (ValueError, TypeError):
+            return None
 
 
-_device_factory_map: dict[EntityDomain, type[Device]] = {
-    EntityDomain.LIGHT: Light,
-    EntityDomain.SWITCH: Switch,
-    EntityDomain.SENSOR: Sensor,
-}
+def create_device(entity_state) -> Device:
+    from ha_client.models.entity import EntityDomain, EntityState
 
-
-def create_device(entity_state: EntityState) -> Device:
+    entity_state: EntityState = entity_state
     domain = entity_state.domain
-    device_cls = _device_factory_map.get(domain, Device)
-    return device_cls(entity_state)
+    attrs = entity_state.attributes
+    features = set(attrs.get("supported_features", []))
+
+    if domain == EntityDomain.LIGHT:
+        return Light(
+            entity_id=entity_state.entity_id,
+            name=entity_state.friendly_name,
+            state=entity_state.state,
+            attributes=attrs,
+            brightness=attrs.get("brightness"),
+            color_temp=attrs.get("color_temp"),
+            rgb_color=tuple(attrs["rgb_color"]) if attrs.get("rgb_color") and len(attrs["rgb_color"]) == 3 else None,
+            hs_color=tuple(attrs["hs_color"]) if attrs.get("hs_color") and len(attrs["hs_color"]) == 2 else None,
+            min_mireds=attrs.get("min_mireds", 153),
+            max_mireds=attrs.get("max_mireds", 500),
+            supported_features=features,
+        )
+    elif domain == EntityDomain.SWITCH:
+        return Switch(
+            entity_id=entity_state.entity_id,
+            name=entity_state.friendly_name,
+            state=entity_state.state,
+            attributes=attrs,
+            supported_features=features,
+        )
+    elif domain == EntityDomain.SENSOR:
+        return Sensor(
+            entity_id=entity_state.entity_id,
+            name=entity_state.friendly_name,
+            state=entity_state.state,
+            attributes=attrs,
+            unit_of_measurement=attrs.get("unit_of_measurement"),
+            device_class=attrs.get("device_class"),
+        )
+    else:
+        return Device(
+            entity_id=entity_state.entity_id,
+            name=entity_state.friendly_name,
+            domain=domain,
+            state=entity_state.state,
+            attributes=attrs,
+            supported_features=features,
+        )

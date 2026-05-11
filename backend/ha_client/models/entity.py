@@ -1,45 +1,34 @@
-"""Entity data models for Home Assistant."""
+from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum, auto
+from enum import Enum
 
 
 class EntityDomain(Enum):
-    LIGHT = auto()
-    SWITCH = auto()
-    SENSOR = auto()
-    BINARY_SENSOR = auto()
-    CLIMATE = auto()
-    COVER = auto()
-    MEDIA_PLAYER = auto()
-    FAN = auto()
-    LOCK = auto()
-    SCENE = auto()
-    AUTOMATION = auto()
-    SCRIPT = auto()
-    UNKNOWN = auto()
+    LIGHT = "light"
+    SWITCH = "switch"
+    SENSOR = "sensor"
+    BINARY_SENSOR = "binary_sensor"
+    CLIMATE = "climate"
+    COVER = "cover"
+    MEDIA_PLAYER = "media_player"
+    FAN = "fan"
+    LOCK = "lock"
+    SCENE = "scene"
+    AUTOMATION = "automation"
+    SCRIPT = "script"
+    UNKNOWN = "unknown"
 
     @classmethod
-    def classify(cls, entity_id: str) -> "EntityDomain":
+    def classify(cls, entity_id: str) -> EntityDomain:
         if "." not in entity_id:
             return cls.UNKNOWN
-        prefix = entity_id.split(".", 1)[0]
-        mapping = {
-            "light": cls.LIGHT,
-            "switch": cls.SWITCH,
-            "sensor": cls.SENSOR,
-            "binary_sensor": cls.BINARY_SENSOR,
-            "climate": cls.CLIMATE,
-            "cover": cls.COVER,
-            "media_player": cls.MEDIA_PLAYER,
-            "fan": cls.FAN,
-            "lock": cls.LOCK,
-            "scene": cls.SCENE,
-            "automation": cls.AUTOMATION,
-            "script": cls.SCRIPT,
-        }
-        return mapping.get(prefix, cls.UNKNOWN)
+        prefix = entity_id.split(".")[0]
+        try:
+            return cls(prefix)
+        except ValueError:
+            return cls.UNKNOWN
 
 
 @dataclass
@@ -59,19 +48,18 @@ class EntityState:
         return EntityDomain.classify(self.entity_id)
 
     @classmethod
-    def from_ha_response(cls, data: dict) -> "EntityState":
-        def _parse_ts(value: str | None) -> datetime | None:
-            if not value:
-                return None
-            try:
-                return datetime.fromisoformat(value.replace("Z", "+00:00"))
-            except (ValueError, TypeError):
-                return None
+    def from_ha_json(cls, data: dict) -> EntityState:
+        last_changed = None
+        last_updated = None
+        if "last_changed" in data and data["last_changed"]:
+            last_changed = datetime.fromisoformat(data["last_changed"])
+        if "last_updated" in data and data["last_updated"]:
+            last_updated = datetime.fromisoformat(data["last_updated"])
 
         return cls(
             entity_id=data.get("entity_id", ""),
-            state=data.get("state", ""),
+            state=data.get("state", "unknown"),
             attributes=data.get("attributes", {}),
-            last_changed=_parse_ts(data.get("last_changed")),
-            last_updated=_parse_ts(data.get("last_updated")),
+            last_changed=last_changed,
+            last_updated=last_updated,
         )

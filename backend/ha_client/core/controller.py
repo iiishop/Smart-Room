@@ -6,7 +6,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from ha_client.api.exceptions import HAError
-from ha_client.core.event_bus import EventBus, EventType
+from ha_client.core.event_bus import EventType
 
 if TYPE_CHECKING:
     from ha_client.core.device_manager import DeviceManager
@@ -17,9 +17,9 @@ logger = logging.getLogger(__name__)
 class DeviceController:
     """Device control interface, wraps REST service calls via DeviceManager."""
 
-    def __init__(self, device_manager: DeviceManager, event_bus: EventBus):
+    def __init__(self, device_manager: DeviceManager):
         self._device_manager = device_manager
-        self._event_bus = event_bus
+        self._event_bus = device_manager.event_bus
 
     @property
     def _rest(self):
