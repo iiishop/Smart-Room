@@ -26,10 +26,12 @@ class ConfigManager:
         try:
             content = self._config_path.read_text(encoding="utf-8")
             loaded = json.loads(content)
+            if not isinstance(loaded, dict):
+                return
             self._data.update(
                 {k: v for k, v in loaded.items() if k in DEFAULT_CONFIG}
             )
-        except (json.JSONDecodeError, IOError):
+        except (json.JSONDecodeError, OSError):
             pass
 
     @property
