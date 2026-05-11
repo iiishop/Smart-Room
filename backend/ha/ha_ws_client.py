@@ -57,7 +57,8 @@ class HAWebSocketClient:
 
     @property
     def connected(self) -> bool:
-        return self._state in (_ConnState.CONNECTED, _ConnState.SUBSCRIBED)
+        with self._state_lock:
+            return self._state in (_ConnState.CONNECTED, _ConnState.SUBSCRIBED)
 
     def _next_id(self) -> int:
         with self._msg_id_lock:
@@ -122,7 +123,14 @@ class HAWebSocketClient:
             try:
                 self._ws_app.send(json.dumps(payload))
             except Exception as e:
-                logger.error(f"call_service send failed: {e}")
+                logger.error("call_service send failed: %s", e)
+        else:
+            logger.warning(
+                "call_service not connected, message dropped (id=%d, domain=%s, service=%s)",
+                msg_id,
+                domain,
+                service,
+            )
 
         return msg_id
 
@@ -217,11 +225,11 @@ class HAWebSocketClient:
         logger.info(
             "WebSocket closed (code=%s, msg=%s)", close_status_code, close_msg
         )
-        was_connected = self._state in (
-            _ConnState.CONNECTED,
-            _ConnState.SUBSCRIBED,
-        )
         with self._state_lock:
+            was_connected = self._state in (
+                _ConnState.CONNECTED,
+                _ConnState.SUBSCRIBED,
+            )
             self._state = _ConnState.IDLE
 
         if was_connected:
