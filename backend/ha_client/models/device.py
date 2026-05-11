@@ -63,3 +63,53 @@ class Sensor(Device):
             return float(self.state)
         except (ValueError, TypeError):
             return None
+
+
+def create_device(entity_state) -> Device:
+    from ha_client.models.entity import EntityDomain, EntityState
+
+    entity_state: EntityState = entity_state
+    domain = entity_state.domain
+    attrs = entity_state.attributes
+    features = set(attrs.get("supported_features", []))
+
+    if domain == EntityDomain.LIGHT:
+        return Light(
+            entity_id=entity_state.entity_id,
+            name=entity_state.friendly_name,
+            state=entity_state.state,
+            attributes=attrs,
+            brightness=attrs.get("brightness"),
+            color_temp=attrs.get("color_temp"),
+            rgb_color=tuple(attrs["rgb_color"]) if attrs.get("rgb_color") and len(attrs["rgb_color"]) == 3 else None,
+            hs_color=tuple(attrs["hs_color"]) if attrs.get("hs_color") and len(attrs["hs_color"]) == 2 else None,
+            min_mireds=attrs.get("min_mireds", 153),
+            max_mireds=attrs.get("max_mireds", 500),
+            supported_features=features,
+        )
+    elif domain == EntityDomain.SWITCH:
+        return Switch(
+            entity_id=entity_state.entity_id,
+            name=entity_state.friendly_name,
+            state=entity_state.state,
+            attributes=attrs,
+            supported_features=features,
+        )
+    elif domain == EntityDomain.SENSOR:
+        return Sensor(
+            entity_id=entity_state.entity_id,
+            name=entity_state.friendly_name,
+            state=entity_state.state,
+            attributes=attrs,
+            unit_of_measurement=attrs.get("unit_of_measurement"),
+            device_class=attrs.get("device_class"),
+        )
+    else:
+        return Device(
+            entity_id=entity_state.entity_id,
+            name=entity_state.friendly_name,
+            domain=domain,
+            state=entity_state.state,
+            attributes=attrs,
+            supported_features=features,
+        )
