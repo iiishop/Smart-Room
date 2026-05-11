@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 class DeviceListFrame(tk.Frame):
@@ -246,6 +249,7 @@ class DeviceListFrame(tk.Frame):
                     future = asyncio.run_coroutine_threadsafe(result, self._io_loop)
                     future.result(timeout=10)
             except Exception as exc:
+                logger.exception("Failed to run control action %s for args=%s", method, args)
                 self.after(
                     0,
                     lambda: messagebox.showerror(
