@@ -3,10 +3,13 @@ name = "smart-room-backend"
 version = "0.1.0"
 requires-python = ">=3.13"
 dependencies = [
+    "aiohttp>=3.8.0",
     "fastapi>=0.129.0",
+    "httpx>=0.24.0",
     "numpy>=2.3.0",
     "opencv-python>=4.12.0.88",
     "pyside6>=6.10.2",
+    "pyyaml>=6.0",
     "uvicorn[standard]>=0.40.0",
     "websockets>=16.0",
 ]
