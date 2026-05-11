@@ -9,21 +9,25 @@ from ha_client.api.exceptions import HAError
 from ha_client.core.event_bus import EventBus, EventType
 
 if TYPE_CHECKING:
-    from ha_client.api.connection import ConnectionManager
+    from ha_client.core.device_manager import DeviceManager
 
 logger = logging.getLogger(__name__)
 
 
 class DeviceController:
-    """Device control interface, wraps REST service calls."""
+    """Device control interface, wraps REST service calls via DeviceManager."""
 
-    def __init__(self, connection_mgr: ConnectionManager, event_bus: EventBus):
-        self._connection_mgr = connection_mgr
+    def __init__(self, device_manager: DeviceManager, event_bus: EventBus):
+        self._device_manager = device_manager
         self._event_bus = event_bus
+
+    @property
+    def _rest(self):
+        return self._device_manager.connection_mgr.rest
 
     async def turn_on(self, entity_id: str, **kwargs) -> bool:
         try:
-            result = await self._connection_mgr.rest.turn_on(entity_id, **kwargs)
+            result = await self._rest.turn_on(entity_id, **kwargs)
             self._event_bus.emit(
                 EventType.STATE_CHANGED,
                 entity_id=entity_id,
@@ -36,7 +40,7 @@ class DeviceController:
 
     async def turn_off(self, entity_id: str) -> bool:
         try:
-            result = await self._connection_mgr.rest.turn_off(entity_id)
+            result = await self._rest.turn_off(entity_id)
             self._event_bus.emit(
                 EventType.STATE_CHANGED,
                 entity_id=entity_id,
@@ -49,7 +53,7 @@ class DeviceController:
 
     async def toggle(self, entity_id: str) -> bool:
         try:
-            result = await self._connection_mgr.rest.toggle(entity_id)
+            result = await self._rest.toggle(entity_id)
             self._event_bus.emit(
                 EventType.STATE_CHANGED,
                 entity_id=entity_id,
@@ -64,7 +68,7 @@ class DeviceController:
         domain = entity_id.split(".", 1)[0]
         b = max(0, min(255, brightness))
         try:
-            result = await self._connection_mgr.rest.call_service(
+            result = await self._rest.call_service(
                 domain, "turn_on", entity_id, {"brightness": b}
             )
             self._event_bus.emit(
@@ -81,7 +85,7 @@ class DeviceController:
     async def set_color(self, entity_id: str, rgb: tuple[int, int, int]) -> bool:
         domain = entity_id.split(".", 1)[0]
         try:
-            result = await self._connection_mgr.rest.call_service(
+            result = await self._rest.call_service(
                 domain,
                 "turn_on",
                 entity_id,
@@ -106,7 +110,7 @@ class DeviceController:
         data: dict | None = None,
     ) -> bool:
         try:
-            result = await self._connection_mgr.rest.call_service(
+            result = await self._rest.call_service(
                 domain, service, entity_id, data
             )
             self._event_bus.emit(

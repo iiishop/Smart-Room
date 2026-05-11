@@ -25,6 +25,10 @@ class DeviceManager:
         self._sync_active: bool = False
 
     @property
+    def connection_mgr(self) -> ConnectionManager:
+        return self._connection_mgr
+
+    @property
     def devices(self) -> dict[str, Device]:
         return dict(self._devices)
 

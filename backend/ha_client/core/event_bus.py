@@ -42,6 +42,12 @@ class EventBus:
             try:
                 result = cb(**data)
                 if asyncio.iscoroutine(result):
+                    logger.warning(
+                        "EventBus callback returned coroutine for %s — "
+                        "async callbacks should be wrapped in asyncio.create_task "
+                        "by the subscriber. Scheduling as task.",
+                        event_type.name,
+                    )
                     asyncio.create_task(result)
             except Exception:
                 logger.exception(
