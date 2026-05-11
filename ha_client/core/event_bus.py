@@ -14,6 +14,8 @@ class EventType(Enum):
     CONNECTED = auto()
     DISCONNECTED = auto()
     STATE_CHANGED = auto()
+    DEVICE_ADDED = auto()
+    DEVICE_REMOVED = auto()
     ERROR = auto()
     LOG_MESSAGE = auto()
 

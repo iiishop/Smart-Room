@@ -70,8 +70,8 @@ class MainWindow:
         if event_bus is None:
             return
 
-        event_bus.subscribe(EventType.STATE_CHANGED, self._on_state_changed)
-        event_bus.subscribe(EventType.DEVICE_ADDED, self._on_device_added)
+        event_bus.subscribe_sync(EventType.STATE_CHANGED, self._on_state_changed)
+        event_bus.subscribe_sync(EventType.DEVICE_ADDED, self._on_device_added)
 
     def _on_state_changed(self, **_event_data: Any) -> None:
         """Schedules a safe UI refresh via root.after(0, ...)."""
@@ -96,6 +96,9 @@ class MainWindow:
         messagebox.showinfo("Config", "Config editor is not implemented yet.")
 
     def _on_close(self) -> None:
+        disconnect = getattr(self.device_manager, "disconnect", None)
+        if callable(disconnect):
+            disconnect()
         self.root.destroy()
 
     def _resolve_io_loop(self):
