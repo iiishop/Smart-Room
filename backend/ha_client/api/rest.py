@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+import warnings
 from typing import Any
 
 import httpx
+
+warnings.warn(
+    "ha_client.api.rest is deprecated; use ha.ha_rest_client instead",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 from ha_client.api.exceptions import (
     HAConnectionError,
