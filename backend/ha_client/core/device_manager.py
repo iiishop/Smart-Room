@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from ha_client.core.controller import DeviceController
 from ha_client.core.event_bus import EventBus, EventType
 from ha_client.models.device import Device, create_device
 from ha_client.models.entity import EntityDomain, EntityState
@@ -22,6 +23,7 @@ class DeviceManager:
         self._connection_mgr = connection_mgr
         self._event_bus = EventBus()
         self._devices: dict[str, Device] = {}
+        self._controller: DeviceController | None = None
         self._sync_active: bool = False
 
     @property
@@ -35,6 +37,12 @@ class DeviceManager:
     @property
     def devices(self) -> dict[str, Device]:
         return dict(self._devices)
+
+    @property
+    def controller(self) -> DeviceController:
+        if self._controller is None:
+            self._controller = DeviceController(self)
+        return self._controller
 
     def get_device(self, entity_id: str) -> Device | None:
         return self._devices.get(entity_id)
@@ -95,3 +103,15 @@ class DeviceManager:
         self._sync_active = False
         self._devices.clear()
         logger.info("Device manager stopped")
+
+    async def turn_on(self, entity_id: str, **kwargs) -> bool:
+        return await self.controller.turn_on(entity_id, **kwargs)
+
+    async def turn_off(self, entity_id: str) -> bool:
+        return await self.controller.turn_off(entity_id)
+
+    async def toggle(self, entity_id: str) -> bool:
+        return await self.controller.toggle(entity_id)
+
+    async def set_brightness(self, entity_id: str, brightness: int) -> bool:
+        return await self.controller.set_brightness(entity_id, brightness)
