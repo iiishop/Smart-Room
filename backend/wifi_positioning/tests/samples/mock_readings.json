@@ -1,0 +1,18 @@
+[
+  {
+    "source": "ap_monitor",
+    "ap_bssid": "aa:bb:cc:dd:ee:ff",
+    "device_mac": null,
+    "rssi": -40,
+    "frequency": 2412,
+    "timestamp": "2026-05-12T00:00:00+00:00"
+  },
+  {
+    "source": "ap_monitor",
+    "ap_bssid": "11:22:33:44:55:66",
+    "device_mac": null,
+    "rssi": -60,
+    "frequency": 5180,
+    "timestamp": "2026-05-12T00:00:01+00:00"
+  }
+]

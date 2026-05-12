@@ -1,0 +1,6 @@
+BSS aa:bb:cc:dd:ee:ff(on wlan0)
+        freq: 2412
+        signal: -42.00 dBm
+BSS 11:22:33:44:55:66(on wlan0)
+        freq: 5180
+        signal: -61.50 dBm
