@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from threading import Event
 from typing import Any
 
 from .models import Quest3Config, Quest3WiFiAccessPoint, Quest3WiFiData
@@ -17,12 +18,33 @@ class Quest3WiFiCollector:
     - android.permission.ACCESS_WIFI_STATE
     - android.permission.CHANGE_WIFI_STATE
     - android.permission.ACCESS_FINE_LOCATION
+
+    Scan behavior:
+    - Android API >= 29: skip startScan(), read getScanResults() directly
+      (platform throttles scan freshness).
+    - Android API < 29: trigger startScan() and wait for
+      SCAN_RESULTS_AVAILABLE_ACTION via BroadcastReceiver.
     """
 
     def __init__(self, config: Quest3Config, context: Any | None = None) -> None:
         self._config = config
         self._context = context
+        self._scan_ready = Event()
+        self._receiver = None
+        self._api_level = self._detect_api_level()
         self._wifi_manager = self._build_wifi_manager(context)
+        self._register_scan_receiver()
+
+    def _detect_api_level(self) -> int:
+        if self._context is None:
+            return 0
+        try:
+            from jnius import autoclass  # type: ignore[import-untyped]
+        except Exception:
+            return 0
+
+        BuildVersion = autoclass("android.os.Build$VERSION")
+        return int(getattr(BuildVersion, "SDK_INT", 0))
 
     def _build_wifi_manager(self, context: Any | None):
         if context is None:
@@ -35,75 +57,40 @@ class Quest3WiFiCollector:
         Context = autoclass("android.content.Context")
         return context.getSystemService(Context.WIFI_SERVICE)
 
+    def _register_scan_receiver(self) -> None:
+        if self._context is None:
+            return
+
+        try:
+            from jnius import PythonJavaClass, autoclass, java_method  # type: ignore[import-untyped]
+        except Exception:
+            return
+
+        IntentFilter = autoclass("android.content.IntentFilter")
+        action = "android.net.wifi.SCAN_RESULTS"
+
+        collector = self
+
+        class _ScanResultReceiver(PythonJavaClass):
+            __javainterfaces__ = ["android/content/BroadcastReceiver"]
+            __javacontext__ = "app"
+
+            @java_method("(Landroid/content/Context;Landroid/content/Intent;)V")
+            def onReceive(self, context, intent):
+                collector._scan_ready.set()
+
+        self._receiver = _ScanResultReceiver()
+        intent_filter = IntentFilter()
+        intent_filter.addAction(action)
+        self._context.registerReceiver(self._receiver, intent_filter)
+
     def start_scan(self) -> bool:
         """Run WifiManager.startScan()."""
         if self._wifi_manager is None:
             return False
+        if self._api_level >= 29:
+            return False
         return bool(self._wifi_manager.startScan())
-
-    def _result_timestamp_ms(self, result: Any) -> int | None:
-        ts = getattr(result, "timestamp", None)
-        if ts is None:
-            return None
-        try:
-            ts_value = int(ts)
-        except Exception:
-            return None
-
-        # Android ScanResult timestamp is usually microseconds since boot.
-        if ts_value > 1_000_000_000_000:
-            return ts_value // 1000
-        return ts_value
-
-    def _wait_for_fresh_scan_results(
-        self,
-        *,
-        min_timestamp_ms: int,
-        timeout_sec: float = 2.0,
-        poll_interval_sec: float = 0.2,
-    ) -> list[Quest3WiFiAccessPoint]:
-        deadline = time.monotonic() + timeout_sec
-        latest: list[Quest3WiFiAccessPoint] = []
-
-        while time.monotonic() < deadline:
-            if self._wifi_manager is None:
-                return []
-
-            raw_results = self._wifi_manager.getScanResults()
-            newest_timestamp_ms = 0
-            latest = []
-            for item in raw_results:
-                newest_timestamp_ms = max(
-                    newest_timestamp_ms,
-                    self._result_timestamp_ms(item) or 0,
-                )
-                latest.append(
-                    Quest3WiFiAccessPoint(
-                        bssid=str(getattr(item, "BSSID", "")),
-                        ssid=str(getattr(item, "SSID", "")),
-                        rssi=int(getattr(item, "level", 0)),
-                        frequency=int(getattr(item, "frequency", 0)),
-                    )
-                )
-
-            if newest_timestamp_ms >= min_timestamp_ms and latest:
-                return latest
-
-            time.sleep(poll_interval_sec)
-
-        return latest
-
-    def _latest_scan_timestamp_ms(self) -> int:
-        if self._wifi_manager is None:
-            return 0
-
-        newest_timestamp_ms = 0
-        for item in self._wifi_manager.getScanResults():
-            newest_timestamp_ms = max(
-                newest_timestamp_ms,
-                self._result_timestamp_ms(item) or 0,
-            )
-        return newest_timestamp_ms
 
     def get_scan_results(self) -> list[Quest3WiFiAccessPoint]:
         """Read WifiManager.getScanResults() into serializable AP records."""
@@ -123,15 +110,26 @@ class Quest3WiFiCollector:
             )
         return output
 
-    def collect_once(self, *, rtt_available: bool, headset_pose: dict | None = None) -> Quest3WiFiData:
-        baseline_timestamp_ms = self._latest_scan_timestamp_ms()
-        started = self.start_scan()
-        if started:
-            scan_results = self._wait_for_fresh_scan_results(
-                min_timestamp_ms=baseline_timestamp_ms + 1,
-                timeout_sec=max(self._config.scan_interval_sec, 1.0),
-            )
+    def collect_once(
+        self,
+        *,
+        rtt_available: bool,
+        headset_pose: dict | None = None,
+        timeout: float = 5.0,
+    ) -> Quest3WiFiData:
+        if self._context is None:
+            self.start_scan()
+            time.sleep(3.0)
+            scan_results = self.get_scan_results()
+        elif self._api_level >= 29:
+            scan_results = self.get_scan_results()
         else:
+            self._scan_ready.clear()
+            started = self.start_scan()
+            if started and self._receiver is not None:
+                self._scan_ready.wait(timeout=max(timeout, 0.1))
+            else:
+                time.sleep(min(timeout, 3.0))
             scan_results = self.get_scan_results()
 
         return Quest3WiFiData.now(
@@ -140,3 +138,11 @@ class Quest3WiFiCollector:
             rtt_available=rtt_available,
             headset_pose=headset_pose,
         )
+
+    def close(self) -> None:
+        if self._context is None or self._receiver is None:
+            return
+        try:
+            self._context.unregisterReceiver(self._receiver)
+        except Exception:
+            pass
