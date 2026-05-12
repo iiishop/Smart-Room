@@ -18,3 +18,14 @@ dependencies = [
 [project.scripts]
 quest3server = "quest3server.run_dashboard:main"
 ha-client = "ha_client.main:main"
+ha_client = "ha_client.main:main"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["ha_client*", "quest3server*", "calib_capture*"]
+
+[tool.uv]
+package = true
