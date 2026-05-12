@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from datetime import datetime, timezone
 
 from wifi_positioning.collectors.base import RssiCollector
 from wifi_positioning.models import RssiReading, RssiSource
+
+
+logger = logging.getLogger(__name__)
 
 
 class LinuxRssiCollector(RssiCollector):
@@ -38,7 +42,9 @@ class LinuxRssiCollector(RssiCollector):
             stdout, stderr = await result.communicate()
             if result.returncode != 0:
                 err = stderr.decode("utf-8", errors="ignore").strip() or "iw scan failed"
-                raise RuntimeError(err)
+                logger.warning("Linux RSSI scan failed: %s", err)
+                await asyncio.sleep(self.scan_interval)
+                continue
 
             output = stdout.decode("utf-8", errors="ignore")
             for reading in self.parse_iw_output(output):
@@ -59,7 +65,12 @@ class LinuxRssiCollector(RssiCollector):
         except FileNotFoundError as exc:
             raise RuntimeError("iw command not found. Please install wireless-tools/iw.") from exc
 
-        stdout, _ = await result.communicate()
+        stdout, stderr = await result.communicate()
+        if result.returncode != 0:
+            err = stderr.decode("utf-8", errors="ignore").strip() or "iw scan failed"
+            logger.warning("Linux list_aps scan failed: %s", err)
+            return []
+
         readings = self.parse_iw_output(stdout.decode("utf-8", errors="ignore"))
         return sorted({r.ap_bssid for r in readings})
 

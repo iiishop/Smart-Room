@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from datetime import datetime, timezone
 
 from wifi_positioning.collectors.base import RssiCollector
 from wifi_positioning.models import RssiReading, RssiSource
+
+
+logger = logging.getLogger(__name__)
 
 
 def _percent_to_dbm(percent: int) -> float:
@@ -43,12 +47,16 @@ class WindowsRssiCollector(RssiCollector):
             stdout, stderr = await result.communicate()
             if result.returncode != 0:
                 err = stderr.decode("utf-8", errors="ignore").strip()
-                raise RuntimeError(err or "No WiFi adapter found or netsh scan failed.")
+                logger.warning("Windows RSSI scan failed: %s", err or "netsh scan failed")
+                await asyncio.sleep(self.scan_interval)
+                continue
 
             output = stdout.decode("utf-8", errors="ignore")
             readings = self.parse_netsh_output(output)
             if not readings:
-                raise RuntimeError("No WiFi adapter found or no BSSID entries available.")
+                logger.warning("Windows RSSI scan returned no BSSID entries")
+                await asyncio.sleep(self.scan_interval)
+                continue
 
             for reading in readings:
                 yield reading
@@ -69,7 +77,12 @@ class WindowsRssiCollector(RssiCollector):
         except FileNotFoundError as exc:
             raise RuntimeError("netsh not found on this system.") from exc
 
-        stdout, _ = await result.communicate()
+        stdout, stderr = await result.communicate()
+        if result.returncode != 0:
+            err = stderr.decode("utf-8", errors="ignore").strip()
+            logger.warning("Windows list_aps scan failed: %s", err or "netsh scan failed")
+            return []
+
         readings = self.parse_netsh_output(stdout.decode("utf-8", errors="ignore"))
         return sorted({r.ap_bssid for r in readings})
 
