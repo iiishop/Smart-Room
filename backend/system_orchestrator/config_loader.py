@@ -25,6 +25,9 @@ class OrchestratorConfig:
 
 
 class ConfigLoader:
+    _TRUE_VALUES = {"1", "true", "yes", "on"}
+    _FALSE_VALUES = {"0", "false", "no", "off", ""}
+
     def __init__(self, config_path: str) -> None:
         self._path = Path(config_path)
 
@@ -111,7 +114,25 @@ class ConfigLoader:
             options[opt_key] = opt_value
 
         return ModuleConfig(
-            enabled=bool(enabled),
+            enabled=self._parse_enabled(enabled),
             import_path=str(import_path),
             options=options,
+        )
+
+    def _parse_enabled(self, value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in self._TRUE_VALUES:
+                return True
+            if normalized in self._FALSE_VALUES:
+                return False
+            raise ValueError(
+                "wifi_location.<module>.enabled must be a boolean or boolean-like string"
+            )
+        if isinstance(value, (int, float)):
+            return bool(value)
+        raise ValueError(
+            "wifi_location.<module>.enabled must be a boolean or boolean-like string"
         )
