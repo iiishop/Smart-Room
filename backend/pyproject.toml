@@ -18,3 +18,4 @@ dependencies = [
 [project.scripts]
 quest3server = "quest3server.run_dashboard:main"
 ha-client = "ha_client.main:main"
+system-orchestrator = "system_orchestrator.__main__:main"
