@@ -69,4 +69,12 @@ class DeviceTracker:
         current = now or datetime.now(UTC)
         for device in self._devices.values():
             if current - device.timestamp > self._offline_timeout and device.present:
+                old_state = device.location_name
                 device.present = False
+                self._event_bus.emit(
+                    EventType.STATE_CHANGED,
+                    mac=device.mac,
+                    old_state=old_state,
+                    new_state=device.location_name,
+                    device=device,
+                )

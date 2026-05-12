@@ -28,7 +28,7 @@ def test_device_tracker_add_update_and_timeout() -> None:
     event_bus.subscribe(EventType.DEVICE_ADDED, lambda **_: events.append(EventType.DEVICE_ADDED))
     event_bus.subscribe(EventType.STATE_CHANGED, lambda **_: events.append(EventType.STATE_CHANGED))
 
-    ts = datetime(2026, 1, 1, tzinfo=UTC)
+    ts = datetime.now(UTC)
     tracker.update_position(
         SmoothedPosition(
             mac="aa:bb:cc:dd:ee:ff",
@@ -47,5 +47,8 @@ def test_device_tracker_add_update_and_timeout() -> None:
     tracker.update_presence("aa:bb:cc:dd:ee:ff", present=False)
     assert tracker.get_device("aa:bb:cc:dd:ee:ff").location_name == "not_home"
 
+    tracker.update_presence("aa:bb:cc:dd:ee:ff", present=True)
+
     tracker.mark_stale_offline(now=ts + timedelta(seconds=11))
     assert tracker.get_device("aa:bb:cc:dd:ee:ff").present is False
+    assert events.count(EventType.STATE_CHANGED) == 4
