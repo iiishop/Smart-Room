@@ -85,7 +85,7 @@ class EKFTracker:
 
         y = z - self._H @ self._x
         S = self._H @ self._P @ self._H.T + R
-        K = self._P @ self._H.T @ np.linalg.inv(S)
+        K = np.linalg.solve(S, self._H @ self._P).T
 
         self._x = self._x + K @ y
         self._P = (np.eye(4) - K @ self._H) @ self._P
@@ -98,7 +98,7 @@ class EKFTracker:
         cov_flat = [float(self._P[0, 0]), float(self._P[1, 1]),
                      float(self._P[2, 2]), float(self._P[3, 3])]
         uncertainty = np.sqrt(self._P[0, 0] + self._P[1, 1])
-        confidence = float(max(0.05, 1.0 / (1.0 + uncertainty) - self._missed_updates * 0.05))
+        confidence = float(max(0.1, min(1.0, 1.0 / (1.0 + uncertainty) - self._missed_updates * 0.05)))
 
         return SmoothedPosition(
             x=float(self._x[0, 0]),

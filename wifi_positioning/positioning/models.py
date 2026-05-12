@@ -35,5 +35,5 @@ class SmoothedPosition:
 
     def position_uncertainty(self) -> float:
         if self.covariance and len(self.covariance) >= 4:
-            return float((self.covariance[0] + self.covariance[3]) ** 0.5)
+            return float((self.covariance[0] + self.covariance[1]) ** 0.5)
         return 1.0
