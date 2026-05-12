@@ -1,15 +1,39 @@
 # Quest 3 WiFi API Validation Runbook (DEA-88)
 
+## 0) Build prerequisites
+
+- JDK: `17` or `21` (do not use JDK `25+` with current wrapper `8.2.1`)
+- Verify Java:
+
+```bash
+java -version
+```
+
+- If current Java is not 17/21, set `JAVA_HOME` to a JDK 17/21 installation before build.
+
 ## 1) Build APK
 
 ```bash
 cd quest-wifi-probe
-./gradlew assembleRelease
+./gradlew --version
+./gradlew clean assembleRelease
 ```
 
 Expected artifact:
 
 - `quest-wifi-probe/app/build/outputs/apk/release/app-release.apk`
+
+Capture reproducible artifact info:
+
+```bash
+sha256sum quest-wifi-probe/app/build/outputs/apk/release/app-release.apk
+```
+
+Windows PowerShell alternative:
+
+```powershell
+Get-FileHash -Algorithm SHA256 "quest-wifi-probe/app/build/outputs/apk/release/app-release.apk"
+```
 
 ## 2) Sideload to Quest 3
 
