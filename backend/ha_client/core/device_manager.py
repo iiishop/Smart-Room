@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from ha_client.core.controller import DeviceController
 from ha_client.core.event_bus import EventBus, EventType
 from ha_client.models.device import Device, create_device
 from ha_client.models.entity import EntityDomain, EntityState
@@ -19,11 +18,10 @@ logger = logging.getLogger(__name__)
 class DeviceManager:
     """Maintains device registry, manages device discovery and state cache."""
 
-    def __init__(self, connection_mgr: ConnectionManager):
+    def __init__(self, connection_mgr: ConnectionManager, event_bus: EventBus):
         self._connection_mgr = connection_mgr
-        self._event_bus = EventBus()
+        self._event_bus = event_bus
         self._devices: dict[str, Device] = {}
-        self._controller: DeviceController | None = None
         self._sync_active: bool = False
 
     @property
@@ -31,19 +29,8 @@ class DeviceManager:
         return self._connection_mgr
 
     @property
-    def event_bus(self) -> EventBus:
-        return self._event_bus
-
-    @property
     def devices(self) -> dict[str, Device]:
         return dict(self._devices)
-
-    @property
-    def controller(self) -> DeviceController:
-        if self._controller is None:
-            self._controller = DeviceController(self)
-        return self._controller
-
     def get_device(self, entity_id: str) -> Device | None:
         return self._devices.get(entity_id)
 
@@ -67,13 +54,12 @@ class DeviceManager:
             return
 
         self._sync_active = True
+        ws = self._connection_mgr.ws
 
         async def on_state_change(entity_state: EntityState) -> None:
             await self._handle_state_change(entity_state)
 
-        self._connection_mgr.on_state_change(on_state_change)
-
-        ws = self._connection_mgr.ws
+        ws.on_state_change(on_state_change)
         if ws.connected:
             await ws.subscribe_state_changes()
 
@@ -81,12 +67,11 @@ class DeviceManager:
 
     async def _handle_state_change(self, entity_state: EntityState) -> None:
         entity_id = entity_state.entity_id
-        device = create_device(entity_state)
-
-        is_new = entity_id not in self._devices
-        self._devices[entity_id] = device
-
-        if is_new:
+        if entity_id in self._devices:
+            self._devices[entity_id].update_state(entity_state)
+        else:
+            device = create_device(entity_state)
+            self._devices[entity_id] = device
             self._event_bus.emit(
                 EventType.DEVICE_ADDED, entity_id=entity_id, device=device
             )
@@ -95,23 +80,12 @@ class DeviceManager:
         self._event_bus.emit(
             EventType.STATE_CHANGED,
             entity_id=entity_id,
+            old_state=None,
             new_state=entity_state.state,
-            device=device,
+            device=self._devices[entity_id],
         )
 
     async def stop(self) -> None:
         self._sync_active = False
         self._devices.clear()
         logger.info("Device manager stopped")
-
-    async def turn_on(self, entity_id: str, **kwargs) -> bool:
-        return await self.controller.turn_on(entity_id, **kwargs)
-
-    async def turn_off(self, entity_id: str) -> bool:
-        return await self.controller.turn_off(entity_id)
-
-    async def toggle(self, entity_id: str) -> bool:
-        return await self.controller.toggle(entity_id)
-
-    async def set_brightness(self, entity_id: str, brightness: int) -> bool:
-        return await self.controller.set_brightness(entity_id, brightness)

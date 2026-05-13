@@ -14,3 +14,18 @@ dependencies = [
     "websocket-client>=1.8.0",
     "websockets>=16.0",
 ]
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["ha_client*", "quest3server*", "system_orchestrator*"]
+
+[tool.uv]
+package = true
+
+[project.scripts]
+quest3server = "quest3server.run_dashboard:main"
+ha_client = "ha_client.main:main"
+system-orchestrator = "system_orchestrator.__main__:main"
