@@ -182,8 +182,8 @@ namespace SmartRoom.Validation
 
             foreach (var e in entries)
             {
-                sb.Append(EscapeCsv(e.label)); sb.Append(',');
-                sb.Append(EscapeCsv(e.classification)); sb.Append(',');
+                sb.Append(ValidationDataExporter.EscapeCsv(e.label)); sb.Append(',');
+                sb.Append(ValidationDataExporter.EscapeCsv(e.classification)); sb.Append(',');
                 sb.Append("0"); sb.Append(',');
                 sb.Append("0"); sb.Append(',');
                 sb.Append("0"); sb.Append(',');
@@ -276,14 +276,5 @@ namespace SmartRoom.Validation
             Debug.LogError($"[ValidationRunner] {message}");
         }
 
-        private static string EscapeCsv(string value)
-        {
-            if (string.IsNullOrEmpty(value)) return "";
-            if (value.Contains(",") || value.Contains("\"") || value.Contains("\n"))
-            {
-                return "\"" + value.Replace("\"", "\"\"") + "\"";
-            }
-            return value;
-        }
     }
 }

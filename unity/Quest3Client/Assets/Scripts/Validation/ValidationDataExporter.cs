@@ -220,7 +220,7 @@ namespace SmartRoom.Validation
 
         private static string FloatString(float value)
         {
-            return ((double)value).ToString("F6");
+            return ((double)value).ToString("F4");
         }
 
         private static string EscapeJson(string value)
@@ -257,7 +257,7 @@ namespace SmartRoom.Validation
             return sb.ToString();
         }
 
-        private static string EscapeCsv(string value)
+        internal static string EscapeCsv(string value)
         {
             if (string.IsNullOrEmpty(value))
             {

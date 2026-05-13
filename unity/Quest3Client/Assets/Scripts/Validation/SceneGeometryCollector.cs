@@ -190,10 +190,6 @@ namespace SmartRoom.Validation
             entry.rotationY = euler.y;
             entry.rotationZ = euler.z;
 
-            entry.centerX = t.position.x;
-            entry.centerY = t.position.y;
-            entry.centerZ = t.position.z;
-
             Collider col = anchor.GetComponent<Collider>();
             if (col != null)
             {

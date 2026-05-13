@@ -38,11 +38,13 @@ namespace SmartRoom.Validation
         public List<SavedAnchorRecord> LocalizedAnchors { get; private set; } = new List<SavedAnchorRecord>();
         public int SessionId { get; private set; }
 
+        private Camera _cachedMainCamera;
         private const string SessionKey = "dea89_anchor_session_id";
         private const string AnchorStorageKeyPrefix = "dea89_anchor_";
 
         private void Awake()
         {
+            _cachedMainCamera = Camera.main;
             SessionId = PlayerPrefs.GetInt(SessionKey, 0) + 1;
             PlayerPrefs.SetInt(SessionKey, SessionId);
             PlayerPrefs.Save();
@@ -97,7 +99,7 @@ namespace SmartRoom.Validation
 
         public Vector3 AnchorWorldPosition()
         {
-            Transform cam = Camera.main?.transform;
+            Transform cam = _cachedMainCamera?.transform;
             if (cam != null)
             {
                 return cam.position + cam.TransformDirection(defaultAnchorLocalOffset);
@@ -166,7 +168,7 @@ namespace SmartRoom.Validation
             float saveStartTime = Time.time;
             while (!saved && Time.time < saveStartTime + anchorCreationTimeoutSeconds)
             {
-                yield return null;
+                yield return new WaitForSeconds(0.1f);
             }
 
             if (!saved)
