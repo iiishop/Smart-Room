@@ -1,3 +1,1 @@
-from .app import HADebugApp
-
-__all__ = ["HADebugApp"]
+﻿"""Tkinter GUI package for Home Assistant device monitor."""
