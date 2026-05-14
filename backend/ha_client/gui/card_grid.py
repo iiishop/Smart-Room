@@ -51,8 +51,8 @@ class CardGridView(tk.Frame):
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=1)
 
-        self._build_search_bar()
         self._build_scrollable_grid()
+        self._build_search_bar()
         self._bind_events()
         self._discover_services()
         self._show_loading()
