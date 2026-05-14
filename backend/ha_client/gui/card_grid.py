@@ -163,6 +163,7 @@ class CardGridView(tk.Frame):
         except Exception:
             logger.exception("Service discovery failed, using default controls")
             self._services = None
+        self._bridge.schedule_ui(self._apply_filters_and_layout)
 
     def _on_search_changed(self) -> None:
         query = self._search_var.get().strip()
@@ -298,7 +299,29 @@ class CardGridView(tk.Frame):
                 entity_id.split(".")[0], action, entity_id=entity_id
             )
 
-        self._bridge.run_async_background(_dispatch())
+        future = self._bridge.run_async_background(_dispatch())
+
+        def _check_result(fut):
+            try:
+                fut.result()
+            except Exception:
+                logger.exception("Device action failed for %s: %s", entity_id, action)
+                self._bridge.schedule_ui(
+                    lambda: self._show_action_error(entity_id, action)
+                )
+
+        future.add_done_callback(_check_result)
+
+    def _show_action_error(self, entity_id: str, action: str) -> None:
+        try:
+            from tkinter import messagebox
+            messagebox.showerror(
+                "Action Failed",
+                f"Failed to execute '{action}' on {entity_id}.",
+                parent=self.winfo_toplevel(),
+            )
+        except Exception:
+            pass
 
     def _show_loading(self) -> None:
         self._placeholder.configure(text="Loading...")
