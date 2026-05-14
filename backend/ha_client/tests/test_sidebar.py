@@ -80,9 +80,7 @@ def device_manager(event_bus):
 
 @pytest.fixture
 def bridge(root):
-    import asyncio
-    loop = asyncio.new_event_loop()
-    return AsyncTkBridge(root, loop)
+    return AsyncTkBridge(root)
 
 
 @pytest.fixture

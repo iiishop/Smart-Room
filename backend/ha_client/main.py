@@ -6,7 +6,11 @@ import sys
 from pathlib import Path
 
 from ha_client.config import load_config
-from ha_client.gui.app import HADebugApp
+from ha_client.core.event_bus import EventBus
+from ha_client.api.connection import ConnectionManager
+from ha_client.core.device_manager import DeviceManager
+from ha_client.core.controller import DeviceController
+from ha_client.gui.dashboard import DashboardApp
 
 
 def main() -> None:
@@ -23,7 +27,13 @@ def main() -> None:
         )
     )
     config = load_config(config_path)
-    app = HADebugApp(config)
+
+    event_bus = EventBus()
+    conn_mgr = ConnectionManager(config)
+    device_mgr = DeviceManager(conn_mgr, event_bus)
+    controller = DeviceController(device_mgr, event_bus)
+
+    app = DashboardApp(config, conn_mgr, device_mgr, controller, event_bus)
     app.run()
 
 

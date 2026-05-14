@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import tkinter as tk
 from tkinter import ttk
@@ -155,7 +156,9 @@ class CardGridView(tk.Frame):
             return await rest.get_services()
 
         try:
-            future = self._bridge.run_async_background(fetch_services())
+            future = asyncio.run_coroutine_threadsafe(
+                fetch_services(), self._bridge.loop
+            )
             future.add_done_callback(self._on_services_loaded)
         except Exception:
             logger.exception("Failed to start service discovery")
@@ -189,13 +192,17 @@ class CardGridView(tk.Frame):
         entity_id = event_data.get("entity_id")
         device = event_data.get("device")
         if entity_id and device is not None:
-            self._bridge.schedule_ui(self.update_device, entity_id, device)
+            eid = entity_id
+            dev = device
+            self._bridge.schedule_ui(lambda: self.update_device(eid, dev))
 
     def _on_device_added(self, **event_data) -> None:
         entity_id = event_data.get("entity_id")
         device = event_data.get("device")
         if entity_id and device is not None:
-            self._bridge.schedule_ui(self.update_device, entity_id, device)
+            eid = entity_id
+            dev = device
+            self._bridge.schedule_ui(lambda: self.update_device(eid, dev))
 
     def _apply_filters_and_layout(self) -> None:
         visible = self._filter_devices()
@@ -318,7 +325,9 @@ class CardGridView(tk.Frame):
                 entity_id.split(".")[0], action, entity_id=entity_id
             )
 
-        future = self._bridge.run_async_background(_dispatch())
+        future = asyncio.run_coroutine_threadsafe(
+            _dispatch(), self._bridge.loop
+        )
 
         def _check_result(fut):
             try:
