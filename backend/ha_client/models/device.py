@@ -71,7 +71,13 @@ class Sensor(Device):
 def create_device(entity_state: EntityState) -> Device:
     domain = entity_state.domain
     attrs = entity_state.attributes
-    features = set(attrs.get("supported_features", []))
+    features_raw = attrs.get("supported_features", 0)
+    if isinstance(features_raw, int):
+        features = {features_raw} if features_raw else set()
+    elif isinstance(features_raw, (list, tuple, set)):
+        features = set(features_raw)
+    else:
+        features = set()
 
     if domain == EntityDomain.LIGHT:
         return Light(
