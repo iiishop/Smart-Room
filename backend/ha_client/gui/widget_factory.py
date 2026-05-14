@@ -160,7 +160,7 @@ class WidgetFactory:
             toggle_btn.pack(side=tk.LEFT, padx=2)
             widgets.append(btn_frame)
 
-        if "brightness" in attributes:
+        if "brightness" in attributes and attributes["brightness"] is not None:
             val = int(attributes["brightness"])
             frame = tk.Frame(parent, bg=parent.cget("bg") if parent.cget("bg") != "SystemButtonFace" else "#f0f0f0")
             tk.Label(frame, text="Brightness", font=("Segoe UI", 9), fg="#555555",
