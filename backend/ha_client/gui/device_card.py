@@ -1,10 +1,16 @@
-"""Device card widget — per-device card integrating state display and controls."""
+"""Device card widget — per-device card integrating WidgetFactory and StateRenderer."""
 
 from __future__ import annotations
 
 import logging
 import tkinter as tk
-from typing import Any, Callable
+from typing import Any, Callable, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ha_client.gui.async_bridge import AsyncTkBridge
+
+from ha_client.gui.state_renderer import StateRenderer
+from ha_client.gui.widget_factory import WidgetFactory
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +37,7 @@ _FLASH_DURATION_MS = 600
 
 
 class DeviceCard(tk.Frame):
-    """Single-device card showing domain icon, name, state, controls, and entity_id."""
+    """Single-device card using WidgetFactory and StateRenderer for controls and state."""
 
     def __init__(
         self,
@@ -44,7 +50,7 @@ class DeviceCard(tk.Frame):
         available_services: dict[str, dict[str, Any]],
         on_action: Callable[[str, str, Any], None],
         on_card_click: Callable[[str], None],
-        bridge: Any = None,
+        bridge: AsyncTkBridge | None = None,
     ):
         super().__init__(
             parent,
@@ -64,6 +70,7 @@ class DeviceCard(tk.Frame):
         self._bridge = bridge
         self._selected = False
         self._flash_id: str | None = None
+        self._state_widgets: list[tk.Widget] = []
 
         self._friendly_name = self._attributes.get("friendly_name", entity_id)
 
@@ -71,8 +78,8 @@ class DeviceCard(tk.Frame):
         self.configure(width=_CARD_WIDTH)
 
         self._build_title_bar()
-        self._build_state_area()
-        self._build_controls_area()
+        self._state_frame = self._build_state_area()
+        self._controls_frame = self._build_controls_area()
         self._build_footer()
 
         self.bind("<Button-1>", self._handle_click)
@@ -100,236 +107,57 @@ class DeviceCard(tk.Frame):
         )
         self._title_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-    def _build_state_area(self) -> None:
-        self._state_frame = tk.Frame(self, bg="#FFFFFF", padx=8, pady=4)
-        self._state_frame.pack(fill=tk.X)
-
-        self._state_indicator = tk.Label(
-            self._state_frame,
-            text=f"\u25cf {self._state.upper()}",
-            bg="#FFFFFF",
-            fg=self._state_color(),
-            font=("Segoe UI", 10, "bold"),
-            anchor="w",
+        close_btn = tk.Label(
+            bar,
+            text="[X]",
+            bg="#F5F5F5",
+            fg="#999999",
+            font=("Segoe UI", 9, "bold"),
+            padx=8,
+            cursor="hand2",
         )
-        self._state_indicator.pack(anchor="w")
+        close_btn.pack(side=tk.RIGHT)
+        close_btn.bind("<Button-1>", lambda e: self._on_card_click(self._entity_id))
 
-        self._detail_label = tk.Label(
-            self._state_frame,
-            text=self._build_detail_text(),
-            bg="#FFFFFF",
-            fg="#666666",
-            font=("Segoe UI", 8),
-            anchor="w",
-            justify="left",
+    def _build_state_area(self) -> tk.Frame:
+        frame = tk.Frame(self, bg="#FFFFFF", padx=8, pady=4)
+        frame.pack(fill=tk.X)
+
+        widgets = StateRenderer.render_state(frame, self._entity_id, self._state, self._attributes)
+        for w in widgets:
+            w.pack(anchor="w", fill=tk.X)
+        self._state_widgets = widgets
+        return frame
+
+    def _build_controls_area(self) -> tk.Frame:
+        frame = tk.Frame(self, bg="#FFFFFF", padx=8, pady=4)
+        frame.pack(fill=tk.X)
+
+        controls = WidgetFactory.build_widgets(
+            parent=frame,
+            domain=self._domain,
+            entity_id=self._entity_id,
+            attributes=self._attributes,
+            state=self._state,
+            supported_features=self._supported_features,
+            available_services=self._available_services,
+            on_change=self._on_action,
         )
-        self._detail_label.pack(anchor="w", fill=tk.X)
 
-    def _state_color(self) -> str:
-        s = self._state.lower()
-        if s in ("on", "open", "playing", "unlocked", "active", "home"):
-            return "#2ECC40"
-        elif s in ("off", "closed", "paused", "idle", "locked"):
-            return "#AAAAAA"
-        elif s in ("unavailable",):
-            return "#E74C3C"
-        else:
-            return "#FFDC00"
-
-    def _build_detail_text(self) -> str:
-        lines: list[str] = []
-        attrs = self._attributes
-
-        if self._domain == "light":
-            brightness = attrs.get("brightness")
-            if brightness is not None:
-                pct = round(brightness / 2.55)
-                bar = self._progress_bar(pct)
-                lines.append(f"Brightness: {pct}%")
-                lines.append(bar)
-            ct = attrs.get("color_temp")
-            if ct is not None:
-                lines.append(f"Color Temp: {ct} mired")
-
-        elif self._domain == "climate":
-            current = attrs.get("current_temperature")
-            target = attrs.get("temperature")
-            if current is not None:
-                lines.append(f"Current: {current}\u00b0")
-            if target is not None:
-                lines.append(f"Target: {target}\u00b0")
-            hvac = attrs.get("hvac_action", "")
-            if hvac:
-                lines.append(f"Action: {hvac}")
-
-        elif self._domain in ("sensor", "binary_sensor"):
-            unit = attrs.get("unit_of_measurement", "")
-            val = self._state
-            if unit:
-                val += f" {unit}"
-            lines.append(val)
-            dev_class = attrs.get("device_class", "")
-            if dev_class:
-                lines.append(f"Class: {dev_class}")
-
-        elif self._domain == "media_player":
-            media_title = attrs.get("media_title", "")
-            if media_title:
-                lines.append(media_title)
-            volume = attrs.get("volume_level")
-            if volume is not None:
-                pct = round(volume * 100)
-                lines.append(f"Volume: {pct}%")
-
-        return "\n".join(lines) if lines else ""
-
-    @staticmethod
-    def _progress_bar(pct: float) -> str:
-        block = "\u2588"
-        shade = "\u2591"
-        filled = round(pct / 10)
-        empty = 10 - filled
-        return f"[{block * filled}{shade * empty}]"
-
-    def _build_controls_area(self) -> None:
-        self._controls_frame = tk.Frame(self, bg="#FFFFFF", padx=8, pady=4)
-        self._controls_frame.pack(fill=tk.X)
-
-        domain = self._domain
-
-        if domain == "light":
-            self._build_light_controls()
-        elif domain == "switch":
-            self._build_switch_controls()
-        elif domain == "climate":
-            self._build_climate_controls()
-        elif domain == "media_player":
-            self._build_media_controls()
-        elif domain == "cover":
-            self._build_cover_controls()
-        elif domain == "lock":
-            self._build_lock_controls()
-        elif domain == "fan":
-            self._build_binary_controls("Turn On", "Turn Off")
-        else:
+        if not controls:
             tk.Label(
-                self._controls_frame,
+                frame,
                 text="No controls",
                 bg="#FFFFFF",
                 fg="#AAAAAA",
                 font=("Segoe UI", 8),
             ).pack(anchor="w")
+        else:
+            for ctrl in controls:
+                ctrl.pack(anchor="w", fill=tk.X, pady=1)
 
-    def _build_light_controls(self) -> None:
-        btn_frame = tk.Frame(self._controls_frame, bg="#FFFFFF")
-        btn_frame.pack(fill=tk.X)
-
-        for text, action in [
-            ("Turn On", "turn_on"),
-            ("Turn Off", "turn_off"),
-            ("Toggle", "toggle"),
-        ]:
-            tk.Button(
-                btn_frame,
-                text=text,
-                font=("Segoe UI", 8),
-                command=lambda a=action: self._on_action(self._entity_id, a, None),
-            ).pack(side=tk.LEFT, padx=(0, 4))
-
-    def _build_switch_controls(self) -> None:
-        btn_frame = tk.Frame(self._controls_frame, bg="#FFFFFF")
-        btn_frame.pack(fill=tk.X)
-
-        for text, action in [
-            ("Turn On", "turn_on"),
-            ("Turn Off", "turn_off"),
-            ("Toggle", "toggle"),
-        ]:
-            tk.Button(
-                btn_frame,
-                text=text,
-                font=("Segoe UI", 8),
-                command=lambda a=action: self._on_action(self._entity_id, a, None),
-            ).pack(side=tk.LEFT, padx=(0, 4))
-
-    def _build_climate_controls(self) -> None:
-        btn_frame = tk.Frame(self._controls_frame, bg="#FFFFFF")
-        btn_frame.pack(fill=tk.X)
-
-        for text, action in [
-            ("Heat", "set_hvac_mode"),
-            ("Cool", "set_hvac_mode"),
-            ("Auto", "set_hvac_mode"),
-            ("Off", "set_hvac_mode"),
-        ]:
-            tk.Button(
-                btn_frame,
-                text=text,
-                font=("Segoe UI", 8),
-                command=lambda a=action, v=text.lower(): self._on_action(self._entity_id, a, {"hvac_mode": v}),
-            ).pack(side=tk.LEFT, padx=(0, 4))
-
-    def _build_media_controls(self) -> None:
-        btn_frame = tk.Frame(self._controls_frame, bg="#FFFFFF")
-        btn_frame.pack(fill=tk.X)
-
-        for text, action in [
-            ("Play", "media_play"),
-            ("Pause", "media_pause"),
-            ("Stop", "media_stop"),
-        ]:
-            tk.Button(
-                btn_frame,
-                text=text,
-                font=("Segoe UI", 8),
-                command=lambda a=action: self._on_action(self._entity_id, a, None),
-            ).pack(side=tk.LEFT, padx=(0, 4))
-
-    def _build_cover_controls(self) -> None:
-        btn_frame = tk.Frame(self._controls_frame, bg="#FFFFFF")
-        btn_frame.pack(fill=tk.X)
-
-        for text, action in [
-            ("Open", "open_cover"),
-            ("Close", "close_cover"),
-            ("Stop", "stop_cover"),
-        ]:
-            tk.Button(
-                btn_frame,
-                text=text,
-                font=("Segoe UI", 8),
-                command=lambda a=action: self._on_action(self._entity_id, a, None),
-            ).pack(side=tk.LEFT, padx=(0, 4))
-
-    def _build_lock_controls(self) -> None:
-        btn_frame = tk.Frame(self._controls_frame, bg="#FFFFFF")
-        btn_frame.pack(fill=tk.X)
-
-        for text, action in [("Lock", "lock"), ("Unlock", "unlock")]:
-            tk.Button(
-                btn_frame,
-                text=text,
-                font=("Segoe UI", 8),
-                command=lambda a=action: self._on_action(self._entity_id, a, None),
-            ).pack(side=tk.LEFT, padx=(0, 4))
-
-    def _build_binary_controls(self, on_text: str, off_text: str) -> None:
-        btn_frame = tk.Frame(self._controls_frame, bg="#FFFFFF")
-        btn_frame.pack(fill=tk.X)
-
-        tk.Button(
-            btn_frame,
-            text=on_text,
-            font=("Segoe UI", 8),
-            command=lambda: self._on_action(self._entity_id, "turn_on", None),
-        ).pack(side=tk.LEFT, padx=(0, 4))
-
-        tk.Button(
-            btn_frame,
-            text=off_text,
-            font=("Segoe UI", 8),
-            command=lambda: self._on_action(self._entity_id, "turn_off", None),
-        ).pack(side=tk.LEFT, padx=(0, 4))
+        self._control_widgets = controls
+        return frame
 
     def _build_footer(self) -> None:
         footer = tk.Frame(self, bg="#F5F5F5", height=20)
@@ -354,12 +182,16 @@ class DeviceCard(tk.Frame):
         self._state = state
         self._attributes = dict(attributes)
 
-        self._state_indicator.configure(
-            text=f"\u25cf {self._state.upper()}",
-            fg=self._state_color(),
-        )
+        for w in self._state_widgets:
+            w.destroy()
+        self._state_widgets.clear()
 
-        self._detail_label.configure(text=self._build_detail_text())
+        widgets = StateRenderer.render_state(
+            self._state_frame, self._entity_id, self._state, self._attributes
+        )
+        for w in widgets:
+            w.pack(anchor="w", fill=tk.X)
+        self._state_widgets = widgets
 
         if old_state != state:
             self._animate_flash()

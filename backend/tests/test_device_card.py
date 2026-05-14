@@ -267,17 +267,27 @@ class TestDeviceCard:
         finally:
             bridge.shutdown()
 
-    def test_state_color_on_green(self, tk_root):
+    def test_state_renderer_integration_creates_widgets(self, tk_root):
         card = self._make_card(tk_root, "light", "on", self._LIGHT_ATTRS)
-        assert card._state_color() == "#2ECC40"
+        card.pack()
+        tk_root.update()
+        assert len(card._state_widgets) >= 1
 
-    def test_state_color_off_gray(self, tk_root):
-        card = self._make_card(tk_root, "light", "off", self._LIGHT_ATTRS)
-        assert card._state_color() == "#AAAAAA"
+    def test_update_state_rebuilds_state_widgets(self, tk_root):
+        card = self._make_card(tk_root, "light", "on", self._LIGHT_ATTRS)
+        card.pack()
+        tk_root.update()
+        old_count = len(card._state_widgets)
+        card.update_state("off", self._LIGHT_ATTRS)
+        tk_root.update()
+        assert len(card._state_widgets) >= 1
+        assert card._state == "off"
 
-    def test_state_color_unavailable_red(self, tk_root):
-        card = self._make_card(tk_root, "light", "unavailable", self._LIGHT_ATTRS)
-        assert card._state_color() == "#E74C3C"
+    def test_controls_integration_creates_widgets(self, tk_root):
+        card = self._make_card(tk_root, "light", "on", self._LIGHT_ATTRS)
+        card.pack()
+        tk_root.update()
+        assert len(card._control_widgets) >= 1
 
     def test_card_width_is_280(self, tk_root):
         card = self._make_card(tk_root, "light", "on", self._LIGHT_ATTRS)
