@@ -1,264 +1,229 @@
-"""DeviceCard - individual device card widget with state display and controls."""
+"""Device card widget — per-device card integrating WidgetFactory and StateRenderer."""
 
 from __future__ import annotations
 
+import logging
 import tkinter as tk
-from tkinter import ttk
-from typing import Any, Callable
+from typing import Any, Callable, TYPE_CHECKING
 
-from ha_client.models.device import Device, Light, Switch, Sensor
-from ha_client.models.entity import EntityDomain
+if TYPE_CHECKING:
+    from ha_client.gui.async_bridge import AsyncTkBridge
 
+from ha_client.gui.state_renderer import StateRenderer
+from ha_client.gui.widget_factory import WidgetFactory
 
-class StateRenderer:
-    """Renders device state into visual indicators."""
+logger = logging.getLogger(__name__)
 
-    @staticmethod
-    def render(parent: tk.Widget, device: Any) -> None:
-        for child in parent.winfo_children():
-            child.destroy()
+_DOMAIN_ICONS: dict[str, str] = {
+    "light": "\U0001f4a1",
+    "switch": "\U0001f50c",
+    "sensor": "\U0001f4ca",
+    "binary_sensor": "\U0001f6a8",
+    "climate": "\U0001f321\ufe0f",
+    "cover": "\U0001f6aa",
+    "media_player": "\U0001f4fa",
+    "fan": "\U0001f4a8",
+    "lock": "\U0001f512",
+    "scene": "\U0001f3ac",
+    "automation": "\U0001f916",
+    "script": "\U0001f4dc",
+    "unknown": "\U00002753",
+}
 
-        state = str(getattr(device, "state", "unknown"))
-        domain = StateRenderer._resolve_domain(device)
-
-        if domain in ("light", "switch"):
-            on = state == "on"
-            indicator = ttk.Label(
-                parent,
-                text="\u25cf ON" if on else "\u25cb OFF",
-                foreground="#2ECC40" if on else "#AAAAAA",
-                font=("TkDefaultFont", 11, "bold"),
-            )
-            indicator.pack(anchor="w", pady=(4, 0))
-
-        if domain == "light":
-            brightness = getattr(device, "brightness", None)
-            if brightness is None:
-                attrs = getattr(device, "attributes", {})
-                brightness = attrs.get("brightness") if isinstance(attrs, dict) else None
-            if brightness is not None:
-                try:
-                    pct = round(int(brightness) / 2.55)
-                    bar = ttk.Progressbar(parent, length=80, mode="determinate", value=pct)
-                    bar.pack(anchor="w", pady=(4, 0))
-                    ttk.Label(parent, text=f"{pct}%", font=("TkDefaultFont", 9)).pack(anchor="w")
-                except (TypeError, ValueError):
-                    pass
-
-        elif domain == "sensor":
-            unit = StateRenderer._resolve_unit(device)
-            label = f"{state}{' ' + unit if unit else ''}"
-            ttk.Label(parent, text=label, font=("TkDefaultFont", 11, "bold"), foreground="#5C7080").pack(
-                anchor="w", pady=(4, 0)
-            )
-
-        else:
-            ttk.Label(
-                parent,
-                text=f"State: {state}",
-                font=("TkDefaultFont", 10),
-                foreground="#8A9BA8",
-            ).pack(anchor="w", pady=(4, 0))
-
-    @staticmethod
-    def _resolve_domain(device: Any) -> str:
-        domain = getattr(device, "domain", None)
-        if isinstance(domain, EntityDomain):
-            return domain.value
-        if domain is not None:
-            return str(domain).lower()
-        return "unknown"
-
-    @staticmethod
-    def _resolve_unit(device: Any) -> str:
-        unit = getattr(device, "unit_of_measurement", None)
-        if unit is not None:
-            return str(unit)
-        attrs = getattr(device, "attributes", {})
-        if isinstance(attrs, dict):
-            u = attrs.get("unit_of_measurement", "")
-            return str(u) if u else ""
-        return ""
-
-
-class WidgetFactory:
-    """Creates control widgets for a device based on its domain and available services."""
-
-    def __init__(self, services: dict | None = None):
-        self._services = services or {}
-
-    def create_controls(self, parent: tk.Widget, device: Any, on_action: Callable) -> None:
-        for child in parent.winfo_children():
-            child.destroy()
-
-        domain = self._resolve_domain(device)
-        entity_id = str(getattr(device, "entity_id", ""))
-
-        if domain == "light":
-            self._create_light_controls(parent, entity_id, device, on_action)
-        elif domain == "switch":
-            self._create_switch_controls(parent, entity_id, on_action)
-        elif domain == "cover":
-            self._create_cover_controls(parent, entity_id, on_action)
-        elif domain == "media_player":
-            self._create_media_controls(parent, entity_id, on_action)
-        else:
-            ttk.Label(parent, text="---", foreground="#AAAAAA").pack(pady=(4, 0))
-
-    def _create_light_controls(self, parent, entity_id, device, on_action):
-        frame = ttk.Frame(parent)
-        frame.pack(fill="x", pady=(6, 0))
-        ttk.Button(frame, text="Toggle", command=lambda: on_action(entity_id, "toggle")).pack(
-            side="left", padx=(0, 4)
-        )
-        ttk.Button(frame, text="On", command=lambda: on_action(entity_id, "turn_on")).pack(
-            side="left", padx=(0, 4)
-        )
-        ttk.Button(frame, text="Off", command=lambda: on_action(entity_id, "turn_off")).pack(side="left")
-
-    def _create_switch_controls(self, parent, entity_id, on_action):
-        frame = ttk.Frame(parent)
-        frame.pack(fill="x", pady=(6, 0))
-        ttk.Button(frame, text="Toggle", command=lambda: on_action(entity_id, "toggle")).pack(
-            side="left", padx=(0, 4)
-        )
-        ttk.Button(frame, text="On", command=lambda: on_action(entity_id, "turn_on")).pack(
-            side="left", padx=(0, 4)
-        )
-        ttk.Button(frame, text="Off", command=lambda: on_action(entity_id, "turn_off")).pack(side="left")
-
-    def _create_cover_controls(self, parent, entity_id, on_action):
-        frame = ttk.Frame(parent)
-        frame.pack(fill="x", pady=(6, 0))
-        ttk.Button(frame, text="Open", command=lambda: on_action(entity_id, "open_cover")).pack(
-            side="left", padx=(0, 4)
-        )
-        ttk.Button(frame, text="Close", command=lambda: on_action(entity_id, "close_cover")).pack(
-            side="left", padx=(0, 4)
-        )
-        ttk.Button(frame, text="Stop", command=lambda: on_action(entity_id, "stop_cover")).pack(side="left")
-
-    def _create_media_controls(self, parent, entity_id, on_action):
-        frame = ttk.Frame(parent)
-        frame.pack(fill="x", pady=(6, 0))
-        ttk.Button(frame, text="Play", command=lambda: on_action(entity_id, "media_play")).pack(
-            side="left", padx=(0, 4)
-        )
-        ttk.Button(frame, text="Pause", command=lambda: on_action(entity_id, "media_pause")).pack(
-            side="left", padx=(0, 4)
-        )
-        ttk.Button(frame, text="Stop", command=lambda: on_action(entity_id, "media_stop")).pack(side="left")
-
-    @staticmethod
-    def _resolve_domain(device: Any) -> str:
-        domain = getattr(device, "domain", None)
-        if isinstance(domain, EntityDomain):
-            return domain.value
-        if domain is not None:
-            return str(domain).lower()
-        return "unknown"
+_CARD_WIDTH = 280
+_SELECTED_COLOR = "#2196F3"
+_FLASH_COLOR = "#FFD54F"
+_FLASH_DURATION_MS = 600
 
 
 class DeviceCard(tk.Frame):
-    """Card widget representing a single Home Assistant device."""
-
-    CARD_WIDTH = 200
-    CARD_HEIGHT = 160
-    _DOMAIN_COLORS = {
-        "light": "#D9822B",
-        "switch": "#106BA3",
-        "sensor": "#5C7080",
-        "binary_sensor": "#0F9960",
-        "cover": "#8E6B23",
-        "media_player": "#A82DA8",
-        "climate": "#D93838",
-        "unknown": "#8A9BA8",
-    }
+    """Single-device card using WidgetFactory and StateRenderer for controls and state."""
 
     def __init__(
         self,
         parent: tk.Widget,
-        device: Any,
-        on_action: Callable | None = None,
-        widget_factory: WidgetFactory | None = None,
-        **kw,
+        entity_id: str,
+        domain: str,
+        state: str,
+        attributes: dict[str, Any],
+        supported_features: set[int],
+        available_services: dict[str, dict[str, Any]],
+        on_action: Callable[[str, str, Any], None],
+        on_card_click: Callable[[str], None],
+        bridge: AsyncTkBridge | None = None,
     ):
-        super().__init__(parent, **kw)
-        self._device = device
-        self._on_action = on_action or (lambda eid, act: None)
-        self._widget_factory = widget_factory or WidgetFactory()
-
-        self.configure(
-            width=self.CARD_WIDTH,
-            height=self.CARD_HEIGHT,
-            relief=tk.RAISED,
+        super().__init__(
+            parent,
+            width=_CARD_WIDTH,
             borderwidth=1,
-            bg="#FFFFFF",
+            relief=tk.FLAT,
+            highlightthickness=0,
         )
+        self._entity_id = entity_id
+        self._domain = domain
+        self._state = state
+        self._attributes = dict(attributes)
+        self._supported_features = set(supported_features)
+        self._available_services = dict(available_services)
+        self._on_action = on_action
+        self._on_card_click = on_card_click
+        self._bridge = bridge
+        self._selected = False
+        self._flash_id: str | None = None
+        self._state_widgets: list[tk.Widget] = []
+
+        self._friendly_name = self._attributes.get("friendly_name", entity_id)
+
         self.pack_propagate(False)
+        self.configure(width=_CARD_WIDTH)
 
-        self._build_card(device)
+        self._build_title_bar()
+        self._state_frame = self._build_state_area()
+        self._controls_frame = self._build_controls_area()
+        self._build_footer()
 
-    @property
-    def device(self):
-        return self._device
+        self.bind("<Button-1>", self._handle_click)
+        self._bind_children_recursive(self, "<Button-1>", self._handle_click)
 
-    @property
-    def entity_id(self) -> str:
-        return str(getattr(self._device, "entity_id", ""))
+    def _bind_children_recursive(self, widget: tk.Widget, sequence: str, handler: Callable) -> None:
+        for child in widget.winfo_children():
+            child.bind(sequence, handler)
+            self._bind_children_recursive(child, sequence, handler)
 
-    def update_state(self, device: Any) -> None:
-        self._device = device
-        self._rebuild_state()
+    def _build_title_bar(self) -> None:
+        bar = tk.Frame(self, bg="#F5F5F5", height=32)
+        bar.pack(fill=tk.X)
+        bar.pack_propagate(False)
 
-    def _build_card(self, device: Any) -> None:
-        entity_id = str(getattr(device, "entity_id", ""))
-        name = str(getattr(device, "name", entity_id))
-        domain = self._resolve_domain(device)
-
-        header_color = self._DOMAIN_COLORS.get(domain, self._DOMAIN_COLORS["unknown"])
-        header = tk.Frame(self, bg=header_color, height=24)
-        header.pack(fill="x")
-        header.pack_propagate(False)
-        domain_label = tk.Label(
-            header, text=domain.upper(), bg=header_color, fg="#FFFFFF",
-            font=("TkDefaultFont", 8, "bold"),
+        icon = _DOMAIN_ICONS.get(self._domain, _DOMAIN_ICONS["unknown"])
+        self._title_label = tk.Label(
+            bar,
+            text=f"{icon} {self._friendly_name}",
+            bg="#F5F5F5",
+            fg="#333333",
+            font=("Segoe UI", 9, "bold"),
+            anchor="w",
+            padx=8,
         )
-        domain_label.pack(side="left", padx=6, pady=2)
+        self._title_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        body = tk.Frame(self, bg="#FFFFFF")
-        body.pack(fill="both", expand=True, padx=8, pady=(6, 4))
-        body.pack_propagate(False)
-
-        name_label = tk.Label(
-            body, text=name, bg="#FFFFFF", fg="#333333",
-            font=("TkDefaultFont", 10, "bold"), anchor="w", wraplength=180,
+        close_btn = tk.Label(
+            bar,
+            text="[X]",
+            bg="#F5F5F5",
+            fg="#999999",
+            font=("Segoe UI", 9, "bold"),
+            padx=8,
+            cursor="hand2",
         )
-        name_label.pack(fill="x")
+        close_btn.pack(side=tk.RIGHT)
+        close_btn.bind("<Button-1>", lambda e: self._on_card_click(self._entity_id))
 
-        eid_label = tk.Label(
-            body, text=entity_id, bg="#FFFFFF", fg="#888888",
-            font=("TkDefaultFont", 7), anchor="w",
+    def _build_state_area(self) -> tk.Frame:
+        frame = tk.Frame(self, bg="#FFFFFF", padx=8, pady=4)
+        frame.pack(fill=tk.X)
+
+        widgets = StateRenderer.render_state(frame, self._entity_id, self._state, self._attributes)
+        for w in widgets:
+            w.pack(anchor="w", fill=tk.X)
+        self._state_widgets = widgets
+        return frame
+
+    def _build_controls_area(self) -> tk.Frame:
+        frame = tk.Frame(self, bg="#FFFFFF", padx=8, pady=4)
+        frame.pack(fill=tk.X)
+
+        controls = WidgetFactory.build_widgets(
+            parent=frame,
+            domain=self._domain,
+            entity_id=self._entity_id,
+            attributes=self._attributes,
+            state=self._state,
+            supported_features=self._supported_features,
+            available_services=self._available_services,
+            on_change=self._on_action,
         )
-        eid_label.pack(fill="x", pady=(2, 0))
 
-        self._state_frame = tk.Frame(body, bg="#FFFFFF")
-        self._state_frame.pack(fill="x", pady=(4, 0))
-        StateRenderer.render(self._state_frame, device)
+        if not controls:
+            tk.Label(
+                frame,
+                text="No controls",
+                bg="#FFFFFF",
+                fg="#AAAAAA",
+                font=("Segoe UI", 8),
+            ).pack(anchor="w")
+        else:
+            for ctrl in controls:
+                ctrl.pack(anchor="w", fill=tk.X, pady=1)
 
-        self._controls_frame = tk.Frame(body, bg="#FFFFFF")
-        self._controls_frame.pack(fill="x", side="bottom")
-        if self._widget_factory:
-            self._widget_factory.create_controls(self._controls_frame, device, self._on_action)
+        self._control_widgets = controls
+        return frame
 
-    def _rebuild_state(self) -> None:
-        StateRenderer.render(self._state_frame, self._device)
+    def _build_footer(self) -> None:
+        footer = tk.Frame(self, bg="#F5F5F5", height=20)
+        footer.pack(fill=tk.X)
+        footer.pack_propagate(False)
+
+        tk.Label(
+            footer,
+            text=self._entity_id,
+            bg="#F5F5F5",
+            fg="#AAAAAA",
+            font=("Consolas", 7),
+            anchor="w",
+            padx=8,
+        ).pack(anchor="w")
+
+    def _handle_click(self, _event: tk.Event | None = None) -> None:
+        self._on_card_click(self._entity_id)
+
+    def update_state(self, state: str, attributes: dict[str, Any]) -> None:
+        old_state = self._state
+        self._state = state
+        self._attributes = dict(attributes)
+
+        for w in self._state_widgets:
+            w.destroy()
+        self._state_widgets.clear()
+
+        widgets = StateRenderer.render_state(
+            self._state_frame, self._entity_id, self._state, self._attributes
+        )
+        for w in widgets:
+            w.pack(anchor="w", fill=tk.X)
+        self._state_widgets = widgets
+
+        if old_state != state:
+            self._animate_flash()
+
+    def _animate_flash(self) -> None:
+        if self._flash_id is not None:
+            self.after_cancel(self._flash_id)
+            self._flash_id = None
+
+        original_bg = self.cget("bg")
+        self.configure(bg=_FLASH_COLOR)
+        self._state_frame.configure(bg=_FLASH_COLOR)
+        self._controls_frame.configure(bg=_FLASH_COLOR)
+
+        def _restore() -> None:
+            self.configure(bg=original_bg)
+            self._state_frame.configure(bg="#FFFFFF")
+            self._controls_frame.configure(bg="#FFFFFF")
+            self._flash_id = None
+
+        self._flash_id = self.after(_FLASH_DURATION_MS, _restore)
+
+    def set_selected(self, selected: bool) -> None:
+        self._selected = selected
+        color = _SELECTED_COLOR if selected else "#CCCCCC"
+        width = 2 if selected else 1
+        self.configure(
+            highlightbackground=color,
+            highlightcolor=color,
+            highlightthickness=width,
+        )
 
     @staticmethod
-    def _resolve_domain(device: Any) -> str:
-        domain = getattr(device, "domain", None)
-        if isinstance(domain, EntityDomain):
-            return domain.value
-        if domain is not None:
-            return str(domain).lower()
-        return "unknown"
+    def get_domain_icon(domain: str) -> str:
+        return _DOMAIN_ICONS.get(domain, _DOMAIN_ICONS["unknown"])

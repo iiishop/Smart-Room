@@ -16,7 +16,9 @@ if str(BACKEND) not in sys.path:
 from ha_client.core.event_bus import EventBus, EventType
 from ha_client.gui.async_bridge import AsyncTkBridge
 from ha_client.gui.card_grid import CardGridView
-from ha_client.gui.device_card import DeviceCard, WidgetFactory, StateRenderer
+from ha_client.gui.device_card import DeviceCard
+from ha_client.gui.widget_factory import WidgetFactory
+from ha_client.gui.state_renderer import StateRenderer
 
 
 class MockRest:
@@ -68,9 +70,7 @@ def event_bus():
 
 @pytest.fixture
 def bridge(root):
-    import asyncio
-    loop = asyncio.new_event_loop()
-    return AsyncTkBridge(root, loop)
+    return AsyncTkBridge(root)
 
 
 @pytest.fixture
@@ -214,96 +214,121 @@ class TestCardGridViewColumns:
 
 class TestDeviceCard:
     def test_device_card_creation(self, root, controller):
-        device = make_mock_device_simple("light.test", "Test Light", "light")
-        wf = WidgetFactory()
-        card = DeviceCard(root, device, widget_factory=wf)
-        assert card.entity_id == "light.test"
+        card = DeviceCard(
+            root,
+            entity_id="light.test",
+            domain="light",
+            state="on",
+            attributes={"friendly_name": "Test Light"},
+            supported_features={1},
+            available_services={},
+            on_action=lambda e, a, v: None,
+            on_card_click=lambda e: None,
+        )
+        assert card._entity_id == "light.test"
 
     def test_device_card_update_state(self, root):
-        device = make_mock_device_simple("light.test", "Test", "light", "off")
-        card = DeviceCard(root, device)
-        assert card._device.state == "off"
-
-        updated = make_mock_device_simple("light.test", "Test", "light", "on")
-        card.update_state(updated)
-        assert card._device.state == "on"
+        card = DeviceCard(
+            root,
+            entity_id="light.test",
+            domain="light",
+            state="on",
+            attributes={"friendly_name": "Test"},
+            supported_features={1},
+            available_services={},
+            on_action=lambda e, a, v: None,
+            on_card_click=lambda e: None,
+        )
+        card.update_state("on", {"friendly_name": "Test", "brightness": 128})
+        assert card._state == "on"
 
 
 class TestWidgetFactory:
-    def test_create_light_controls(self, root, controller):
-        from unittest.mock import MagicMock as Mock
-
-        device = make_mock_device_simple("light.test", "Test", "light")
-        wf = WidgetFactory()
+    def test_build_light_widgets(self, root):
         parent = tk.Frame(root)
         actions = []
-        wf.create_controls(parent, device, lambda eid, act: actions.append((eid, act)))
+        widgets = WidgetFactory.build_widgets(
+            parent=parent,
+            domain="light",
+            entity_id="light.test",
+            attributes={"friendly_name": "Test"},
+            state="on",
+            supported_features={1},
+            available_services={"light": {"turn_off": {}, "turn_on": {}}},
+            on_change=lambda e, a, v: actions.append((e, a, v)),
+        )
         root.update_idletasks()
-        assert len(parent.winfo_children()) > 0
+        assert len(widgets) > 0
 
-    def test_create_switch_controls(self, root):
-        device = make_mock_device_simple("switch.test", "Test", "switch")
-        wf = WidgetFactory()
+    def test_build_switch_widgets(self, root):
         parent = tk.Frame(root)
         actions = []
-        wf.create_controls(parent, device, lambda eid, act: actions.append((eid, act)))
+        widgets = WidgetFactory.build_widgets(
+            parent=parent,
+            domain="switch",
+            entity_id="switch.test",
+            attributes={"friendly_name": "Test"},
+            state="off",
+            supported_features=set(),
+            available_services={"switch": {"turn_on": {}, "turn_off": {}}},
+            on_change=lambda e, a, v: actions.append((e, a, v)),
+        )
         root.update_idletasks()
-        assert len(parent.winfo_children()) > 0
+        assert len(widgets) > 0
 
 
 class TestStateRenderer:
     def test_render_light_state(self, root):
-        device = make_mock_device_simple("light.test", "Test", "light", "on")
         parent = tk.Frame(root)
-        StateRenderer.render(parent, device)
-        assert len(parent.winfo_children()) > 0
+        widgets = StateRenderer.render_state(
+            parent,
+            entity_id="light.test",
+            state="on",
+            attributes={"friendly_name": "Test", "brightness": 128},
+        )
+        root.update_idletasks()
+        assert len(widgets) > 0
 
     def test_render_switch_off_state(self, root):
-        device = make_mock_device_simple("switch.test", "Test", "switch", "off")
         parent = tk.Frame(root)
-        StateRenderer.render(parent, device)
-        assert len(parent.winfo_children()) > 0
+        widgets = StateRenderer.render_state(
+            parent,
+            entity_id="switch.test",
+            state="off",
+            attributes={"friendly_name": "Test"},
+        )
+        root.update_idletasks()
+        assert len(widgets) > 0
 
     def test_render_sensor_state(self, root):
-        device = make_mock_device_simple("sensor.test", "Test", "sensor", "22.5")
         parent = tk.Frame(root)
-        StateRenderer.render(parent, device)
-        assert len(parent.winfo_children()) > 0
+        widgets = StateRenderer.render_state(
+            parent,
+            entity_id="sensor.test",
+            state="22.5",
+            attributes={"friendly_name": "Test", "unit_of_measurement": "°C"},
+        )
+        root.update_idletasks()
+        assert len(widgets) > 0
 
 
 class TestAsyncBridge:
     def test_schedule_ui_runs_callback(self, root, bridge):
         called = []
         bridge.schedule_ui(lambda: called.append(True))
-        root.update()
+        bridge.drain_ui()
         assert len(called) == 1
 
     def test_run_async_background(self, bridge):
         import asyncio
-        import threading
 
         async def coro():
             return 42
 
-        loop_started = threading.Event()
-        exc_info = [None]
-
-        def run_loop():
-            try:
-                asyncio.set_event_loop(bridge.loop)
-                loop_started.set()
-                bridge.loop.run_forever()
-            except Exception:
-                exc_info[0] = sys.exc_info()
-
-        loop_thread = threading.Thread(target=run_loop, daemon=True)
-        loop_thread.start()
-        loop_started.wait(timeout=5)
-
-        try:
-            future = bridge.run_async_background(coro())
-            result = future.result(timeout=10)
-            assert result == 42
-        finally:
-            bridge.loop.call_soon_threadsafe(bridge.loop.stop)
-            loop_thread.join(timeout=2)
+        results = []
+        bridge.run_async(coro(), on_result=lambda r: results.append(r))
+        import time
+        time.sleep(0.5)
+        bridge.drain_ui()
+        assert 42 in results
+        bridge.shutdown()

@@ -9,7 +9,8 @@ from typing import Any
 
 from ha_client.core.event_bus import EventBus, EventType
 from ha_client.gui.async_bridge import AsyncTkBridge
-from ha_client.gui.device_card import DeviceCard, WidgetFactory
+from ha_client.gui.device_card import DeviceCard
+from ha_client.gui.widget_factory import WidgetFactory
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +19,7 @@ class CardGridView(tk.Frame):
     """Card-based device grid with search, domain filter, and responsive layout."""
 
     CARD_WIDTH = 208
+    CARD_HEIGHT = 180
     CARD_SPACING = 12
     COLUMN_BREAKPOINTS = [
         (800, 2),
@@ -69,7 +71,9 @@ class CardGridView(tk.Frame):
     def update_device(self, entity_id: str, device: Any) -> None:
         card = self._cards.get(entity_id)
         if card is not None:
-            card.update_state(device)
+            state = str(getattr(device, "state", "unknown"))
+            attributes = getattr(device, "attributes", {}) or {}
+            card.update_state(state, attributes)
             return
 
         for i, d in enumerate(self._all_devices):
@@ -242,28 +246,38 @@ class CardGridView(tk.Frame):
             canvas_width = 800
 
         cols = self._columns_for_width(canvas_width)
-        widget_factory = WidgetFactory(self._services)
 
         for idx, device in enumerate(devices):
             row = idx // cols
             col = idx % cols
 
+            entity_id = str(getattr(device, "entity_id", ""))
+            domain = self._resolve_domain(device)
+            state = str(getattr(device, "state", "unknown"))
+            attributes = getattr(device, "attributes", {}) or {}
+            supported_features = getattr(device, "supported_features", set()) or set()
+
             card = DeviceCard(
                 self._grid_frame,
-                device,
+                entity_id=entity_id,
+                domain=domain,
+                state=state,
+                attributes=attributes,
+                supported_features=supported_features,
+                available_services=self._services or {},
                 on_action=self._on_device_action,
-                widget_factory=widget_factory,
+                on_card_click=self._on_card_click,
+                bridge=self._bridge,
             )
             x = col * (self.CARD_WIDTH + self.CARD_SPACING) + self.CARD_SPACING
-            y = row * (DeviceCard.CARD_HEIGHT + self.CARD_SPACING) + self.CARD_SPACING
+            y = row * (self.CARD_HEIGHT + self.CARD_SPACING) + self.CARD_SPACING
             card.place(x=x, y=y)
 
-            entity_id = str(getattr(device, "entity_id", ""))
             self._cards[entity_id] = card
 
         total_width = cols * (self.CARD_WIDTH + self.CARD_SPACING) + self.CARD_SPACING
         total_rows = (len(devices) + cols - 1) // cols
-        total_height = total_rows * (DeviceCard.CARD_HEIGHT + self.CARD_SPACING) + self.CARD_SPACING
+        total_height = total_rows * (self.CARD_HEIGHT + self.CARD_SPACING) + self.CARD_SPACING
 
         self._grid_frame.configure(width=max(total_width, canvas_width - 4), height=total_height)
         self._canvas.configure(scrollregion=(0, 0, total_width, total_height))
@@ -287,13 +301,18 @@ class CardGridView(tk.Frame):
                 return cols
         return 5
 
-    def _on_device_action(self, entity_id: str, action: str) -> None:
+    def _on_card_click(self, entity_id: str) -> None:
+        logger.debug("Card clicked: %s", entity_id)
+
+    def _on_device_action(self, entity_id: str, action: str, value: Any = None) -> None:
         if self._controller is None:
             return
 
         async def _dispatch():
             method = getattr(self._controller, action, None)
             if callable(method):
+                if value is not None:
+                    return await method(entity_id, value)
                 return await method(entity_id)
             return await self._controller.call_service(
                 entity_id.split(".")[0], action, entity_id=entity_id
