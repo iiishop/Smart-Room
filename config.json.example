@@ -1,9 +1,0 @@
-{
-  "ha_host": "homeassistant.local",
-  "ha_port": 8123,
-  "ha_token": "your_long_lived_access_token_here",
-  "ha_use_ssl": false,
-  "reconnect_interval": 5,
-  "reconnect_max_attempts": 10,
-  "ping_interval": 30
-}

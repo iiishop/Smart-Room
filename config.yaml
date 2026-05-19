@@ -1,8 +1,0 @@
-url: "http://homeassistant.local:8123"
-token: ""
-verify_ssl: false
-websocket_timeout: 30.0
-request_timeout: 10.0
-reconnect_delay: 3.0
-max_reconnect_attempts: 0
-log_max_lines: 500
