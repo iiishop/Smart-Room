@@ -91,7 +91,8 @@ namespace SmartRoom.Networking
         public bool TryRaycastViewport(
             float u,
             float v,
-            Camera camera,
+            Ray ray,
+            Transform referenceTransform,
             out float depthMeters,
             out Vector3 worldPoint,
             out Vector3 cameraPoint)
@@ -123,14 +124,10 @@ namespace SmartRoom.Networking
                 return false;
             }
 
-            if (camera == null)
-            {
-                return false;
-            }
-
-            Ray ray = camera.ViewportPointToRay(new Vector3(u, v, 0f));
             Vector3 world = ray.origin + ray.direction.normalized * z;
-            Vector3 cam = camera.transform.InverseTransformPoint(world);
+            Vector3 cam = referenceTransform != null
+                ? referenceTransform.InverseTransformPoint(world)
+                : ray.direction.normalized * z;
 
             depthMeters = z;
             worldPoint = world;
