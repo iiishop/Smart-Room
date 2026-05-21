@@ -1,37 +1,24 @@
 using System;
-using System.Collections.Concurrent;
-using System.IO;
-using System.Net.WebSockets;
+using System.Reflection;
 using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
+using Meta.XR;
 using UnityEngine;
 
 namespace SmartRoom.Networking
 {
     public class VisionReceiverModule : MonoBehaviour
     {
-        public event Action<VisionFrameResultData> VisionFrameReceived;
-
-        [Header("Dependencies")]
         [SerializeField] private BackendCommunicationManager manager;
-        [SerializeField] private StreamTransportSwitcher transportSwitcher;
+        [SerializeField] private DepthStreamModule depthStreamModule;
+        [SerializeField] private Camera rayCamera;
+        [SerializeField] private PassthroughCameraAccess passthroughCameraAccess;
+        [SerializeField] private int samplesPerObject = 3;
+        [SerializeField] private int maxObjectsPerFrame = 8;
 
-        [Header("Connection")]
-        [SerializeField] private string visionPath = "/ws/vision";
-        [SerializeField] private float reconnectDelaySeconds = 2f;
-
-        private readonly ConcurrentQueue<VisionFrameResultData> _receivedFrames = new ConcurrentQueue<VisionFrameResultData>();
-        private readonly ConcurrentQueue<PendingLog> _pendingLogs = new ConcurrentQueue<PendingLog>();
-
-        private ClientWebSocket _visionSocket;
-        private CancellationTokenSource _cts;
-        private bool _connecting;
-        private bool _isQuitting;
-        private float _nextReconnectAt;
-
-        public bool IsVisionConnected => _visionSocket != null && _visionSocket.State == WebSocketState.Open;
-        public VisionFrameResultData LatestFrame { get; private set; }
+        private MethodInfo _passthroughViewportRayMethod;
+        private bool _passthroughViewportRayMethodResolved;
+        private bool _loggedRaySource;
+        private bool _loggedPassthroughFallback;
 
         private void Awake()
         {
@@ -40,262 +27,250 @@ namespace SmartRoom.Networking
                 manager = FindFirstObjectByType<BackendCommunicationManager>();
             }
 
-            if (transportSwitcher == null)
+            if (depthStreamModule == null)
             {
-                transportSwitcher = FindFirstObjectByType<StreamTransportSwitcher>();
+                depthStreamModule = FindFirstObjectByType<DepthStreamModule>();
+            }
+
+            if (rayCamera == null)
+            {
+                rayCamera = Camera.main;
+            }
+
+            if (passthroughCameraAccess == null)
+            {
+                passthroughCameraAccess = FindFirstObjectByType<PassthroughCameraAccess>();
+            }
+
+            samplesPerObject = Mathf.Clamp(samplesPerObject, 1, 16);
+            maxObjectsPerFrame = Mathf.Clamp(maxObjectsPerFrame, 1, 64);
+        }
+
+        private void OnEnable()
+        {
+            if (manager != null)
+            {
+                manager.VisionMessageReceived += OnVisionMessage;
             }
         }
 
-        private void Start()
+        private void OnDisable()
         {
-            _cts = new CancellationTokenSource();
-            _nextReconnectAt = Time.time;
+            if (manager != null)
+            {
+                manager.VisionMessageReceived -= OnVisionMessage;
+            }
         }
 
-        private void Update()
+        private void OnVisionMessage(string json)
         {
-            FlushPendingLogs();
-            FlushReceivedFrames();
-
-            if (_isQuitting || IsVisionConnected || Time.time < _nextReconnectAt)
+            if (string.IsNullOrWhiteSpace(json) || manager == null || depthStreamModule == null)
             {
                 return;
             }
 
-            _nextReconnectAt = Time.time + reconnectDelaySeconds;
-            _ = EnsureVisionConnectedAsync();
-        }
-
-        private async Task EnsureVisionConnectedAsync()
-        {
-            if (_connecting || _isQuitting)
-            {
-                return;
-            }
-
-            if (transportSwitcher == null)
-            {
-                EnqueueLog("WARNING", "VisionReceiverModule missing StreamTransportSwitcher.");
-                return;
-            }
-
-            _connecting = true;
+            VisionFramePayload frame;
             try
             {
-                transportSwitcher.RefreshActiveTransport();
-                string url = transportSwitcher.BuildWebSocketUrl(visionPath);
-
-                DisposeSocket(_visionSocket);
-                _visionSocket = new ClientWebSocket();
-                await _visionSocket.ConnectAsync(new Uri(url), _cts.Token);
-
-                EnqueueLog("INFO", $"Vision websocket connected: {url}");
-                _ = ReceiveVisionLoopAsync(_visionSocket);
+                frame = JsonUtility.FromJson<VisionFramePayload>(json);
             }
             catch (Exception ex)
             {
-                EnqueueLog("WARNING", $"Vision websocket connect retry: {ex.Message}", ex.ToString());
+                manager.QueueUnityLog("WARNING", $"Vision payload parse failed: {ex.Message}");
+                return;
             }
-            finally
-            {
-                _connecting = false;
-            }
-        }
 
-        private async Task ReceiveVisionLoopAsync(ClientWebSocket socket)
-        {
-            byte[] buffer = new byte[4096];
-            try
+            if (frame?.objects == null || frame.objects.Length == 0)
             {
-                while (!_isQuitting && socket != null && socket.State == WebSocketState.Open)
+                return;
+            }
+
+            int objectCount = Mathf.Min(frame.objects.Length, maxObjectsPerFrame);
+            for (int objectIndex = 0; objectIndex < objectCount; objectIndex++)
+            {
+                VisionTrackedMaskPayload trackedMask = frame.objects[objectIndex];
+                if (trackedMask?.mask_rle == null)
                 {
-                    using var stream = new MemoryStream();
-                    WebSocketReceiveResult result;
-                    do
-                    {
-                        result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), _cts.Token);
-                        if (result.MessageType == WebSocketMessageType.Close)
-                        {
-                            EnqueueLog("WARNING", "Vision websocket closed by server.");
-                            TryCloseSocket(socket);
-                            return;
-                        }
+                    continue;
+                }
 
-                        if (result.Count > 0)
-                        {
-                            stream.Write(buffer, 0, result.Count);
-                        }
-                    }
-                    while (!result.EndOfMessage);
+                VisionMaskSamplePoint[] samples = VisionMaskSampling.SampleMaskPixels(frame, trackedMask, samplesPerObject);
+                if (samples.Length == 0)
+                {
+                    manager.QueueUnityLog("WARNING", $"Vision object_id={trackedMask.object_id} has no foreground pixels to sample.");
+                    continue;
+                }
 
-                    if (result.MessageType != WebSocketMessageType.Text || stream.Length == 0)
+                var successful = new StringBuilder();
+                int hitCount = 0;
+                for (int sampleIndex = 0; sampleIndex < samples.Length; sampleIndex++)
+                {
+                    VisionMaskSamplePoint sample = samples[sampleIndex];
+                    if (!TryGetViewportRay(sample.ViewportU, sample.ViewportV, out Ray ray, out Transform rayTransform))
                     {
                         continue;
                     }
 
-                    string json = Encoding.UTF8.GetString(stream.GetBuffer(), 0, (int)stream.Length);
-                    VisionFrameResultData frame = VisionMessageParser.ParseFrameResult(json);
-                    _receivedFrames.Enqueue(frame);
+                    if (!depthStreamModule.TryRaycastViewport(sample.ViewportU, sample.ViewportV, ray, rayTransform, out float depthM, out Vector3 worldPoint, out _))
+                    {
+                        continue;
+                    }
+
+                    if (successful.Length > 0)
+                    {
+                        successful.Append("; ");
+                    }
+
+                    successful.AppendFormat(
+                        "pixel=({0},{1}) viewport=({2:F3},{3:F3}) world=({4:F3},{5:F3},{6:F3}) depth={7:F3}",
+                        sample.PixelX,
+                        sample.PixelY,
+                        sample.ViewportU,
+                        sample.ViewportV,
+                        worldPoint.x,
+                        worldPoint.y,
+                        worldPoint.z,
+                        depthM
+                    );
+                    hitCount++;
+                }
+
+                if (hitCount > 0)
+                {
+                    string label = string.IsNullOrWhiteSpace(trackedMask.label) ? "unknown" : trackedMask.label;
+                    manager.QueueUnityLog(
+                        "INFO",
+                        $"Vision object_id={trackedMask.object_id} label={label} hits={hitCount}/{samples.Length} samples=[{successful}]"
+                    );
+                }
+                else
+                {
+                    manager.QueueUnityLog(
+                        "WARNING",
+                        $"Vision object_id={trackedMask.object_id} produced no 3D hits from {samples.Length} sampled mask pixels."
+                    );
                 }
             }
-            catch (OperationCanceledException)
+        }
+
+        private bool TryGetViewportRay(float u, float v, out Ray ray, out Transform rayTransform)
+        {
+            if (TryGetPassthroughViewportRay(u, v, out ray))
             {
+                rayTransform = passthroughCameraAccess != null ? passthroughCameraAccess.transform : null;
+                LogRaySourceOnce("PassthroughCameraAccess.ViewportPointToRay");
+                return true;
+            }
+
+            if (rayCamera != null)
+            {
+                ray = rayCamera.ViewportPointToRay(new Vector3(u, v, 0f));
+                rayTransform = rayCamera.transform;
+                if (!_loggedPassthroughFallback && passthroughCameraAccess != null)
+                {
+                    _loggedPassthroughFallback = true;
+                    manager?.QueueUnityLog("WARNING", "PassthroughCameraAccess.ViewportPointToRay unavailable; falling back to Camera.ViewportPointToRay for vision receiver.");
+                }
+
+                LogRaySourceOnce($"Camera.ViewportPointToRay({rayCamera.name})");
+                return true;
+            }
+
+            ray = default;
+            rayTransform = null;
+            return false;
+        }
+
+        private bool TryGetPassthroughViewportRay(float u, float v, out Ray ray)
+        {
+            ray = default;
+
+            if (passthroughCameraAccess == null || !passthroughCameraAccess.enabled || !passthroughCameraAccess.IsPlaying)
+            {
+                return false;
+            }
+
+            MethodInfo method = ResolvePassthroughViewportRayMethod();
+            if (method == null)
+            {
+                return false;
+            }
+
+            object arg = method.GetParameters()[0].ParameterType == typeof(Vector2)
+                ? new Vector2(u, v)
+                : new Vector3(u, v, 0f);
+
+            object target = method.IsStatic ? null : passthroughCameraAccess;
+            try
+            {
+                object result = method.Invoke(target, new[] { arg });
+                if (result is Ray castRay)
+                {
+                    ray = castRay;
+                    return true;
+                }
+            }
+            catch (TargetInvocationException ex)
+            {
+                if (!_loggedPassthroughFallback)
+                {
+                    _loggedPassthroughFallback = true;
+                    manager?.QueueUnityLog("WARNING", $"PassthroughCameraAccess.ViewportPointToRay failed: {ex.InnerException?.Message ?? ex.Message}");
+                }
             }
             catch (Exception ex)
             {
-                if (!_isQuitting)
+                if (!_loggedPassthroughFallback)
                 {
-                    EnqueueLog("WARNING", $"Vision websocket receive failed: {ex.Message}", ex.ToString());
+                    _loggedPassthroughFallback = true;
+                    manager?.QueueUnityLog("WARNING", $"PassthroughCameraAccess.ViewportPointToRay failed: {ex.Message}");
                 }
             }
-            finally
-            {
-                if (!_isQuitting)
-                {
-                    DisposeSocket(socket);
-                }
-            }
+
+            return false;
         }
 
-        private void FlushReceivedFrames()
+        private MethodInfo ResolvePassthroughViewportRayMethod()
         {
-            while (_receivedFrames.TryDequeue(out VisionFrameResultData frame))
+            if (_passthroughViewportRayMethodResolved)
             {
-                LatestFrame = frame;
-                LogFrame(frame);
-
-                try
-                {
-                    VisionFrameReceived?.Invoke(frame);
-                }
-                catch (Exception ex)
-                {
-                    EnqueueLog("WARNING", $"VisionFrameReceived handler failed: {ex.Message}", ex.ToString());
-                }
+                return _passthroughViewportRayMethod;
             }
-        }
 
-        private void LogFrame(VisionFrameResultData frame)
-        {
-            foreach (VisionObjectData item in frame.Objects)
+            _passthroughViewportRayMethodResolved = true;
+            foreach (MethodInfo method in typeof(PassthroughCameraAccess).GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static))
             {
-                EnqueueLog(
-                    "INFO",
-                    $"Vision object_id={item.ObjectId} label={item.Label} mask={item.DecodedMask.Width}x{item.DecodedMask.Height} area={item.Area}");
-            }
-        }
-
-        private void FlushPendingLogs()
-        {
-            while (_pendingLogs.TryDequeue(out PendingLog entry))
-            {
-                if (manager != null)
+                if (method.Name != "ViewportPointToRay" || method.ReturnType != typeof(Ray))
                 {
-                    manager.QueueUnityLog(entry.Level, entry.Message, stackTrace: entry.StackTrace);
                     continue;
                 }
 
-                if (entry.Level == "WARNING")
+                ParameterInfo[] parameters = method.GetParameters();
+                if (parameters.Length != 1)
                 {
-                    Debug.LogWarning(entry.Message, this);
                     continue;
                 }
 
-                if (entry.Level == "ERROR")
+                Type parameterType = parameters[0].ParameterType;
+                if (parameterType == typeof(Vector2) || parameterType == typeof(Vector3))
                 {
-                    Debug.LogError(entry.Message, this);
-                    continue;
+                    _passthroughViewportRayMethod = method;
+                    break;
                 }
-
-                Debug.Log(entry.Message, this);
             }
+
+            return _passthroughViewportRayMethod;
         }
 
-        private void EnqueueLog(string level, string message, string stackTrace = null)
+        private void LogRaySourceOnce(string source)
         {
-            _pendingLogs.Enqueue(new PendingLog(level, message, stackTrace));
-        }
-
-        private void DisposeSocket(ClientWebSocket socket)
-        {
-            if (socket == null)
+            if (_loggedRaySource)
             {
                 return;
             }
 
-            TryCloseSocket(socket);
-            if (VisionSocketOwnership.ShouldClearCurrentSocket(_visionSocket, socket))
-            {
-                _visionSocket = null;
-            }
-        }
-
-        private static void TryCloseSocket(ClientWebSocket socket)
-        {
-            if (socket == null)
-            {
-                return;
-            }
-
-            try
-            {
-                socket.Dispose();
-            }
-            catch
-            {
-            }
-        }
-
-        private async void OnApplicationQuit()
-        {
-            await ShutdownAsync();
-        }
-
-        private async void OnDestroy()
-        {
-            await ShutdownAsync();
-        }
-
-        private async Task ShutdownAsync()
-        {
-            if (_isQuitting)
-            {
-                return;
-            }
-
-            _isQuitting = true;
-            _cts?.Cancel();
-
-            if (_visionSocket != null)
-            {
-                try
-                {
-                    await _visionSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Quit", CancellationToken.None);
-                }
-                catch
-                {
-                }
-
-                _visionSocket.Dispose();
-                _visionSocket = null;
-            }
-
-            _cts?.Dispose();
-            _cts = null;
-        }
-
-        private readonly struct PendingLog
-        {
-            public string Level { get; }
-            public string Message { get; }
-            public string StackTrace { get; }
-
-            public PendingLog(string level, string message, string stackTrace)
-            {
-                Level = level ?? "INFO";
-                Message = message ?? string.Empty;
-                StackTrace = stackTrace;
-            }
+            _loggedRaySource = true;
+            manager?.QueueUnityLog("INFO", $"VisionReceiverModule ray source: {source}");
         }
     }
 }

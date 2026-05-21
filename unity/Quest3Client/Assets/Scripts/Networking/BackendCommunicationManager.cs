@@ -11,16 +11,19 @@ namespace SmartRoom.Networking
     public class BackendCommunicationManager : MonoBehaviour
     {
         public event Action<string> ControlMessageReceived;
+        public event Action<string> VisionMessageReceived;
         [Header("Transport")]
         [SerializeField] private StreamTransportSwitcher transportSwitcher;
         [SerializeField] private string controlPath = "/ws/heartbeat";
         [SerializeField] private string rgbPath = "/ws/rgb";
         [SerializeField] private string depthPath = "/ws/depth";
+        [SerializeField] private string visionPath = "/ws/vision";
         [SerializeField] private float reconnectDelaySeconds = 2f;
 
         private ClientWebSocket _controlSocket;
         private ClientWebSocket _rgbSocket;
         private ClientWebSocket _depthSocket;
+        private ClientWebSocket _visionSocket;
         private CancellationTokenSource _cts;
 
         private readonly ConcurrentQueue<string> _controlQueue = new ConcurrentQueue<string>();
@@ -31,6 +34,7 @@ namespace SmartRoom.Networking
         private bool _controlConnecting;
         private bool _rgbConnecting;
         private bool _depthConnecting;
+        private bool _visionConnecting;
         private bool _controlSending;
         private bool _rgbSending;
         private bool _depthSending;
@@ -38,10 +42,12 @@ namespace SmartRoom.Networking
         private float _nextControlReconnectAt;
         private float _nextRgbReconnectAt;
         private float _nextDepthReconnectAt;
+        private float _nextVisionReconnectAt;
 
         public bool IsControlConnected => _controlSocket != null && _controlSocket.State == WebSocketState.Open;
         public bool IsRgbConnected => _rgbSocket != null && _rgbSocket.State == WebSocketState.Open;
         public bool IsDepthConnected => _depthSocket != null && _depthSocket.State == WebSocketState.Open;
+        public bool IsVisionConnected => _visionSocket != null && _visionSocket.State == WebSocketState.Open;
         public long LatestRgbTimestampMs => _latestRgbTimestampMs;
 
         private void Awake()
@@ -58,6 +64,7 @@ namespace SmartRoom.Networking
             _nextControlReconnectAt = Time.time;
             _nextRgbReconnectAt = Time.time;
             _nextDepthReconnectAt = Time.time;
+            _nextVisionReconnectAt = Time.time;
         }
 
         private void Update()
@@ -83,6 +90,12 @@ namespace SmartRoom.Networking
             {
                 _nextDepthReconnectAt = Time.time + reconnectDelaySeconds;
                 _ = EnsureDepthConnectedAsync();
+            }
+
+            if (!IsVisionConnected && Time.time >= _nextVisionReconnectAt)
+            {
+                _nextVisionReconnectAt = Time.time + reconnectDelaySeconds;
+                _ = EnsureVisionConnectedAsync();
             }
 
             if (IsControlConnected && !_controlSending)
@@ -224,6 +237,36 @@ namespace SmartRoom.Networking
             }
         }
 
+        private async Task EnsureVisionConnectedAsync()
+        {
+            if (_visionConnecting || _isQuitting)
+            {
+                return;
+            }
+
+            _visionConnecting = true;
+            try
+            {
+                transportSwitcher.RefreshActiveTransport();
+                string url = transportSwitcher.BuildWebSocketUrl(visionPath);
+
+                _visionSocket?.Dispose();
+                _visionSocket = new ClientWebSocket();
+                await _visionSocket.ConnectAsync(new Uri(url), _cts.Token);
+
+                QueueUnityLog("INFO", $"Vision websocket connected: {url}");
+                _ = ReceiveVisionLoopAsync();
+            }
+            catch (Exception ex)
+            {
+                QueueUnityLog("WARNING", $"Vision websocket connect retry: {ex.Message}", stackTrace: ex.ToString());
+            }
+            finally
+            {
+                _visionConnecting = false;
+            }
+        }
+
         private async Task FlushControlQueueAsync()
         {
             if (_controlSocket == null || _controlSocket.State != WebSocketState.Open)
@@ -357,6 +400,50 @@ namespace SmartRoom.Networking
             TryCloseSocket(_controlSocket);
         }
 
+        private async Task ReceiveVisionLoopAsync()
+        {
+            if (_visionSocket == null)
+            {
+                return;
+            }
+
+            byte[] buffer = new byte[64 * 1024];
+            try
+            {
+                while (!_isQuitting && _visionSocket.State == WebSocketState.Open)
+                {
+                    var result = await _visionSocket.ReceiveAsync(new ArraySegment<byte>(buffer), _cts.Token);
+                    if (result.MessageType == WebSocketMessageType.Close)
+                    {
+                        QueueUnityLog("WARNING", "Vision websocket closed by server");
+                        break;
+                    }
+
+                    if (result.MessageType == WebSocketMessageType.Text)
+                    {
+                        string message = Encoding.UTF8.GetString(buffer, 0, result.Count);
+                        try
+                        {
+                            VisionMessageReceived?.Invoke(message);
+                        }
+                        catch (Exception ex)
+                        {
+                            QueueUnityLog("WARNING", $"Vision message handler failed: {ex.Message}");
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                if (!_isQuitting)
+                {
+                    QueueUnityLog("WARNING", "Vision websocket receive loop ended");
+                }
+            }
+
+            TryCloseSocket(_visionSocket);
+        }
+
         private static void TryCloseSocket(ClientWebSocket socket)
         {
             if (socket == null)
@@ -438,6 +525,19 @@ namespace SmartRoom.Networking
                 }
 
                 _depthSocket.Dispose();
+            }
+
+            if (_visionSocket != null)
+            {
+                try
+                {
+                    await _visionSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Quit", CancellationToken.None);
+                }
+                catch
+                {
+                }
+
+                _visionSocket.Dispose();
             }
 
             _cts?.Dispose();
