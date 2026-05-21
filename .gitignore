@@ -12,6 +12,8 @@ backend/.venv/
 
 # Tool caches
 .ruff_cache/
+bin/
+obj/
 
 # OS/editor
 .DS_Store

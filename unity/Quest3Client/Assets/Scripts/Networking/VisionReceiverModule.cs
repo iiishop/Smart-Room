@@ -5,9 +5,7 @@ using System.Reflection;
 using System.Text;
 using Meta.XR;
 using SmartRoom.Vision;
-using TMPro;
 using UnityEngine;
-using UnityEngine.UI;
 
 namespace SmartRoom.Networking
 {
@@ -42,17 +40,7 @@ namespace SmartRoom.Networking
         [SerializeField] private int samplesPerObject = 3;
         [SerializeField] private int maxObjectsPerFrame = 8;
         [SerializeField] private float bboxDepthOffsetMeters = 0.05f;
-        [Header("World Labels")]
-        [SerializeField] private Canvas worldSpaceLabelCanvas;
-        [SerializeField] private TMP_FontAsset labelFont;
-        [SerializeField] private int pooledLabelCount = 16;
-        [SerializeField] private Vector3 labelWorldOffset = new Vector3(0f, 0.08f, 0f);
-        [SerializeField] private Vector2 labelSize = new Vector2(320f, 72f);
-        [SerializeField] private float labelFontSize = 36f;
-        [SerializeField] private float canvasScale = 0.001f;
-        [SerializeField] private Color labelTextColor = Color.white;
-        [SerializeField] private Color labelOutlineColor = new Color(0f, 0f, 0f, 0.85f);
-        [SerializeField] [Range(0f, 1f)] private float labelOutlineWidth = 0.2f;
+        [SerializeField] private VisionLabelPool labelPool;
 
         private MethodInfo _passthroughViewportRayMethod;
         private bool _passthroughViewportRayMethodResolved;
@@ -61,8 +49,6 @@ namespace SmartRoom.Networking
         private readonly ConcurrentQueue<string> _pendingVisionMessages = new ConcurrentQueue<string>();
         private readonly List<VisionWorldObject> _worldObjectsBuffer = new List<VisionWorldObject>(16);
         private VisionWorldObject[] _latestWorldObjects = Array.Empty<VisionWorldObject>();
-        private PooledLabel[] _labelPool = Array.Empty<PooledLabel>();
-        private Camera _labelCamera;
 
         public event Action<VisionWorldObject[]> WorldObjectsUpdated;
         public VisionWorldObject[] LatestWorldObjects => _latestWorldObjects;
@@ -94,10 +80,21 @@ namespace SmartRoom.Networking
                 wireframeManager = FindFirstObjectByType<BboxWireframeManager>();
             }
 
+            if (labelPool == null)
+            {
+                labelPool = FindFirstObjectByType<VisionLabelPool>();
+                if (labelPool == null)
+                {
+                    labelPool = gameObject.AddComponent<VisionLabelPool>();
+                }
+            }
+
             samplesPerObject = Mathf.Clamp(samplesPerObject, 1, 16);
             maxObjectsPerFrame = Mathf.Clamp(maxObjectsPerFrame, 1, 64);
-            pooledLabelCount = Mathf.Clamp(pooledLabelCount, 1, 64);
-            EnsureLabelPool();
+            if (labelPool != null)
+            {
+                labelPool.SetLabelCamera(rayCamera);
+            }
         }
 
         private void OnEnable()
@@ -125,7 +122,6 @@ namespace SmartRoom.Networking
         private void Update()
         {
             ProcessLatestVisionMessage();
-            BillboardActiveLabels();
         }
 
         private void OnVisionMessage(string json)
@@ -180,7 +176,8 @@ namespace SmartRoom.Networking
             }
 
             _worldObjectsBuffer.Clear();
-            int objectCount = Mathf.Min(frame.objects.Length, Mathf.Min(maxObjectsPerFrame, pooledLabelCount));
+            int labelCapacity = labelPool != null ? labelPool.Capacity : maxObjectsPerFrame;
+            int objectCount = Mathf.Min(frame.objects.Length, Mathf.Min(maxObjectsPerFrame, labelCapacity));
             var processedObjects = new WorldPosition[objectCount * samplesPerObject];
             int processedCount = 0;
             for (int objectIndex = 0; objectIndex < objectCount; objectIndex++)
@@ -461,128 +458,11 @@ namespace SmartRoom.Networking
             manager?.QueueUnityLog("INFO", $"VisionReceiverModule ray source: {source}");
         }
 
-        private void EnsureLabelPool()
-        {
-            EnsureWorldSpaceCanvas();
-
-            if (_labelPool.Length == pooledLabelCount)
-            {
-                return;
-            }
-
-            _labelPool = new PooledLabel[pooledLabelCount];
-            for (int index = 0; index < pooledLabelCount; index++)
-            {
-                var labelObject = new GameObject($"VisionLabel_{index}", typeof(RectTransform), typeof(CanvasRenderer), typeof(TextMeshProUGUI));
-                labelObject.transform.SetParent(worldSpaceLabelCanvas.transform, false);
-                var rectTransform = (RectTransform)labelObject.transform;
-                rectTransform.sizeDelta = labelSize;
-                rectTransform.localScale = Vector3.one;
-
-                TextMeshProUGUI text = labelObject.GetComponent<TextMeshProUGUI>();
-                text.font = labelFont != null ? labelFont : text.font;
-                text.fontSize = labelFontSize;
-                text.color = labelTextColor;
-                text.alignment = TextAlignmentOptions.Center;
-                text.enableWordWrapping = false;
-                text.overflowMode = TextOverflowModes.Overflow;
-                text.outlineColor = labelOutlineColor;
-                text.outlineWidth = labelOutlineWidth;
-                text.text = string.Empty;
-                text.raycastTarget = false;
-
-                labelObject.SetActive(false);
-                _labelPool[index] = new PooledLabel(rectTransform, text);
-            }
-        }
-
-        private void EnsureWorldSpaceCanvas()
-        {
-            if (worldSpaceLabelCanvas != null)
-            {
-                return;
-            }
-
-            var canvasObject = new GameObject("VisionLabelCanvas", typeof(RectTransform), typeof(Canvas), typeof(CanvasScaler), typeof(GraphicRaycaster));
-            canvasObject.transform.SetParent(transform, false);
-
-            worldSpaceLabelCanvas = canvasObject.GetComponent<Canvas>();
-            worldSpaceLabelCanvas.renderMode = RenderMode.WorldSpace;
-            worldSpaceLabelCanvas.worldCamera = ResolveLabelCamera();
-
-            RectTransform rectTransform = canvasObject.GetComponent<RectTransform>();
-            rectTransform.sizeDelta = new Vector2(1024f, 1024f);
-            rectTransform.localScale = Vector3.one * canvasScale;
-
-            CanvasScaler scaler = canvasObject.GetComponent<CanvasScaler>();
-            scaler.dynamicPixelsPerUnit = 1000f;
-            scaler.referencePixelsPerUnit = 100f;
-        }
-
-        private Camera ResolveLabelCamera()
-        {
-            if (_labelCamera != null)
-            {
-                return _labelCamera;
-            }
-
-            _labelCamera = rayCamera != null ? rayCamera : Camera.main;
-            return _labelCamera;
-        }
-
         private void PublishWorldObjects(VisionWorldObject[] worldObjects)
         {
             _latestWorldObjects = worldObjects ?? Array.Empty<VisionWorldObject>();
-            UpdateLabels(_latestWorldObjects);
+            labelPool?.Sync(_latestWorldObjects);
             WorldObjectsUpdated?.Invoke(_latestWorldObjects);
-        }
-
-        private void UpdateLabels(VisionWorldObject[] worldObjects)
-        {
-            EnsureLabelPool();
-
-            int visibleCount = worldObjects != null ? Mathf.Min(worldObjects.Length, _labelPool.Length) : 0;
-            for (int index = 0; index < visibleCount; index++)
-            {
-                VisionWorldObject worldObject = worldObjects[index];
-                PooledLabel pooledLabel = _labelPool[index];
-                pooledLabel.Transform.position = worldObject.WorldPosition + labelWorldOffset;
-                pooledLabel.Text.text = VisionLabelFormatting.FormatLabel(worldObject.Label, worldObject.Score);
-                pooledLabel.GameObject.SetActive(true);
-            }
-
-            for (int index = visibleCount; index < _labelPool.Length; index++)
-            {
-                _labelPool[index].GameObject.SetActive(false);
-            }
-        }
-
-        private void BillboardActiveLabels()
-        {
-            Camera camera = ResolveLabelCamera();
-            if (camera == null)
-            {
-                return;
-            }
-
-            if (worldSpaceLabelCanvas != null)
-            {
-                worldSpaceLabelCanvas.worldCamera = camera;
-            }
-
-            Transform cameraTransform = camera.transform;
-            for (int index = 0; index < _labelPool.Length; index++)
-            {
-                PooledLabel pooledLabel = _labelPool[index];
-                if (!pooledLabel.GameObject.activeSelf)
-                {
-                    continue;
-                }
-
-                pooledLabel.Transform.LookAt(
-                    pooledLabel.Transform.position + cameraTransform.rotation * Vector3.forward,
-                    cameraTransform.rotation * Vector3.up);
-            }
         }
 
         private bool TryBuildBboxCorners(VisionFramePayload frame, VisionTrackedMaskPayload trackedMask, out Vector3[] eightCorners)
@@ -666,19 +546,6 @@ namespace SmartRoom.Networking
             }
 
             return true;
-        }
-
-        private readonly struct PooledLabel
-        {
-            public PooledLabel(RectTransform transform, TextMeshProUGUI text)
-            {
-                Transform = transform;
-                Text = text;
-            }
-
-            public RectTransform Transform { get; }
-            public TextMeshProUGUI Text { get; }
-            public GameObject GameObject => Transform.gameObject;
         }
     }
 }
