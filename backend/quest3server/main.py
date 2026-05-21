@@ -6,10 +6,13 @@ import json
 import struct
 from datetime import datetime, timezone
 from threading import Lock
+from typing import Any
 
-from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 
 from .log_manager import add_log, add_python_log, list_logs
+from .vision import Quest3VisionRuntime, build_default_pipeline
+from .vision.pipeline import VisionPipelineError
 
 
 app = FastAPI(title="Smart Room Receiver Backend")
@@ -35,6 +38,20 @@ _depth_preview_clients: set[WebSocket] = set()
 _heartbeat_clients: set[WebSocket] = set()
 _next_raycast_query_id = 1
 _latest_raycast_result: dict = {}
+_camera_intrinsics: dict = {}
+
+
+def _build_vision_runtime() -> Quest3VisionRuntime:
+    try:
+        return Quest3VisionRuntime(build_default_pipeline())
+    except VisionPipelineError as exc:
+        add_python_log("warning", f"Quest3 vision disabled: {exc}")
+    except Exception as exc:
+        add_python_log("error", f"Quest3 vision initialization failed: {exc}")
+    return Quest3VisionRuntime(None)
+
+
+_vision_runtime = _build_vision_runtime()
 
 
 def _utc_now_iso() -> str:
@@ -49,7 +66,13 @@ async def health() -> dict:
 @app.get("/api/status")
 async def status() -> dict:
     with _lock:
-        return dict(_state)
+        snapshot = dict(_state)
+        snapshot["camera_intrinsics"] = dict(_camera_intrinsics)
+    vision_snapshot = _vision_runtime.snapshot()
+    snapshot["vision"] = vision_snapshot
+    snapshot["vision_metrics"] = vision_snapshot["metrics"]
+    snapshot["vision_latest"] = vision_snapshot["latest"]
+    return snapshot
 
 
 @app.get("/api/latest-rgb")
@@ -66,6 +89,29 @@ async def latest_rgb():
 async def logs(since_id: int = Query(0), limit: int = Query(200)) -> dict:
     items = list_logs(since_id=since_id, limit=limit)
     return {"count": len(items), "logs": items}
+
+
+@app.get("/api/vision")
+async def vision_status() -> dict[str, Any]:
+    result = _vision_runtime.snapshot()
+    with _lock:
+        result["camera_intrinsics"] = dict(_camera_intrinsics)
+    return result
+
+
+@app.post("/api/vision/session")
+async def start_vision_session(body: dict) -> dict[str, Any]:
+    prompt = str(body.get("prompt", ""))
+    try:
+        return _vision_runtime.start_session(prompt)
+    except VisionPipelineError as exc:
+        status_code = 503 if not _vision_runtime.is_available else 400
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
+
+@app.delete("/api/vision/session")
+async def stop_vision_session() -> dict[str, Any]:
+    return _vision_runtime.stop_session()
 
 
 @app.get("/api/raycast-result")
@@ -119,18 +165,14 @@ async def rgb_socket(websocket: WebSocket) -> None:
                 continue
 
             frame_id, timestamp_ms, width, height, jpeg = parsed
-
-            with _lock:
-                global _latest_rgb_jpeg
-                global _latest_rgb_packet
-                _latest_rgb_jpeg = jpeg
-                _latest_rgb_packet = data
-                _state["last_rgb_frame_id"] = frame_id
-                _state["last_rgb_size"] = f"{width}x{height}"
-                _state["last_seen_utc"] = _utc_now_iso()
-
-            await _broadcast_rgb_preview(jpeg)
-            await _broadcast_rgb_raw_preview(data)
+            await _ingest_rgb_frame(
+                frame_id=frame_id,
+                timestamp_ms=timestamp_ms,
+                width=width,
+                height=height,
+                jpeg=jpeg,
+                raw_packet=data,
+            )
     except WebSocketDisconnect:
         add_python_log("warning", "RGB websocket disconnected")
     except Exception as ex:
@@ -167,6 +209,21 @@ async def rgb_preview_raw_socket(websocket: WebSocket) -> None:
     finally:
         _rgb_raw_preview_clients.discard(websocket)
         add_python_log("warning", "Raw preview client disconnected")
+
+
+@app.websocket("/ws/vision")
+async def vision_socket(websocket: WebSocket) -> None:
+    await _vision_runtime.connect(websocket)
+    add_python_log("info", "Vision websocket client connected on /ws/vision")
+
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        _vision_runtime.disconnect(websocket)
+        add_python_log("warning", "Vision websocket client disconnected")
 
 
 @app.websocket("/ws/depth")
@@ -260,18 +317,31 @@ async def heartbeat_socket(websocket: WebSocket) -> None:
                 if payload_type == "rgb_frame":
                     payload_b64 = payload.get("payload_b64")
                     if payload_b64:
-                        global _latest_rgb_jpeg
-                        _latest_rgb_jpeg = base64.b64decode(payload_b64)
-                        _state["last_rgb_frame_id"] = int(
-                            payload.get("frame_id", _state["last_rgb_frame_id"])
+                        jpeg = base64.b64decode(payload_b64)
+                        frame_id = int(payload.get("frame_id", _state["last_rgb_frame_id"]))
+                        timestamp_ms = int(
+                            payload.get(
+                                "timestamp_ms",
+                                int(datetime.now(timezone.utc).timestamp() * 1000),
+                            )
                         )
-                        _state["last_rgb_size"] = (
-                            f"{payload.get('width', '?')}x{payload.get('height', '?')}"
-                        )
+                        width = int(payload.get("width", 0))
+                        height = int(payload.get("height", 0))
                     else:
                         add_python_log(
                             "warning", "Received rgb_frame without payload_b64"
                         )
+                        jpeg = None
+
+                elif payload_type == "camera_intrinsics":
+                    global _camera_intrinsics
+                    _camera_intrinsics = {
+                        "fx": payload.get("fx"),
+                        "fy": payload.get("fy"),
+                        "cx": payload.get("cx"),
+                        "cy": payload.get("cy"),
+                        "projection_matrix": payload.get("projection_matrix"),
+                    }
 
                 elif payload_type == "client_log":
                     add_log(
@@ -296,6 +366,16 @@ async def heartbeat_socket(websocket: WebSocket) -> None:
                         "hit_surface_label": payload.get("hit_surface_label"),
                         "hit": payload.get("hit", False),
                     }
+
+            if payload_type == "rgb_frame" and jpeg is not None:
+                await _ingest_rgb_frame(
+                    frame_id=frame_id,
+                    timestamp_ms=timestamp_ms,
+                    width=width,
+                    height=height,
+                    jpeg=jpeg,
+                    raw_packet=None,
+                )
 
             await websocket.send_text("ack")
     except WebSocketDisconnect:
@@ -379,6 +459,35 @@ async def _broadcast_rgb_preview(jpeg_bytes: bytes) -> None:
         _rgb_preview_clients.discard(client)
 
 
+async def _ingest_rgb_frame(
+    *,
+    frame_id: int,
+    timestamp_ms: int,
+    width: int,
+    height: int,
+    jpeg: bytes,
+    raw_packet: bytes | None,
+) -> None:
+    with _lock:
+        global _latest_rgb_jpeg
+        global _latest_rgb_packet
+        _latest_rgb_jpeg = jpeg
+        if raw_packet is not None:
+            _latest_rgb_packet = raw_packet
+        _state["last_rgb_frame_id"] = frame_id
+        _state["last_rgb_size"] = f"{width}x{height}"
+        _state["last_seen_utc"] = _utc_now_iso()
+
+    await _broadcast_rgb_preview(jpeg)
+    if raw_packet is not None:
+        await _broadcast_rgb_raw_preview(raw_packet)
+    await _vision_runtime.process_rgb_frame(
+        frame_id=frame_id,
+        timestamp_ms=timestamp_ms,
+        jpeg_bytes=jpeg,
+    )
+
+
 async def _broadcast_rgb_raw_preview(packet_bytes: bytes) -> None:
     if not _rgb_raw_preview_clients:
         return
@@ -426,6 +535,15 @@ async def _broadcast_heartbeat_control(payload: dict) -> int:
     for client in stale:
         _heartbeat_clients.discard(client)
     return sent
+
+
+def get_vision_runtime() -> Quest3VisionRuntime:
+    return _vision_runtime
+
+
+def set_vision_runtime_for_testing(runtime: Quest3VisionRuntime) -> None:
+    global _vision_runtime
+    _vision_runtime = runtime
 
 
 if __name__ == "__main__":

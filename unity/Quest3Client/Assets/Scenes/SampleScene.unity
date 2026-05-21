@@ -1457,6 +1457,7 @@ GameObject:
   - component: {fileID: 1313628473}
   - component: {fileID: 1313628476}
   - component: {fileID: 1313628477}
+  - component: {fileID: 1313628478}
   m_Layer: 0
   m_Name: NetworkBootstrap
   m_TagString: Untagged
@@ -1553,6 +1554,7 @@ MonoBehaviour:
   controlPath: /ws/heartbeat
   rgbPath: /ws/rgb
   depthPath: /ws/depth
+  visionPath: /ws/vision
   reconnectDelaySeconds: 2
 --- !u!114 &1313628476
 MonoBehaviour:
@@ -1594,6 +1596,24 @@ MonoBehaviour:
   raycastLayerMask:
     serializedVersion: 2
     m_Bits: 4294967295
+--- !u!114 &1313628478
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1313628469}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: a55478b5113f486b8d171cca9dd24d0a, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::SmartRoom.Networking.VisionReceiverModule
+  manager: {fileID: 1313628475}
+  depthStreamModule: {fileID: 1313628476}
+  rayCamera: {fileID: 1000850322}
+  passthroughCameraAccess: {fileID: 462733173}
+  samplesPerObject: 3
+  maxObjectsPerFrame: 8
 --- !u!1 &1359161931
 GameObject:
   m_ObjectHideFlags: 0

@@ -1,44 +1,19 @@
 using System;
 using System.Reflection;
+using System.Text;
 using Meta.XR;
 using UnityEngine;
 
 namespace SmartRoom.Networking
 {
-    [Serializable]
-    public class RaycastQueryPayload
-    {
-        public string type;
-        public int query_id;
-        public long timestamp_ms;
-        public float u;
-        public float v;
-    }
-
-    [Serializable]
-    public class RaycastResultPayload
-    {
-        public string type;
-        public int query_id;
-        public long timestamp_ms;
-        public float u;
-        public float v;
-        public bool hit;
-        public float depth_m;
-        public float[] world_xyz;
-        public float[] camera_xyz;
-        public string hit_surface_label;
-    }
-
-    public class RaycastQueryModule : MonoBehaviour
+    public class VisionReceiverModule : MonoBehaviour
     {
         [SerializeField] private BackendCommunicationManager manager;
         [SerializeField] private DepthStreamModule depthStreamModule;
         [SerializeField] private Camera rayCamera;
         [SerializeField] private PassthroughCameraAccess passthroughCameraAccess;
-        [SerializeField] private bool fallbackToPhysicsRaycast = false;
-        [SerializeField] private float maxDistanceMeters = 10f;
-        [SerializeField] private LayerMask raycastLayerMask = ~0;
+        [SerializeField] private int samplesPerObject = 3;
+        [SerializeField] private int maxObjectsPerFrame = 8;
 
         private MethodInfo _passthroughViewportRayMethod;
         private bool _passthroughViewportRayMethodResolved;
@@ -52,6 +27,11 @@ namespace SmartRoom.Networking
                 manager = FindFirstObjectByType<BackendCommunicationManager>();
             }
 
+            if (depthStreamModule == null)
+            {
+                depthStreamModule = FindFirstObjectByType<DepthStreamModule>();
+            }
+
             if (rayCamera == null)
             {
                 rayCamera = Camera.main;
@@ -62,17 +42,15 @@ namespace SmartRoom.Networking
                 passthroughCameraAccess = FindFirstObjectByType<PassthroughCameraAccess>();
             }
 
-            if (depthStreamModule == null)
-            {
-                depthStreamModule = FindFirstObjectByType<DepthStreamModule>();
-            }
+            samplesPerObject = Mathf.Clamp(samplesPerObject, 1, 16);
+            maxObjectsPerFrame = Mathf.Clamp(maxObjectsPerFrame, 1, 64);
         }
 
         private void OnEnable()
         {
             if (manager != null)
             {
-                manager.ControlMessageReceived += OnControlMessage;
+                manager.VisionMessageReceived += OnVisionMessage;
             }
         }
 
@@ -80,88 +58,99 @@ namespace SmartRoom.Networking
         {
             if (manager != null)
             {
-                manager.ControlMessageReceived -= OnControlMessage;
+                manager.VisionMessageReceived -= OnVisionMessage;
             }
         }
 
-        private void OnControlMessage(string json)
+        private void OnVisionMessage(string json)
         {
-            if (string.IsNullOrWhiteSpace(json))
+            if (string.IsNullOrWhiteSpace(json) || manager == null || depthStreamModule == null)
             {
                 return;
             }
 
-            RaycastQueryPayload query;
+            VisionFramePayload frame;
             try
             {
-                query = JsonUtility.FromJson<RaycastQueryPayload>(json);
+                frame = JsonUtility.FromJson<VisionFramePayload>(json);
             }
-            catch
+            catch (Exception ex)
+            {
+                manager.QueueUnityLog("WARNING", $"Vision payload parse failed: {ex.Message}");
+                return;
+            }
+
+            if (frame?.objects == null || frame.objects.Length == 0)
             {
                 return;
             }
 
-            if (query == null || query.type != "raycast_query")
+            int objectCount = Mathf.Min(frame.objects.Length, maxObjectsPerFrame);
+            for (int objectIndex = 0; objectIndex < objectCount; objectIndex++)
             {
-                return;
-            }
-
-            if (manager == null)
-            {
-                return;
-            }
-
-            float u = Mathf.Clamp01(query.u);
-            float v = Mathf.Clamp01(query.v);
-            if (!TryGetViewportRay(u, v, out Ray ray, out Transform rayTransform))
-            {
-                return;
-            }
-
-            bool hit = false;
-            float depthM = -1f;
-            Vector3 worldPoint = Vector3.zero;
-            Vector3 cameraPoint = Vector3.zero;
-            string label = "depth";
-
-            if (depthStreamModule != null)
-            {
-                hit = depthStreamModule.TryRaycastViewport(u, v, ray, rayTransform, out depthM, out worldPoint, out cameraPoint);
-            }
-
-            if (!hit && fallbackToPhysicsRaycast)
-            {
-                if (Physics.Raycast(ray, out RaycastHit hitInfo, maxDistanceMeters, raycastLayerMask, QueryTriggerInteraction.Ignore))
+                VisionTrackedMaskPayload trackedMask = frame.objects[objectIndex];
+                if (trackedMask?.mask_rle == null)
                 {
-                    hit = true;
-                    depthM = hitInfo.distance;
-                    worldPoint = hitInfo.point;
-                    cameraPoint = rayTransform != null
-                        ? rayTransform.InverseTransformPoint(worldPoint)
-                        : ray.direction.normalized * depthM;
-                    label = GetSurfaceLabel(hitInfo.collider);
+                    continue;
+                }
+
+                VisionMaskSamplePoint[] samples = VisionMaskSampling.SampleMaskPixels(frame, trackedMask, samplesPerObject);
+                if (samples.Length == 0)
+                {
+                    manager.QueueUnityLog("WARNING", $"Vision object_id={trackedMask.object_id} has no foreground pixels to sample.");
+                    continue;
+                }
+
+                var successful = new StringBuilder();
+                int hitCount = 0;
+                for (int sampleIndex = 0; sampleIndex < samples.Length; sampleIndex++)
+                {
+                    VisionMaskSamplePoint sample = samples[sampleIndex];
+                    if (!TryGetViewportRay(sample.ViewportU, sample.ViewportV, out Ray ray, out Transform rayTransform))
+                    {
+                        continue;
+                    }
+
+                    if (!depthStreamModule.TryRaycastViewport(sample.ViewportU, sample.ViewportV, ray, rayTransform, out float depthM, out Vector3 worldPoint, out _))
+                    {
+                        continue;
+                    }
+
+                    if (successful.Length > 0)
+                    {
+                        successful.Append("; ");
+                    }
+
+                    successful.AppendFormat(
+                        "pixel=({0},{1}) viewport=({2:F3},{3:F3}) world=({4:F3},{5:F3},{6:F3}) depth={7:F3}",
+                        sample.PixelX,
+                        sample.PixelY,
+                        sample.ViewportU,
+                        sample.ViewportV,
+                        worldPoint.x,
+                        worldPoint.y,
+                        worldPoint.z,
+                        depthM
+                    );
+                    hitCount++;
+                }
+
+                if (hitCount > 0)
+                {
+                    string label = string.IsNullOrWhiteSpace(trackedMask.label) ? "unknown" : trackedMask.label;
+                    manager.QueueUnityLog(
+                        "INFO",
+                        $"Vision object_id={trackedMask.object_id} label={label} hits={hitCount}/{samples.Length} samples=[{successful}]"
+                    );
+                }
+                else
+                {
+                    manager.QueueUnityLog(
+                        "WARNING",
+                        $"Vision object_id={trackedMask.object_id} produced no 3D hits from {samples.Length} sampled mask pixels."
+                    );
                 }
             }
-
-            var payload = new RaycastResultPayload
-            {
-                type = "raycast_result",
-                query_id = query.query_id,
-                timestamp_ms = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-                u = u,
-                v = v,
-                hit = hit,
-                depth_m = hit ? depthM : -1f,
-                world_xyz = hit
-                    ? new[] { worldPoint.x, worldPoint.y, worldPoint.z }
-                    : new[] { 0f, 0f, 0f },
-                camera_xyz = hit
-                    ? new[] { cameraPoint.x, cameraPoint.y, cameraPoint.z }
-                    : new[] { 0f, 0f, 0f },
-                hit_surface_label = hit ? label : "none",
-            };
-
-            manager.QueueControlJson(JsonUtility.ToJson(payload));
         }
 
         private bool TryGetViewportRay(float u, float v, out Ray ray, out Transform rayTransform)
@@ -180,7 +169,7 @@ namespace SmartRoom.Networking
                 if (!_loggedPassthroughFallback && passthroughCameraAccess != null)
                 {
                     _loggedPassthroughFallback = true;
-                    manager?.QueueUnityLog("WARNING", "PassthroughCameraAccess.ViewportPointToRay unavailable; falling back to Camera.ViewportPointToRay for raycast queries.");
+                    manager?.QueueUnityLog("WARNING", "PassthroughCameraAccess.ViewportPointToRay unavailable; falling back to Camera.ViewportPointToRay for vision receiver.");
                 }
 
                 LogRaySourceOnce($"Camera.ViewportPointToRay({rayCamera.name})");
@@ -281,22 +270,7 @@ namespace SmartRoom.Networking
             }
 
             _loggedRaySource = true;
-            manager?.QueueUnityLog("INFO", $"RaycastQueryModule ray source: {source}");
-        }
-
-        private static string GetSurfaceLabel(Collider col)
-        {
-            if (col == null)
-            {
-                return "none";
-            }
-
-            if (!string.IsNullOrWhiteSpace(col.tag) && col.tag != "Untagged")
-            {
-                return col.tag;
-            }
-
-            return col.gameObject.name;
+            manager?.QueueUnityLog("INFO", $"VisionReceiverModule ray source: {source}");
         }
     }
 }
