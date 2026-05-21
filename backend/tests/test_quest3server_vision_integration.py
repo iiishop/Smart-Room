@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from quest3server.main import app, get_vision_runtime, set_vision_runtime_for_testing
 from quest3server.vision.pipeline import VisionPipelineError
 from quest3server.vision.runtime import Quest3VisionRuntime
-from quest3server.vision.types import TrackedMask, VisionFrameResult
+from quest3server.vision.types import GpuMemoryStats, TrackedMask, VisionFrameResult
 
 
 class _FakePipeline:
@@ -47,6 +47,9 @@ class _FakePipeline:
             frame_height=int(image_bgr.shape[0]),
             prompt=self.prompt,
             source="fake-vision",
+            mode="detection" if len(self.frames) == 1 else "propagation",
+            process_time_ms=12.5,
+            gpu_memory_mb=GpuMemoryStats(allocated=24.0, max_allocated=48.0),
             objects=[
                 TrackedMask(
                     object_id=1,
@@ -104,6 +107,12 @@ def test_vision_session_and_streaming_api() -> None:
                 assert payload["frame_id"] == 7
                 assert payload["prompt"] == "chair"
                 assert payload["source"] == "fake-vision"
+                assert payload["mode"] == "detection"
+                assert payload["process_time_ms"] == 12.5
+                assert payload["gpu_memory_mb"] == {
+                    "allocated": 24.0,
+                    "max_allocated": 48.0,
+                }
                 assert payload["objects"][0]["label"] == "chair"
 
             status = client.get("/api/status")
@@ -112,6 +121,7 @@ def test_vision_session_and_streaming_api() -> None:
             assert body["last_rgb_frame_id"] == 7
             assert body["last_rgb_size"] == "2x2"
             assert body["vision"]["latest"]["frame_id"] == 7
+            assert body["vision"]["latest"]["mode"] == "detection"
 
             latest_rgb = client.get("/api/latest-rgb")
             assert latest_rgb.status_code == 200

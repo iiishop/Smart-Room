@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
+
+
+VisionProcessingMode = Literal["detection", "propagation"]
 
 
 @dataclass(slots=True)
@@ -33,6 +36,18 @@ class TrackedMask:
 
 
 @dataclass(slots=True)
+class GpuMemoryStats:
+    allocated: float
+    max_allocated: float
+
+    def to_payload(self) -> dict[str, float]:
+        return {
+            "allocated": round(float(self.allocated), 3),
+            "max_allocated": round(float(self.max_allocated), 3),
+        }
+
+
+@dataclass(slots=True)
 class VisionFrameResult:
     frame_id: int
     timestamp_ms: int
@@ -41,6 +56,9 @@ class VisionFrameResult:
     prompt: str
     objects: list[TrackedMask]
     source: str
+    mode: VisionProcessingMode = "detection"
+    process_time_ms: float | None = None
+    gpu_memory_mb: GpuMemoryStats | None = None
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -50,5 +68,12 @@ class VisionFrameResult:
             "frame_height": int(self.frame_height),
             "prompt": self.prompt,
             "source": self.source,
+            "mode": self.mode,
+            "process_time_ms": None
+            if self.process_time_ms is None
+            else round(float(self.process_time_ms), 3),
+            "gpu_memory_mb": None
+            if self.gpu_memory_mb is None
+            else self.gpu_memory_mb.to_payload(),
             "objects": [item.to_payload() for item in self.objects],
         }

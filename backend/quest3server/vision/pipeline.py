@@ -5,8 +5,14 @@ from typing import Protocol
 
 import numpy as np
 
+from .metrics import elapsed_ms, sample_gpu_memory_mb, start_timer
 from .rle import bbox_from_mask, encode_binary_mask
-from .types import DetectionCandidate, TrackedMask, VisionFrameResult
+from .types import (
+    DetectionCandidate,
+    TrackedMask,
+    VisionFrameResult,
+    VisionProcessingMode,
+)
 
 
 class VisionPipelineError(RuntimeError):
@@ -58,12 +64,14 @@ class GroundedSamTrackingPipeline:
         tracker: VideoTrackingProvider,
         *,
         max_objects: int = 8,
+        detect_interval: int = 30,
         source: str = "grounding-dino+sam2",
     ) -> None:
         self._detector = detector
         self._segmenter = segmenter
         self._tracker = tracker
         self._max_objects = max_objects
+        self._detect_interval = max(1, int(detect_interval))
         self._source = source
         self._session: _SessionState | None = None
 
@@ -98,49 +106,56 @@ class GroundedSamTrackingPipeline:
         timestamp_ms: int,
         image_bgr: np.ndarray,
     ) -> VisionFrameResult | None:
+        started_at = start_timer()
         session = self._session
         if session is None:
             return None
 
-        if not session.seeded:
+        mode: VisionProcessingMode
+        if self._should_run_detection(session, frame_id):
+            mode = "detection"
             detections = self._detector.detect(image_bgr, session.prompt)
-            if not detections:
+            if not detections and not session.seeded:
                 raise VisionPipelineError(
                     f"no detections found for prompt '{session.prompt}'"
                 )
-            detections = self._assign_object_ids(
-                session,
-                detections[: self._max_objects],
-            )
-            masks = self._segmenter.segment(image_bgr, detections)
-            if len(masks) != len(detections):
-                raise VisionPipelineError("segmenter returned mismatched mask count")
-            propagated = self._tracker.bootstrap(image_bgr, detections, masks)
-            if len(propagated) != len(detections):
-                raise VisionPipelineError("tracker bootstrap returned mismatched masks")
-            session.detections_by_id = {item.object_id: item for item in detections}
-            session.seeded = True
-            object_masks = [
-                (detection.object_id, mask)
-                for detection, mask in zip(detections, propagated, strict=True)
-            ]
+            if not session.seeded:
+                detections = self._assign_object_ids(
+                    session,
+                    detections[: self._max_objects],
+                )
+                masks = self._segmenter.segment(image_bgr, detections)
+                if len(masks) != len(detections):
+                    raise VisionPipelineError("segmenter returned mismatched mask count")
+                propagated = self._tracker.bootstrap(image_bgr, detections, masks)
+                if len(propagated) != len(detections):
+                    raise VisionPipelineError("tracker bootstrap returned mismatched masks")
+                session.detections_by_id = {item.object_id: item for item in detections}
+                session.seeded = True
+                object_masks = [
+                    (detection.object_id, mask)
+                    for detection, mask in zip(detections, propagated, strict=True)
+                ]
+            else:
+                object_masks = self._tracker.track(image_bgr)
+                additions = self._detect_new_objects(session, detections, object_masks)
+                if additions:
+                    masks = self._segmenter.segment(image_bgr, additions)
+                    if len(masks) != len(additions):
+                        raise VisionPipelineError(
+                            "segmenter returned mismatched mask count for new objects"
+                        )
+                    added_masks = self._tracker.add_objects(additions, masks)
+                    if len(added_masks) != len(additions):
+                        raise VisionPipelineError(
+                            "tracker add_objects returned mismatched mask count"
+                        )
+                    for detection in additions:
+                        session.detections_by_id[detection.object_id] = detection
+                    object_masks = self._merge_object_masks(object_masks, added_masks)
         else:
+            mode = "propagation"
             object_masks = self._tracker.track(image_bgr)
-            additions = self._detect_new_objects(session, image_bgr, object_masks)
-            if additions:
-                masks = self._segmenter.segment(image_bgr, additions)
-                if len(masks) != len(additions):
-                    raise VisionPipelineError(
-                        "segmenter returned mismatched mask count for new objects"
-                    )
-                added_masks = self._tracker.add_objects(additions, masks)
-                if len(added_masks) != len(additions):
-                    raise VisionPipelineError(
-                        "tracker add_objects returned mismatched mask count"
-                    )
-                for detection in additions:
-                    session.detections_by_id[detection.object_id] = detection
-                object_masks = self._merge_object_masks(object_masks, added_masks)
 
         tracked_objects = self._build_tracked_objects(
             session.detections_by_id,
@@ -155,7 +170,13 @@ class GroundedSamTrackingPipeline:
             prompt=session.prompt,
             objects=tracked_objects,
             source=self._source,
+            mode=mode,
+            process_time_ms=elapsed_ms(started_at),
+            gpu_memory_mb=sample_gpu_memory_mb(),
         )
+
+    def _should_run_detection(self, session: _SessionState, frame_id: int) -> bool:
+        return (not session.seeded) or (frame_id % self._detect_interval == 0)
 
     def _build_tracked_objects(
         self,
@@ -208,7 +229,7 @@ class GroundedSamTrackingPipeline:
     def _detect_new_objects(
         self,
         session: _SessionState,
-        image_bgr: np.ndarray,
+        detected: list[DetectionCandidate],
         object_masks: list[tuple[int, np.ndarray]],
     ) -> list[DetectionCandidate]:
         remaining_capacity = self._max_objects - len(session.detections_by_id)
@@ -221,7 +242,6 @@ class GroundedSamTrackingPipeline:
         )
         existing_boxes = [item.box_xyxy for item in session.detections_by_id.values()]
         existing_boxes.extend(item.box_xyxy for item in tracked_objects)
-        detected = self._detector.detect(image_bgr, session.prompt)
         if not detected:
             return []
 

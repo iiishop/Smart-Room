@@ -11,7 +11,7 @@ from quest3server.main import app, get_vision_runtime, set_vision_runtime_for_te
 from quest3server.vision.pipeline import VisionPipelineError
 from quest3server.vision.rle import encode_binary_mask
 from quest3server.vision.runtime import Quest3VisionRuntime
-from quest3server.vision.types import TrackedMask, VisionFrameResult
+from quest3server.vision.types import GpuMemoryStats, TrackedMask, VisionFrameResult
 
 
 class _FakeFullPipeline:
@@ -51,6 +51,9 @@ class _FakeFullPipeline:
             frame_height=height,
             prompt=self.prompt,
             source="fake-full-pipeline",
+            mode="detection",
+            process_time_ms=18.25,
+            gpu_memory_mb=GpuMemoryStats(allocated=128.0, max_allocated=256.0),
             objects=[
                 TrackedMask(
                     object_id=1,
@@ -222,6 +225,12 @@ class TestE2ESmoke:
                 assert payload["frame_height"] == 360
                 assert payload["prompt"] == "chair"
                 assert payload["source"] == "fake-full-pipeline"
+                assert payload["mode"] == "detection"
+                assert payload["process_time_ms"] == 18.25
+                assert payload["gpu_memory_mb"] == {
+                    "allocated": 128.0,
+                    "max_allocated": 256.0,
+                }
                 assert len(payload["objects"]) == 1
 
                 obj = payload["objects"][0]

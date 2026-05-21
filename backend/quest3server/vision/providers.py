@@ -24,6 +24,7 @@ class VisionModelSettings:
     sam2_model: str
     box_threshold: float
     text_threshold: float
+    detect_interval: int
     max_objects: int
     frame_cache_dir: str
 
@@ -42,6 +43,7 @@ class VisionModelSettings:
             ),
             box_threshold=float(os.getenv("QUEST3_GROUNDING_BOX_THRESHOLD", "0.25")),
             text_threshold=float(os.getenv("QUEST3_GROUNDING_TEXT_THRESHOLD", "0.25")),
+            detect_interval=max(1, int(os.getenv("QUEST3_VISION_DETECT_INTERVAL", "30"))),
             max_objects=int(os.getenv("QUEST3_VISION_MAX_OBJECTS", "8")),
             frame_cache_dir=os.getenv("QUEST3_VISION_FRAME_CACHE_DIR", ""),
         )
@@ -325,5 +327,6 @@ def build_default_pipeline() -> GroundedSamTrackingPipeline | None:
         detector=detector,
         segmenter=segmenter,
         tracker=tracker,
+        detect_interval=settings.detect_interval,
         max_objects=settings.max_objects,
     )
