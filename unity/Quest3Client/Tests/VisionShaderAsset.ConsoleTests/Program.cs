@@ -1,7 +1,7 @@
 using System.Text.RegularExpressions;
 
 string repoRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "..", ".."));
-string shaderDir = Path.Combine(repoRoot, "unity", "Quest3Client", "Assets", "Shaders");
+string shaderDir = Path.Combine(repoRoot, "unity", "Quest3Client", "Assets", "Scripts", "Rendering");
 
 AssertShader(
     Path.Combine(shaderDir, "VisionLineUnlit.shader"),
