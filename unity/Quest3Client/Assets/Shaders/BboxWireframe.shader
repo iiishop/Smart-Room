@@ -2,33 +2,33 @@ Shader "SmartRoom/BboxWireframe"
 {
     Properties
     {
-        _LineAlpha ("Line Alpha", Range(0, 1)) = 0.8
+        _LineAlpha ("Line Alpha", Range(0, 1)) = 0.5
     }
 
     SubShader
     {
         Tags
         {
+            "RenderPipeline" = "UniversalPipeline"
             "RenderType" = "Transparent"
             "Queue" = "Transparent"
-            "IgnoreProjector" = "True"
-            "RenderPipeline" = "UniversalPipeline"
         }
-
-        Blend SrcAlpha OneMinusSrcAlpha
-        ZWrite Off
-        ZTest LEqual
-        Cull Off
 
         Pass
         {
             Name "BboxWireframe"
             Tags { "LightMode" = "UniversalForward" }
 
+            Blend SrcAlpha OneMinusSrcAlpha
+            Cull Off
+            ZWrite Off
+            ZTest LEqual
+
             HLSLPROGRAM
             #pragma target 4.5
             #pragma vertex vert
             #pragma fragment frag
+            #pragma enable_d3d11_debug_symbols
             #pragma instancing_options procedural:setup
 
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
@@ -43,39 +43,17 @@ Shader "SmartRoom/BboxWireframe"
                 float3 corner5;
                 float3 corner6;
                 float3 corner7;
-                half4 color;
+                float4 color;
             };
 
-            StructuredBuffer<BboxWireframeInstance> _BboxBuffer;
+            StructuredBuffer<BboxWireframeInstance> _InstanceData;
             half _LineAlpha;
 
-            static const int kEdgePairs[24] =
-            {
-                0, 1,
-                0, 2,
-                1, 3,
-                2, 3,
-                4, 5,
-                4, 6,
-                5, 7,
-                6, 7,
-                0, 4,
-                1, 5,
-                2, 6,
-                3, 7
+            static const uint2 _CornerPairLUT[12] = {
+                uint2(0, 1), uint2(1, 2), uint2(2, 3), uint2(3, 0),
+                uint2(4, 5), uint2(5, 6), uint2(6, 7), uint2(7, 4),
+                uint2(0, 4), uint2(1, 5), uint2(2, 6), uint2(3, 7),
             };
-
-            float3 GetCorner(BboxWireframeInstance inst, int idx)
-            {
-                if (idx <= 0) return inst.corner0;
-                if (idx == 1) return inst.corner1;
-                if (idx == 2) return inst.corner2;
-                if (idx == 3) return inst.corner3;
-                if (idx == 4) return inst.corner4;
-                if (idx == 5) return inst.corner5;
-                if (idx == 6) return inst.corner6;
-                return inst.corner7;
-            }
 
             struct Attributes
             {
@@ -86,21 +64,40 @@ Shader "SmartRoom/BboxWireframe"
             struct Varyings
             {
                 float4 positionCS : SV_POSITION;
-                half4 color : COLOR;
+                half4 color : COLOR0;
             };
 
-            void setup()
+            void setup() {}
+
+            float3 GetCornerPosition(BboxWireframeInstance instance, uint cornerIndex)
             {
+                switch (cornerIndex)
+                {
+                    case 0: return instance.corner0;
+                    case 1: return instance.corner1;
+                    case 2: return instance.corner2;
+                    case 3: return instance.corner3;
+                    case 4: return instance.corner4;
+                    case 5: return instance.corner5;
+                    case 6: return instance.corner6;
+                    case 7: return instance.corner7;
+                    default: return instance.corner0;
+                }
             }
 
             Varyings vert(Attributes input)
             {
+                BboxWireframeInstance instance = _InstanceData[input.instanceID];
+
+                uint segmentIndex = input.vertexID / 2u;
+                uint2 cornerPair = _CornerPairLUT[segmentIndex];
+                uint cornerIndex = (input.vertexID & 1u) == 0u ? cornerPair.x : cornerPair.y;
+
+                float3 worldPos = GetCornerPosition(instance, cornerIndex);
+
                 Varyings output;
-                BboxWireframeInstance inst = _BboxBuffer[input.instanceID];
-                int cornerIdx = kEdgePairs[input.vertexID];
-                float3 worldPos = GetCorner(inst, cornerIdx);
                 output.positionCS = TransformWorldToHClip(worldPos);
-                output.color = half4(inst.color.rgb, _LineAlpha);
+                output.color = half4(instance.color.rgb, _LineAlpha);
                 return output;
             }
 
