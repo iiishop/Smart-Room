@@ -2,33 +2,36 @@ using System.Text.RegularExpressions;
 
 string repoRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "..", ".."));
 string labelPoolPath = Path.Combine(repoRoot, "unity", "Quest3Client", "Assets", "Scripts", "Vision", "VisionLabelPool.cs");
-string receiverPath = Path.Combine(repoRoot, "unity", "Quest3Client", "Assets", "Scripts", "Networking", "VisionReceiverModule.cs");
+string overlayManagerPath = Path.Combine(repoRoot, "unity", "Quest3Client", "Assets", "Scripts", "Vision", "VisionOverlayManager.cs");
 
 AssertFileContains(
     labelPoolPath,
     [
         "private const float DefaultExtraCapacityRatio = 0.2f;",
         "private const int DefaultFallbackMaxObjects = 60;",
-        "private void LateUpdate()",
-        "private bool TryAcquire(VisionWorldObject worldObject)",
+        "public void SyncObjects(VisionObjectProcessedData[] objects)",
+        "private bool TryAcquire(VisionObjectProcessedData processedObject)",
         "private void ReleaseAll()",
+        "public void UpdateBillboards()",
         "if (_pool.Length > 0)",
-        "pooledLabel.Text.text = VisionLabelFormatting.FormatLabel(worldObject.Label, worldObject.Score);",
+        "processedObject.Center3D + ResolveLabelOffset()",
+        "VisionLabelFormatting.FormatLabel(processedObject.Label, processedObject.Score)",
         "int capacity = Mathf.CeilToInt(maxObjects * (1f + DefaultExtraCapacityRatio));",
     ]);
 
 AssertFileContains(
-    receiverPath,
+    overlayManagerPath,
     [
         "[SerializeField] private VisionLabelPool labelPool;",
-        "labelPool = FindFirstObjectByType<VisionLabelPool>();",
-        "labelPool = gameObject.AddComponent<VisionLabelPool>();",
-        "labelPool.SetLabelCamera(rayCamera);",
-        "int labelCapacity = labelPool != null ? labelPool.Capacity : maxObjectsPerFrame;",
-        "labelPool?.Sync(_latestWorldObjects);",
+        "labelPool ??= GetComponent<VisionLabelPool>();",
+        "labelPool?.SetLabelCamera(labelCamera);",
+        "receiverModule.OnFrameProcessed += HandleFrameProcessed;",
+        "labelPool?.SyncObjects(objects);",
+        "labelPool?.UpdateBillboards();",
     ]);
 
 AssertMetaFile($"{labelPoolPath}.meta");
+AssertMetaFile($"{overlayManagerPath}.meta");
 Console.WriteLine("VisionLabelPool console tests passed.");
 
 static void AssertFileContains(string path, IReadOnlyList<string> snippets)

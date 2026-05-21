@@ -12,15 +12,21 @@ def read_script(name: str) -> str:
 def test_compute_buffer_rendering_core_scripts_exist_with_expected_contracts():
     bbox_renderer = read_script("VisionBboxRenderer.cs")
     mask_renderer = read_script("VisionMaskRenderer.cs")
+    overlay_manager = read_script("VisionOverlayManager.cs")
     renderer_feature = read_script("VisionRendererFeature.cs")
     render_pass = read_script("VisionRenderPass.cs")
     geometry = read_script("VisionBboxGeometry.cs")
 
     assert "new ComputeBuffer" in bbox_renderer
-    assert "receiverModule.OnFrameProcessed += ApplyFrame;" in bbox_renderer
+    assert "public void UpdateBuffers(VisionObjectProcessedData[] objects)" in bbox_renderer
     assert "VisionBboxGeometry.WriteBboxLineVertices" in bbox_renderer
     assert "new ComputeBuffer" in mask_renderer
+    assert "public void UpdateContours(VisionObjectProcessedData[] objects)" in mask_renderer
     assert "VisionBboxGeometry.WriteClosedContourLineVertices" in mask_renderer
+    assert "receiverModule.OnFrameProcessed += HandleFrameProcessed;" in overlay_manager
+    assert "bboxRenderer?.UpdateBuffers(objects);" in overlay_manager
+    assert "maskRenderer?.UpdateContours(objects);" in overlay_manager
+    assert "labelPool?.SyncObjects(objects);" in overlay_manager
     assert "ScriptableRendererFeature" in renderer_feature
     assert "RenderPassEvent.AfterRenderingTransparents" in renderer_feature
     assert "DrawProcedural" in render_pass

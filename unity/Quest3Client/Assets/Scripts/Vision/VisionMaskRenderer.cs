@@ -1,5 +1,4 @@
 using System;
-using SmartRoom.Networking;
 using UnityEngine;
 
 namespace SmartRoom.Vision
@@ -11,7 +10,6 @@ namespace SmartRoom.Vision
         private static readonly int DepthOffsetPropertyId = Shader.PropertyToID("_DepthOffsetMeters");
         private static readonly int AlphaPropertyId = Shader.PropertyToID("_Alpha");
 
-        [SerializeField] private VisionReceiverModule receiverModule;
         [SerializeField] private VisionRenderConfig renderConfig;
         [SerializeField] private VisionColorPalette colorPalette;
         [SerializeField] private Shader lineShader;
@@ -31,30 +29,12 @@ namespace SmartRoom.Vision
 
         private void Awake()
         {
-            if (receiverModule == null)
-            {
-                receiverModule = FindFirstObjectByType<VisionReceiverModule>();
-            }
-
             EnsureMaterial();
             EnsureBufferCapacity(2);
         }
 
-        private void OnEnable()
-        {
-            if (receiverModule != null)
-            {
-                receiverModule.OnFrameProcessed += ApplyFrame;
-            }
-        }
-
         private void OnDisable()
         {
-            if (receiverModule != null)
-            {
-                receiverModule.OnFrameProcessed -= ApplyFrame;
-            }
-
             Clear();
         }
 
@@ -65,17 +45,22 @@ namespace SmartRoom.Vision
 
         public void ApplyFrame(VisionFrameProcessedData frame)
         {
-            if (!IsEnabled || frame == null || frame.Objects == null || frame.Objects.Length == 0)
+            UpdateContours(frame != null ? frame.Objects : Array.Empty<VisionObjectProcessedData>());
+        }
+
+        public void UpdateContours(VisionObjectProcessedData[] objects)
+        {
+            if (!IsEnabled || objects == null || objects.Length == 0)
             {
                 Clear();
                 return;
             }
 
-            int maxObjects = Mathf.Min(GetMaxObjectCount(), frame.Objects.Length);
+            int maxObjects = Mathf.Min(GetMaxObjectCount(), objects.Length);
             int requiredVertexCount = 0;
             for (int objectIndex = 0; objectIndex < maxObjects; objectIndex++)
             {
-                VisionObjectProcessedData processedObject = frame.Objects[objectIndex];
+                VisionObjectProcessedData processedObject = objects[objectIndex];
                 if (processedObject?.Contour3D == null || processedObject.Contour3D.Length < 2)
                 {
                     continue;
@@ -95,7 +80,7 @@ namespace SmartRoom.Vision
             int writeIndex = 0;
             for (int objectIndex = 0; objectIndex < maxObjects; objectIndex++)
             {
-                VisionObjectProcessedData processedObject = frame.Objects[objectIndex];
+                VisionObjectProcessedData processedObject = objects[objectIndex];
                 if (processedObject?.Contour3D == null || processedObject.Contour3D.Length < 2)
                 {
                     continue;

@@ -1,5 +1,4 @@
 using System;
-using SmartRoom.Networking;
 using UnityEngine;
 
 namespace SmartRoom.Vision
@@ -10,7 +9,6 @@ namespace SmartRoom.Vision
         private static readonly int LineWidthPropertyId = Shader.PropertyToID("_LineWidth");
         private static readonly int AlphaPropertyId = Shader.PropertyToID("_Alpha");
 
-        [SerializeField] private VisionReceiverModule receiverModule;
         [SerializeField] private VisionRenderConfig renderConfig;
         [SerializeField] private VisionColorPalette colorPalette;
         [SerializeField] private Shader lineShader;
@@ -29,30 +27,12 @@ namespace SmartRoom.Vision
 
         private void Awake()
         {
-            if (receiverModule == null)
-            {
-                receiverModule = FindFirstObjectByType<VisionReceiverModule>();
-            }
-
             EnsureMaterial();
             EnsureBufferCapacity(GetMaxObjectCount() * VisionBboxGeometry.VerticesPerBox);
         }
 
-        private void OnEnable()
-        {
-            if (receiverModule != null)
-            {
-                receiverModule.OnFrameProcessed += ApplyFrame;
-            }
-        }
-
         private void OnDisable()
         {
-            if (receiverModule != null)
-            {
-                receiverModule.OnFrameProcessed -= ApplyFrame;
-            }
-
             Clear();
         }
 
@@ -63,19 +43,24 @@ namespace SmartRoom.Vision
 
         public void ApplyFrame(VisionFrameProcessedData frame)
         {
-            if (!IsEnabled || frame == null || frame.Objects == null || frame.Objects.Length == 0)
+            UpdateBuffers(frame != null ? frame.Objects : Array.Empty<VisionObjectProcessedData>());
+        }
+
+        public void UpdateBuffers(VisionObjectProcessedData[] objects)
+        {
+            if (!IsEnabled || objects == null || objects.Length == 0)
             {
                 Clear();
                 return;
             }
 
-            int maxObjects = Mathf.Min(GetMaxObjectCount(), frame.Objects.Length);
+            int maxObjects = Mathf.Min(GetMaxObjectCount(), objects.Length);
             EnsureBufferCapacity(maxObjects * VisionBboxGeometry.VerticesPerBox);
 
             int writeIndex = 0;
             for (int objectIndex = 0; objectIndex < maxObjects; objectIndex++)
             {
-                VisionObjectProcessedData processedObject = frame.Objects[objectIndex];
+                VisionObjectProcessedData processedObject = objects[objectIndex];
                 if (processedObject == null || !processedObject.CornersValid || processedObject.Corners3D == null || processedObject.Corners3D.Length < VisionBboxGeometry.CornerCount)
                 {
                     continue;

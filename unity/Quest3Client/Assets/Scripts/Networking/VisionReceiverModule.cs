@@ -38,9 +38,9 @@ namespace SmartRoom.Networking
         [SerializeField] private Camera rayCamera;
         [SerializeField] private PassthroughCameraAccess passthroughCameraAccess;
         [SerializeField] private int samplesPerObject = 3;
+        [SerializeField] private int contourSamplesPerObject = 12;
         [SerializeField] private int maxObjectsPerFrame = 8;
         [SerializeField] private float bboxDepthOffsetMeters = 0.05f;
-        [SerializeField] private VisionLabelPool labelPool;
 
         private MethodInfo _passthroughViewportRayMethod;
         private bool _passthroughViewportRayMethodResolved;
@@ -80,21 +80,9 @@ namespace SmartRoom.Networking
                 wireframeManager = FindFirstObjectByType<BboxWireframeManager>();
             }
 
-            if (labelPool == null)
-            {
-                labelPool = FindFirstObjectByType<VisionLabelPool>();
-                if (labelPool == null)
-                {
-                    labelPool = gameObject.AddComponent<VisionLabelPool>();
-                }
-            }
-
             samplesPerObject = Mathf.Clamp(samplesPerObject, 1, 16);
+            contourSamplesPerObject = Mathf.Clamp(contourSamplesPerObject, 4, 32);
             maxObjectsPerFrame = Mathf.Clamp(maxObjectsPerFrame, 1, 64);
-            if (labelPool != null)
-            {
-                labelPool.SetLabelCamera(rayCamera);
-            }
         }
 
         private void OnEnable()
@@ -176,8 +164,7 @@ namespace SmartRoom.Networking
             }
 
             _worldObjectsBuffer.Clear();
-            int labelCapacity = labelPool != null ? labelPool.Capacity : maxObjectsPerFrame;
-            int objectCount = Mathf.Min(frame.objects.Length, Mathf.Min(maxObjectsPerFrame, labelCapacity));
+            int objectCount = Mathf.Min(frame.objects.Length, maxObjectsPerFrame);
             var processedObjects = new WorldPosition[objectCount * samplesPerObject];
             int processedCount = 0;
             for (int objectIndex = 0; objectIndex < objectCount; objectIndex++)
@@ -311,31 +298,189 @@ namespace SmartRoom.Networking
                 Objects = Array.Empty<VisionObjectProcessedData>()
             };
 
-            if (worldObjects == null || worldObjects.Length == 0)
+            if (worldObjects == null || worldObjects.Length == 0 || frame.objects == null || frame.objects.Length == 0)
             {
                 OnFrameProcessed?.Invoke(processedFrame);
                 return;
+            }
+
+            var trackedObjectMap = new Dictionary<int, VisionTrackedMaskPayload>(frame.objects.Length);
+            for (int index = 0; index < frame.objects.Length; index++)
+            {
+                VisionTrackedMaskPayload trackedMask = frame.objects[index];
+                if (trackedMask != null)
+                {
+                    trackedObjectMap[trackedMask.object_id] = trackedMask;
+                }
             }
 
             var processedObjects = new VisionObjectProcessedData[worldObjects.Length];
             for (int index = 0; index < worldObjects.Length; index++)
             {
                 VisionWorldObject worldObject = worldObjects[index];
+                trackedObjectMap.TryGetValue(worldObject.ObjectId, out VisionTrackedMaskPayload trackedMask);
+
+                Vector3[] corners = Array.Empty<Vector3>();
+                bool cornersValid = trackedMask != null && TryBuildBboxCorners(frame, trackedMask, out corners);
+
+                Vector3[] contour = Array.Empty<Vector3>();
+                if (trackedMask != null)
+                {
+                    contour = BuildContourWorldPoints(frame, trackedMask);
+                }
+
                 processedObjects[index] = new VisionObjectProcessedData
                 {
                     ObjectId = worldObject.ObjectId,
                     Label = worldObject.Label,
                     Score = worldObject.Score,
-                    Corners3D = Array.Empty<Vector3>(),
+                    Corners3D = corners,
                     Center3D = worldObject.WorldPosition,
-                    Contour3D = Array.Empty<Vector3>(),
-                    CornersValid = false,
+                    Contour3D = contour,
+                    CornersValid = cornersValid,
                     CenterValid = true
                 };
             }
 
             processedFrame.Objects = processedObjects;
             OnFrameProcessed?.Invoke(processedFrame);
+        }
+
+        private Vector3[] BuildContourWorldPoints(VisionFramePayload frame, VisionTrackedMaskPayload trackedMask)
+        {
+            Vector2[] contourPixels = DecodeMaskContourPixels(trackedMask);
+            if (contourPixels.Length < 2)
+            {
+                return Array.Empty<Vector3>();
+            }
+
+            int frameWidth = frame.frame_width > 0 ? frame.frame_width : trackedMask.mask_rle.size[1];
+            int frameHeight = frame.frame_height > 0 ? frame.frame_height : trackedMask.mask_rle.size[0];
+            var contourPoints = new List<Vector3>(contourPixels.Length);
+            for (int index = 0; index < contourPixels.Length; index++)
+            {
+                Vector2 pixel = contourPixels[index];
+                float u = (pixel.x + 0.5f) / frameWidth;
+                float v = 1f - ((pixel.y + 0.5f) / frameHeight);
+                if (!TryGetViewportRay(u, v, out Ray ray, out Transform rayTransform))
+                {
+                    continue;
+                }
+
+                if (!depthStreamModule.TryRaycastViewport(u, v, ray, rayTransform, out _, out Vector3 worldPoint, out _))
+                {
+                    continue;
+                }
+
+                contourPoints.Add(worldPoint);
+            }
+
+            return contourPoints.Count >= 2 ? contourPoints.ToArray() : Array.Empty<Vector3>();
+        }
+
+        private Vector2[] DecodeMaskContourPixels(VisionTrackedMaskPayload trackedMask)
+        {
+            if (trackedMask?.mask_rle?.size == null || trackedMask.mask_rle.size.Length != 2 || trackedMask.mask_rle.counts == null)
+            {
+                return Array.Empty<Vector2>();
+            }
+
+            int maskHeight = trackedMask.mask_rle.size[0];
+            int maskWidth = trackedMask.mask_rle.size[1];
+            if (maskHeight <= 0 || maskWidth <= 0)
+            {
+                return Array.Empty<Vector2>();
+            }
+
+            int[] counts = trackedMask.mask_rle.counts;
+            var mask = new bool[maskWidth * maskHeight];
+            int flatIndex = 0;
+            bool isForegroundRun = false;
+            for (int runIndex = 0; runIndex < counts.Length; runIndex++)
+            {
+                int runLength = counts[runIndex];
+                if (runLength < 0 || flatIndex + runLength > mask.Length)
+                {
+                    return Array.Empty<Vector2>();
+                }
+
+                if (isForegroundRun)
+                {
+                    for (int offset = 0; offset < runLength; offset++)
+                    {
+                        mask[flatIndex + offset] = true;
+                    }
+                }
+
+                flatIndex += runLength;
+                isForegroundRun = !isForegroundRun;
+            }
+
+            if (flatIndex != mask.Length)
+            {
+                return Array.Empty<Vector2>();
+            }
+
+            var boundaryPixels = new List<Vector2>();
+            for (int y = 0; y < maskHeight; y++)
+            {
+                for (int x = 0; x < maskWidth; x++)
+                {
+                    int pixelIndex = (y * maskWidth) + x;
+                    if (!mask[pixelIndex])
+                    {
+                        continue;
+                    }
+
+                    bool touchesBackground =
+                        x == 0 || !mask[pixelIndex - 1] ||
+                        x == maskWidth - 1 || !mask[pixelIndex + 1] ||
+                        y == 0 || !mask[pixelIndex - maskWidth] ||
+                        y == maskHeight - 1 || !mask[pixelIndex + maskWidth];
+
+                    if (touchesBackground)
+                    {
+                        boundaryPixels.Add(new Vector2(x, y));
+                    }
+                }
+            }
+
+            if (boundaryPixels.Count < 2)
+            {
+                return Array.Empty<Vector2>();
+            }
+
+            int sampleCount = Mathf.Min(contourSamplesPerObject, boundaryPixels.Count);
+            var sampledPixels = new List<Vector2>(sampleCount);
+            if (sampleCount == 1)
+            {
+                sampledPixels.Add(boundaryPixels[0]);
+            }
+            else
+            {
+                for (int index = 0; index < sampleCount; index++)
+                {
+                    float t = sampleCount == 1 ? 0f : (float)index / (sampleCount - 1);
+                    int pixelIndex = Mathf.Clamp(Mathf.RoundToInt(t * (boundaryPixels.Count - 1)), 0, boundaryPixels.Count - 1);
+                    sampledPixels.Add(boundaryPixels[pixelIndex]);
+                }
+            }
+
+            Vector2 centroid = Vector2.zero;
+            for (int index = 0; index < sampledPixels.Count; index++)
+            {
+                centroid += sampledPixels[index];
+            }
+
+            centroid /= sampledPixels.Count;
+            sampledPixels.Sort((left, right) =>
+            {
+                float leftAngle = Mathf.Atan2(left.y - centroid.y, left.x - centroid.x);
+                float rightAngle = Mathf.Atan2(right.y - centroid.y, right.x - centroid.x);
+                return leftAngle.CompareTo(rightAngle);
+            });
+
+            return sampledPixels.ToArray();
         }
 
         private bool TryGetViewportRay(float u, float v, out Ray ray, out Transform rayTransform)
@@ -461,7 +606,6 @@ namespace SmartRoom.Networking
         private void PublishWorldObjects(VisionWorldObject[] worldObjects)
         {
             _latestWorldObjects = worldObjects ?? Array.Empty<VisionWorldObject>();
-            labelPool?.Sync(_latestWorldObjects);
             WorldObjectsUpdated?.Invoke(_latestWorldObjects);
         }
 
