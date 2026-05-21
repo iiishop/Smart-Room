@@ -1,17 +1,27 @@
 from __future__ import annotations
 
 import json
+import os
+import socket
 import struct
+import subprocess
+import time
+from pathlib import Path
 from typing import Any
 
 import cv2
 import numpy as np
+import urllib.request
+from websocket import create_connection
 
 from quest3server.main import app, get_vision_runtime, set_vision_runtime_for_testing
 from quest3server.vision.pipeline import VisionPipelineError
 from quest3server.vision.rle import encode_binary_mask
 from quest3server.vision.runtime import Quest3VisionRuntime
 from quest3server.vision.types import GpuMemoryStats, TrackedMask, VisionFrameResult
+
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+TESTS_DIR = Path(__file__).resolve().parent
 
 
 class _FakeFullPipeline:
@@ -198,6 +208,26 @@ def _make_depth_packet(
     return header + floats
 
 
+def _find_free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _wait_for_server_ready(base_url: str, timeout_seconds: float = 10.0) -> None:
+    deadline = time.time() + timeout_seconds
+    last_error: Exception | None = None
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(f"{base_url}/health", timeout=0.5) as response:
+                if response.status == 200:
+                    return
+        except Exception as exc:
+            last_error = exc
+            time.sleep(0.1)
+    raise AssertionError(f"quest3server did not become ready: {last_error}")
+
+
 def _run_pipeline_and_get_vision_payload(client, rgb_ws, vision_ws, pipeline) -> dict[str, Any]:
     pipeline.start_session("chair")
     client.post("/api/vision/session", json={"prompt": "chair"})
@@ -369,3 +399,77 @@ class TestE2ESmoke:
 
             latest_rgb = client.get("/api/latest-rgb")
             assert latest_rgb.status_code in (200, 204)
+
+    def test_real_quest3server_process_streams_vision_fields(self) -> None:
+        port = _find_free_port()
+        base_url = f"http://127.0.0.1:{port}"
+        env = os.environ.copy()
+        pythonpath_parts = [str(BACKEND_DIR), str(TESTS_DIR)]
+        existing_pythonpath = env.get("PYTHONPATH", "").strip()
+        if existing_pythonpath:
+            pythonpath_parts.append(existing_pythonpath)
+        env["PYTHONPATH"] = os.pathsep.join(
+            pythonpath_parts
+        )
+        env["QUEST3_VISION_PIPELINE_FACTORY"] = (
+            "quest3server_test_pipeline:create_pipeline"
+        )
+
+        process = subprocess.Popen(
+            [
+                "uv",
+                "run",
+                "python",
+                "-m",
+                "uvicorn",
+                "quest3server.main:app",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(port),
+            ],
+            cwd=str(BACKEND_DIR),
+            env=env,
+        )
+
+        try:
+            _wait_for_server_ready(base_url)
+        except Exception:
+            process.terminate()
+            process.wait(timeout=5)
+            raise
+
+        try:
+            payload = json.dumps({"prompt": "chair"}).encode("utf-8")
+            request = urllib.request.Request(
+                f"{base_url}/api/vision/session",
+                data=payload,
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(request, timeout=2.0) as response:
+                started = json.loads(response.read().decode("utf-8"))
+            assert started["active"] is True
+            assert started["prompt"] == "chair"
+
+            vision_ws = create_connection(f"ws://127.0.0.1:{port}/ws/vision", timeout=2.0)
+            rgb_ws = create_connection(f"ws://127.0.0.1:{port}/ws/rgb", timeout=2.0)
+            try:
+                rgb_ws.send_binary(_make_rgb_packet(frame_id=77, timestamp_ms=4567))
+                message = vision_ws.recv()
+            finally:
+                rgb_ws.close()
+                vision_ws.close()
+
+            vision_payload = json.loads(message)
+            assert vision_payload["frame_id"] == 77
+            assert vision_payload["mode"] == "detection"
+            assert vision_payload["process_time_ms"] == 7.25
+            assert vision_payload["gpu_memory_mb"] == {
+                "allocated": 12.0,
+                "max_allocated": 24.0,
+            }
+            assert vision_payload["objects"][0]["label"] == "chair"
+        finally:
+            process.terminate()
+            process.wait(timeout=5)

@@ -181,3 +181,38 @@ def test_grounded_pipeline_adds_new_objects_without_resetting_ids() -> None:
     assert tracker.track_calls == 1
     assert tracker.add_object_calls == 1
     assert detector.calls == ["chair", "chair"]
+
+
+def test_grounded_pipeline_respects_detect_interval_and_forces_first_frame() -> None:
+    detector = _StaticDetector()
+    tracker = _FakeTracker()
+    pipeline = GroundedSamTrackingPipeline(
+        detector=detector,
+        segmenter=_FakeSegmenter(),
+        tracker=tracker,
+        detect_interval=3,
+        max_objects=4,
+    )
+    frame = np.zeros((3, 3, 3), dtype=np.uint8)
+
+    pipeline.start_session("chair")
+
+    first = pipeline.process_frame(frame_id=1, timestamp_ms=1000, image_bgr=frame)
+    second = pipeline.process_frame(frame_id=2, timestamp_ms=1033, image_bgr=frame)
+    third = pipeline.process_frame(frame_id=3, timestamp_ms=1066, image_bgr=frame)
+    fourth = pipeline.process_frame(frame_id=4, timestamp_ms=1099, image_bgr=frame)
+
+    assert first is not None
+    assert second is not None
+    assert third is not None
+    assert fourth is not None
+    assert [first.mode, second.mode, third.mode, fourth.mode] == [
+        "detection",
+        "propagation",
+        "detection",
+        "propagation",
+    ]
+    assert detector.calls == ["chair", "chair"]
+    assert tracker.bootstrap_calls == 1
+    assert tracker.track_calls == 3
+    assert tracker.add_object_calls == 0

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import os
 from dataclasses import dataclass
 from typing import Any
@@ -309,6 +310,10 @@ class Sam2VideoRepropagatingTracker(VideoTrackingProvider):
 
 
 def build_default_pipeline() -> GroundedSamTrackingPipeline | None:
+    pipeline_factory = os.getenv("QUEST3_VISION_PIPELINE_FACTORY", "").strip()
+    if pipeline_factory:
+        return _build_pipeline_from_factory(pipeline_factory)
+
     settings = VisionModelSettings.from_env()
     if not settings.enabled:
         return None
@@ -330,3 +335,26 @@ def build_default_pipeline() -> GroundedSamTrackingPipeline | None:
         detect_interval=settings.detect_interval,
         max_objects=settings.max_objects,
     )
+
+
+def _build_pipeline_from_factory(factory_path: str) -> GroundedSamTrackingPipeline | None:
+    module_name, sep, attr_name = factory_path.partition(":")
+    if not sep or not module_name or not attr_name:
+        raise VisionPipelineError(
+            "QUEST3_VISION_PIPELINE_FACTORY must be in the form 'module:function'"
+        )
+
+    try:
+        module = importlib.import_module(module_name)
+    except ImportError as exc:
+        raise VisionPipelineError(
+            f"failed to import vision pipeline factory module '{module_name}'"
+        ) from exc
+
+    factory = getattr(module, attr_name, None)
+    if factory is None or not callable(factory):
+        raise VisionPipelineError(
+            f"vision pipeline factory '{factory_path}' was not found or is not callable"
+        )
+
+    return factory()
