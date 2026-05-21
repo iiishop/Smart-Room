@@ -4,7 +4,7 @@ using UnityEngine;
 
 namespace SmartRoom.Rendering
 {
-    [StructLayout(LayoutKind.Sequential, Size = 112)]
+    [StructLayout(LayoutKind.Sequential)]
     internal struct BboxWireframeInstance
     {
         public Vector3 corner0;
@@ -15,10 +15,10 @@ namespace SmartRoom.Rendering
         public Vector3 corner5;
         public Vector3 corner6;
         public Vector3 corner7;
-        public ushort cr;
-        public ushort cg;
-        public ushort cb;
-        public ushort ca;
+        public float cr;
+        public float cg;
+        public float cb;
+        public float ca;
     }
 
     public sealed class BboxWireframeManager : MonoBehaviour
@@ -89,10 +89,10 @@ namespace SmartRoom.Rendering
                 corner5 = corners[5],
                 corner6 = corners[6],
                 corner7 = corners[7],
-                cr = Mathf.FloatToHalf(color.r),
-                cg = Mathf.FloatToHalf(color.g),
-                cb = Mathf.FloatToHalf(color.b),
-                ca = Mathf.FloatToHalf(color.a)
+                cr = color.r,
+                cg = color.g,
+                cb = color.b,
+                ca = color.a
             };
             _dirty = true;
         }
