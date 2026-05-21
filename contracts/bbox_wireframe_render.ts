@@ -2,18 +2,27 @@
 // Shared between VisionReceiverModule (data producer), BboxWireframeManager (CPU consumer),
 // and BboxWireframe.shader (GPU consumer).
 
-// --- GPU ComputeBuffer layout (C# System.Runtime.InteropServices struct) ---
-// LayoutKind.Sequential, align to 4/16 bytes as GPU expects.
+// --- GPU ComputeBuffer layout (dual buffer, C# → HLSL) ---
+// Two independent StructuredBuffers, uploaded separately per frame.
 // Max instances: 64 (allocated once, resized if needed).
-// Vertex shader reads StructuredBuffer<BboxWireframeInstance> _BboxInstances.
+//
+// Buffer 1: _BboxCornerBuffer  (StructuredBuffer<float3>, count = maxInstances * 8)
+//   Per-vertex world-space position, 8 corners per instance, 12 bytes per vertex.
+//   Vertex shader indexing: _BboxCornerBuffer[instanceIdx * 8 + cornerIdx]
+//
+// Buffer 2: _BboxColorBuffer   (StructuredBuffer<float4>, count = maxInstances)
+//   Per-instance color, 16 bytes per instance.
+//   Vertex shader indexing: _BboxColorBuffer[instanceIdx]
 
-export interface BboxWireframeInstance {
-  /** 8 corners in world space, vec3 → 12 float pairs (3*8=24 floats, 96 bytes) */
-  corners: Float32Array; // length 24, interleaved [c0.x,c0.y,c0.z, c1.x,... c7.x,c7.y,c7.z]
-  /** per-instance color, rgba half-precision (4 floats, 16 bytes) */
-  color: [number, number, number, number]; // r,g,b,a
+export interface BboxCornerEntry {
+  /** World-space vertex position (12 bytes on GPU as float3) */
+  position: [number, number, number];
 }
-// Total stride per instance: 112 bytes (96 + 16)
+
+export interface BboxColorEntry {
+  /** Per-instance RGBA color (16 bytes on GPU as float4) */
+  color: [number, number, number, number];
+}
 
 // --- Shader vertex index LUT (SV_VertexID 0..23 → corner pair) ---
 // 12 line segments forming a 3D cuboid wireframe.
@@ -61,5 +70,4 @@ export const OBJECT_ID_COLOR_TABLE: Record<number, string> = {
 // --- Shader properties (Material inspector) ---
 export interface BboxWireframeMaterialProperties {
   _LineAlpha: number;     // default 0.6, range [0,1]
-  _LineWidthScale: number; // screen-space scale, default 1.0
 }

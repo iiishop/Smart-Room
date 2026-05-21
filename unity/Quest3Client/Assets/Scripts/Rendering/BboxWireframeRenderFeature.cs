@@ -41,6 +41,11 @@ namespace SmartRoom.Rendering
                 return;
             }
 
+            if (_cachedManager.UseBuiltinCallback)
+            {
+                return;
+            }
+
             if (!_cachedManager.isActiveAndEnabled || _cachedManager.ActiveCount <= 0 || _cachedManager.Material == null)
             {
                 return;

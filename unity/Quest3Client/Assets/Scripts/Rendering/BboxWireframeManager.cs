@@ -43,12 +43,15 @@ namespace SmartRoom.Rendering
         private readonly List<Color> _colorList = new();
         private int _activeCount;
 
+        private Vector3[] _cornerUploadArray;
+        private Color[] _colorUploadArray;
+
         private static readonly int BboxCornerBufferId = Shader.PropertyToID("_BboxCornerBuffer");
         private static readonly int BboxColorBufferId = Shader.PropertyToID("_BboxColorBuffer");
         private static readonly int BboxCountId = Shader.PropertyToID("_BboxCount");
         private static readonly int LineAlphaId = Shader.PropertyToID("_LineAlpha");
-        private static readonly Color[] EmptyColorArray = new Color[0];
-        private static readonly Vector3[] EmptyCornerArray = new Vector3[0];
+
+        public bool UseBuiltinCallback => useBuiltinCallback;
 
         public int ActiveCount => _activeCount;
         public Material Material => _material;
@@ -75,6 +78,8 @@ namespace SmartRoom.Rendering
             int cornerCount = maxInstances * 8;
             _cornerBuffer = new ComputeBuffer(cornerCount, sizeof(float) * 3, ComputeBufferType.Structured);
             _colorBuffer = new ComputeBuffer(maxInstances, sizeof(float) * 4, ComputeBufferType.Structured);
+            _cornerUploadArray = new Vector3[cornerCount];
+            _colorUploadArray = new Color[maxInstances];
 
             if (_material != null)
             {
@@ -188,17 +193,27 @@ namespace SmartRoom.Rendering
                 cornerCount = (_cornerBuffer.count / 8) * 8;
             }
 
-            var cornerArray = cornerCount > 0 ? _cornerList.GetRange(0, cornerCount).ToArray() : EmptyCornerArray;
-            var colorArray = _activeCount > _colorBuffer.count
-                ? _colorList.GetRange(0, _colorBuffer.count).ToArray()
-                : _colorList.ToArray();
+            int colorCount = _activeCount;
+            if (colorCount > _colorBuffer.count)
+            {
+                colorCount = _colorBuffer.count;
+            }
 
-            _cornerBuffer.SetData(cornerArray, 0, 0, cornerCount);
-            _colorBuffer.SetData(colorArray, 0, 0, colorArray.Length);
+            if (cornerCount > 0)
+            {
+                _cornerList.CopyTo(0, _cornerUploadArray, 0, cornerCount);
+                _cornerBuffer.SetData(_cornerUploadArray, 0, 0, cornerCount);
+            }
+
+            if (colorCount > 0)
+            {
+                _colorList.CopyTo(0, _colorUploadArray, 0, colorCount);
+                _colorBuffer.SetData(_colorUploadArray, 0, 0, colorCount);
+            }
 
             if (_material != null)
             {
-                _material.SetInt(BboxCountId, colorArray.Length);
+                _material.SetInt(BboxCountId, colorCount);
             }
         }
 
