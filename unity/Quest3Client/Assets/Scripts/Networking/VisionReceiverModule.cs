@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Reflection;
 using System.Text;
 using Meta.XR;
+using SmartRoom.Vision;
 using TMPro;
 using UnityEngine;
 using UnityEngine.UI;
@@ -31,6 +32,7 @@ namespace SmartRoom.Networking
     public class VisionReceiverModule : MonoBehaviour
     {
         public event Action<WorldPosition[]> ObjectsProcessed;
+        public event Action<VisionFrameProcessedData> OnFrameProcessed;
 
         [SerializeField] private BackendCommunicationManager manager;
         [SerializeField] private DepthStreamModule depthStreamModule;
@@ -166,6 +168,7 @@ namespace SmartRoom.Networking
             if (frame?.objects == null || frame.objects.Length == 0)
             {
                 PublishWorldObjects(Array.Empty<VisionWorldObject>());
+                EmitProcessedFrame(frame, Array.Empty<VisionWorldObject>());
                 return;
             }
 
@@ -261,7 +264,50 @@ namespace SmartRoom.Networking
             Array.Copy(processedObjects, publishedObjects, processedCount);
             ObjectsProcessed?.Invoke(publishedObjects);
 
-            PublishWorldObjects(_worldObjectsBuffer.ToArray());
+            VisionWorldObject[] worldObjects = _worldObjectsBuffer.ToArray();
+            PublishWorldObjects(worldObjects);
+            EmitProcessedFrame(frame, worldObjects);
+        }
+
+        private void EmitProcessedFrame(VisionFramePayload frame, VisionWorldObject[] worldObjects)
+        {
+            if (frame == null)
+            {
+                return;
+            }
+
+            var processedFrame = new VisionFrameProcessedData
+            {
+                FrameId = frame.frame_id,
+                TimestampMs = frame.timestamp_ms,
+                Objects = Array.Empty<VisionObjectProcessedData>()
+            };
+
+            if (worldObjects == null || worldObjects.Length == 0)
+            {
+                OnFrameProcessed?.Invoke(processedFrame);
+                return;
+            }
+
+            var processedObjects = new VisionObjectProcessedData[worldObjects.Length];
+            for (int index = 0; index < worldObjects.Length; index++)
+            {
+                VisionWorldObject worldObject = worldObjects[index];
+                processedObjects[index] = new VisionObjectProcessedData
+                {
+                    ObjectId = worldObject.ObjectId,
+                    Label = worldObject.Label,
+                    Score = worldObject.Score,
+                    Corners3D = Array.Empty<Vector3>(),
+                    Center3D = worldObject.WorldPosition,
+                    Contour3D = Array.Empty<Vector3>(),
+                    CornersValid = false,
+                    CenterValid = true
+                };
+            }
+
+            processedFrame.Objects = processedObjects;
+            OnFrameProcessed?.Invoke(processedFrame);
         }
 
         private bool TryGetViewportRay(float u, float v, out Ray ray, out Transform rayTransform)
