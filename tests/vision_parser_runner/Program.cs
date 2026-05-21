@@ -6,6 +6,7 @@ try
     ParseFrameResult_DecodesFrameAndMask();
     DecodeMask_ThrowsWhenCountsDoNotMatchSize();
     SocketOwnership_DoesNotClearNewSocketWhenOldLoopDisposes();
+    VisionOverlayShaders_ExposeExpectedShaderContracts();
     Console.WriteLine("VisionParserRunner: all tests passed.");
 }
 catch (Exception ex)
@@ -98,6 +99,61 @@ static void SocketOwnership_DoesNotClearNewSocketWhenOldLoopDisposes()
     AssertTrue(
         VisionSocketOwnership.ShouldClearCurrentSocket(newSocket, newSocket),
         "current loop should clear owned socket");
+}
+
+static void VisionOverlayShaders_ExposeExpectedShaderContracts()
+{
+    string repoRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
+    string shadersDir = Path.Combine(repoRoot, "unity", "Quest3Client", "Assets", "Shaders");
+
+    AssertShader(
+        Path.Combine(shadersDir, "VisionBboxLines.shader"),
+        new[]
+        {
+            "\"RenderPipeline\" = \"UniversalPipeline\"",
+            "\"Queue\" = \"Transparent\"",
+            "Blend SrcAlpha OneMinusSrcAlpha",
+            "StructuredBuffer<LineVertexData> _LineVertices;",
+            "float3 position;",
+            "uint color;"
+        });
+
+    AssertShader(
+        Path.Combine(shadersDir, "VisionMaskLines.shader"),
+        new[]
+        {
+            "\"RenderPipeline\" = \"UniversalPipeline\"",
+            "\"Queue\" = \"Transparent\"",
+            "_DepthOffsetMeters",
+            "StructuredBuffer<LineVertexData> _LineVertices;"
+        });
+
+    AssertShader(
+        Path.Combine(shadersDir, "VisionAnchorSphere.shader"),
+        new[]
+        {
+            "\"RenderPipeline\" = \"UniversalPipeline\"",
+            "\"Queue\" = \"Transparent\"",
+            "#pragma multi_compile_instancing",
+            "UNITY_DEFINE_INSTANCED_PROP(float4, _InstanceColor)"
+        });
+}
+
+static void AssertShader(string path, IEnumerable<string> expectedSnippets)
+{
+    if (!File.Exists(path))
+    {
+        throw new Exception($"expected shader to exist: {path}");
+    }
+
+    string contents = File.ReadAllText(path);
+    foreach (string snippet in expectedSnippets)
+    {
+        if (!contents.Contains(snippet, StringComparison.Ordinal))
+        {
+            throw new Exception($"shader {Path.GetFileName(path)} missing snippet: {snippet}");
+        }
+    }
 }
 
 static void AssertEqual<T>(T expected, T actual, string name)
