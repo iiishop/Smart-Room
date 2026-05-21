@@ -12,5 +12,6 @@
     <Compile Include="..\..\unity\Quest3Client\Assets\Scripts\Networking\VisionContracts.cs" Link="VisionContracts.cs" />
     <Compile Include="..\..\unity\Quest3Client\Assets\Scripts\Networking\VisionMessageParser.cs" Link="VisionMessageParser.cs" />
     <Compile Include="..\..\unity\Quest3Client\Assets\Scripts\Networking\VisionSocketOwnership.cs" Link="VisionSocketOwnership.cs" />
+    <Compile Include="..\..\unity\Quest3Client\Assets\Scripts\Networking\VisionWorldPositionFactory.cs" Link="VisionWorldPositionFactory.cs" />
   </ItemGroup>
 </Project>
