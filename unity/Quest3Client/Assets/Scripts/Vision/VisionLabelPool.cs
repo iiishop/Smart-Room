@@ -1,5 +1,4 @@
 using System;
-using SmartRoom.Networking;
 using TMPro;
 using UnityEngine;
 using UnityEngine.UI;
@@ -33,11 +32,6 @@ namespace SmartRoom.Vision
             EnsurePool();
         }
 
-        private void LateUpdate()
-        {
-            BillboardActiveLabels();
-        }
-
         public void SetLabelCamera(Camera camera)
         {
             labelCamera = camera;
@@ -47,15 +41,15 @@ namespace SmartRoom.Vision
             }
         }
 
-        public void Sync(VisionWorldObject[] worldObjects)
+        public void SyncObjects(VisionObjectProcessedData[] objects)
         {
             EnsurePool();
             ReleaseAll();
 
-            int count = worldObjects != null ? worldObjects.Length : 0;
+            int count = objects != null ? objects.Length : 0;
             for (int index = 0; index < count; index++)
             {
-                if (!TryAcquire(worldObjects[index]))
+                if (!TryAcquire(objects[index]))
                 {
                     break;
                 }
@@ -67,16 +61,21 @@ namespace SmartRoom.Vision
             ReleaseAll();
         }
 
-        private bool TryAcquire(VisionWorldObject worldObject)
+        public void UpdateBillboards()
         {
-            if (_activeCount >= _pool.Length)
+            BillboardActiveLabels();
+        }
+
+        private bool TryAcquire(VisionObjectProcessedData processedObject)
+        {
+            if (_activeCount >= _pool.Length || processedObject == null || !processedObject.CenterValid)
             {
                 return false;
             }
 
             ref PooledLabel pooledLabel = ref _pool[_activeCount++];
-            pooledLabel.Transform.position = worldObject.WorldPosition + ResolveLabelOffset();
-            pooledLabel.Text.text = VisionLabelFormatting.FormatLabel(worldObject.Label, worldObject.Score);
+            pooledLabel.Transform.position = processedObject.Center3D + ResolveLabelOffset();
+            pooledLabel.Text.text = SmartRoom.Networking.VisionLabelFormatting.FormatLabel(processedObject.Label, processedObject.Score);
             pooledLabel.GameObject.SetActive(true);
             return true;
         }

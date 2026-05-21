@@ -1,0 +1,111 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!1 &100000
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 400000}
+  - component: {fileID: 11400001}
+  - component: {fileID: 11400002}
+  - component: {fileID: 11400003}
+  - component: {fileID: 11400004}
+  m_Layer: 0
+  m_Name: VisionOverlayRig
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!4 &400000
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 100000}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &11400001
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 100000}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: d6e5f40718294a3bb5c6d7e8f9012345, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::SmartRoom.Vision.VisionOverlayManager
+  receiverModule: {fileID: 0}
+  bboxRenderer: {fileID: 11400002}
+  maskRenderer: {fileID: 11400003}
+  labelPool: {fileID: 11400004}
+  labelCamera: {fileID: 0}
+--- !u!114 &11400002
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 100000}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 233727c3077e4272a1cad91d59607195, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::SmartRoom.Vision.VisionBboxRenderer
+  renderConfig: {fileID: 11400000, guid: 5d0e1f2a3b4c5d6e9f0a1b2c3d4e5f60, type: 2}
+  colorPalette: {fileID: 11400000, guid: 6e1f2a3b4c5d6e7f0a1b2c3d4e5f6071, type: 2}
+  lineShader: {fileID: 0}
+  lineWidthPixels: 2
+  alpha: 1
+--- !u!114 &11400003
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 100000}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: c74688b70e1a46aea3f1e86dc35ffb86, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::SmartRoom.Vision.VisionMaskRenderer
+  renderConfig: {fileID: 11400000, guid: 5d0e1f2a3b4c5d6e9f0a1b2c3d4e5f60, type: 2}
+  colorPalette: {fileID: 11400000, guid: 6e1f2a3b4c5d6e7f0a1b2c3d4e5f6071, type: 2}
+  lineShader: {fileID: 0}
+  lineWidthPixels: 2
+  depthOffsetMeters: 0.01
+  alpha: 0.85
+--- !u!114 &11400004
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 100000}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 82161f2d357f4b7dad541f2b9ec7fd11, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::SmartRoom.Vision.VisionLabelPool
+  renderConfig: {fileID: 11400000, guid: 5d0e1f2a3b4c5d6e9f0a1b2c3d4e5f60, type: 2}
+  worldSpaceLabelCanvas: {fileID: 0}
+  labelFont: {fileID: 0}
+  labelCamera: {fileID: 0}
+  labelSize: {x: 320, y: 72}
+  labelFontSize: 36
+  canvasScale: 0.001
+  labelTextColor: {r: 1, g: 1, b: 1, a: 1}
+  labelOutlineColor: {r: 0, g: 0, b: 0, a: 0.85}
+  labelOutlineWidth: 0.2
