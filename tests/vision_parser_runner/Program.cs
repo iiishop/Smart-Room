@@ -5,6 +5,7 @@ try
 {
     ParseFrameResult_DecodesFrameAndMask();
     DecodeMask_ThrowsWhenCountsDoNotMatchSize();
+    FormatLabel_UsesInvariantScoreAndFallbackLabel();
     SocketOwnership_DoesNotClearNewSocketWhenOldLoopDisposes();
     Console.WriteLine("VisionParserRunner: all tests passed.");
 }
@@ -98,6 +99,12 @@ static void SocketOwnership_DoesNotClearNewSocketWhenOldLoopDisposes()
     AssertTrue(
         VisionSocketOwnership.ShouldClearCurrentSocket(newSocket, newSocket),
         "current loop should clear owned socket");
+}
+
+static void FormatLabel_UsesInvariantScoreAndFallbackLabel()
+{
+    AssertEqual("chair 0.99", VisionLabelFormatting.FormatLabel("chair", 0.99f), "formatted score");
+    AssertEqual("unknown 0.00", VisionLabelFormatting.FormatLabel("  ", float.NaN), "fallback label");
 }
 
 static void AssertEqual<T>(T expected, T actual, string name)
