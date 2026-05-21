@@ -11,7 +11,7 @@ from quest3server.main import app, get_vision_runtime, set_vision_runtime_for_te
 from quest3server.vision.pipeline import VisionPipelineError
 from quest3server.vision.rle import encode_binary_mask
 from quest3server.vision.runtime import Quest3VisionRuntime
-from quest3server.vision.types import TrackedMask, VisionFrameResult
+from quest3server.vision.types import GpuMemoryStats, TrackedMask, VisionFrameResult
 
 
 class _FakeFullPipeline:
@@ -19,6 +19,9 @@ class _FakeFullPipeline:
         self.is_active = False
         self.prompt: str | None = None
         self._frames: list[int] = []
+        self.source = "fake-full-pipeline"
+        self.detect_interval = 30
+        self.max_objects = 8
 
     def start_session(self, prompt: str) -> None:
         normalized = prompt.strip()
@@ -50,7 +53,10 @@ class _FakeFullPipeline:
             frame_width=width,
             frame_height=height,
             prompt=self.prompt,
-            source="fake-full-pipeline",
+            source=self.source,
+            mode="detection",
+            process_time_ms=18.25,
+            gpu_memory_mb=GpuMemoryStats(allocated=128.0, max_allocated=256.0),
             objects=[
                 TrackedMask(
                     object_id=1,
@@ -222,6 +228,12 @@ class TestE2ESmoke:
                 assert payload["frame_height"] == 360
                 assert payload["prompt"] == "chair"
                 assert payload["source"] == "fake-full-pipeline"
+                assert payload["mode"] == "detection"
+                assert payload["process_time_ms"] == 18.25
+                assert payload["gpu_memory_mb"] == {
+                    "allocated": 128.0,
+                    "max_allocated": 256.0,
+                }
                 assert len(payload["objects"]) == 1
 
                 obj = payload["objects"][0]
@@ -274,6 +286,8 @@ class TestE2ESmoke:
             assert ci["cx"] == 320.0
             assert ci["cy"] == 180.0
             assert ci["projection_matrix"] == [1.0] * 16
+            assert "vision_metrics" in body
+            assert "vision_latest" in body
 
             vision = client.get("/api/vision")
             assert vision.status_code == 200

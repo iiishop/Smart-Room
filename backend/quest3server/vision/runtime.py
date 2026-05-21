@@ -18,6 +18,7 @@ class Quest3VisionRuntime:
         self._latest_result: VisionFrameResult | None = None
         self._clients: set[WebSocket] = set()
         self._lock = asyncio.Lock()
+        self._processed_frames = 0
         self._dropped_frames = 0
         self._last_error: str | None = None
 
@@ -35,8 +36,13 @@ class Quest3VisionRuntime:
             "available": self.is_available,
             "active": self.is_active,
             "prompt": None if self._pipeline is None else self._pipeline.prompt,
+            "source": self._pipeline_value("source"),
+            "detect_interval": self._pipeline_value("detect_interval"),
+            "max_objects": self._pipeline_value("max_objects"),
+            "processed_frames": self._processed_frames,
             "dropped_frames": self._dropped_frames,
             "last_error": self._last_error,
+            "metrics": self._metrics_snapshot(),
             "latest": latest,
         }
 
@@ -79,6 +85,7 @@ class Quest3VisionRuntime:
             )
             if result is None:
                 return None
+            self._processed_frames += 1
             self._latest_result = result
             await self._broadcast(result.to_payload())
             return result
@@ -139,3 +146,25 @@ class Quest3VisionRuntime:
                 "Quest3 vision pipeline is unavailable. Set QUEST3_VISION_ENABLED=1 and install optional model dependencies."
             )
         return self._pipeline
+
+    def _metrics_snapshot(self) -> dict:
+        latest = self._latest_result
+        return {
+            "processed_frames": self._processed_frames,
+            "dropped_frames": self._dropped_frames,
+            "last_frame_id": None if latest is None else latest.frame_id,
+            "last_timestamp_ms": None if latest is None else latest.timestamp_ms,
+            "last_mode": None if latest is None else latest.mode,
+            "last_process_time_ms": None
+            if latest is None or latest.process_time_ms is None
+            else round(float(latest.process_time_ms), 3),
+            "last_gpu_memory_mb": None
+            if latest is None or latest.gpu_memory_mb is None
+            else latest.gpu_memory_mb.to_payload(),
+            "last_object_count": 0 if latest is None else len(latest.objects),
+        }
+
+    def _pipeline_value(self, name: str):
+        if self._pipeline is None:
+            return None
+        return getattr(self._pipeline, name, None)

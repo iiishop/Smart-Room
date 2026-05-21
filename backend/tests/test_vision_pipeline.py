@@ -134,8 +134,12 @@ def test_grounded_pipeline_seeds_then_tracks() -> None:
     assert second is not None
     assert second.frame_id == 11
     assert second.objects[0].area == 3
+    assert first.mode == "detection"
+    assert second.mode == "propagation"
+    assert first.process_time_ms is not None
+    assert second.process_time_ms is not None
 
-    assert detector.calls == ["chair", "chair"]
+    assert detector.calls == ["chair"]
     assert tracker.bootstrap_calls == 1
     assert tracker.track_calls == 1
     assert tracker.add_object_calls == 0
@@ -148,6 +152,7 @@ def test_grounded_pipeline_adds_new_objects_without_resetting_ids() -> None:
         detector=detector,
         segmenter=_FakeSegmenter(),
         tracker=tracker,
+        detect_interval=11,
         max_objects=4,
     )
     frame = np.zeros((3, 3, 3), dtype=np.uint8)
@@ -170,6 +175,7 @@ def test_grounded_pipeline_adds_new_objects_without_resetting_ids() -> None:
     assert second is not None
     assert [item.object_id for item in second.objects] == [1, 2]
     assert [item.label for item in second.objects] == ["chair", "table"]
+    assert second.mode == "detection"
     assert tracker.reset_calls == 1
     assert tracker.bootstrap_calls == 1
     assert tracker.track_calls == 1
