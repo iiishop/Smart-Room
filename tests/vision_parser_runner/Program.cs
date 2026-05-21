@@ -1,5 +1,7 @@
 using System.Net.WebSockets;
 using SmartRoom.Networking;
+using SmartRoom.Vision;
+using UnityEngine;
 
 try
 {
@@ -9,6 +11,8 @@ try
     SocketOwnership_DoesNotClearNewSocketWhenOldLoopDisposes();
     WorldPositionFactory_CreatesPayloadWithCoordinates();
     VisionOverlayShaders_ExposeExpectedShaderContracts();
+    VisionBboxGeometry_ExpandsTwelveEdgesIntoTwentyFourVertices();
+    VisionBboxGeometry_ClosesContoursIntoLinePairs();
     Console.WriteLine("VisionParserRunner: all tests passed.");
 }
 catch (Exception ex)
@@ -157,6 +161,50 @@ static void VisionOverlayShaders_ExposeExpectedShaderContracts()
             "#pragma multi_compile_instancing",
             "UNITY_DEFINE_INSTANCED_PROP(float4, _InstanceColor)"
         });
+}
+
+static void VisionBboxGeometry_ExpandsTwelveEdgesIntoTwentyFourVertices()
+{
+    Vector3[] corners =
+    {
+        new(0f, 0f, 0f),
+        new(1f, 0f, 0f),
+        new(1f, 1f, 0f),
+        new(0f, 1f, 0f),
+        new(0f, 0f, 1f),
+        new(1f, 0f, 1f),
+        new(1f, 1f, 1f),
+        new(0f, 1f, 1f)
+    };
+
+    VisionLineVertex[] vertices = VisionBboxGeometry.BuildBboxLineVertices(corners, new Color32(1, 2, 3, 4));
+    AssertEqual(24, vertices.Length, "bbox vertex count");
+    AssertEqual(corners[0], vertices[0].Position, "edge 0 start");
+    AssertEqual(corners[1], vertices[1].Position, "edge 0 end");
+    AssertEqual(corners[3], vertices[6].Position, "edge 3 start");
+    AssertEqual(corners[0], vertices[7].Position, "edge 3 end");
+    AssertEqual(corners[2], vertices[20].Position, "edge 10 start");
+    AssertEqual(corners[6], vertices[21].Position, "edge 10 end");
+    AssertEqual(0x04030201u, vertices[0].Color, "packed color");
+}
+
+static void VisionBboxGeometry_ClosesContoursIntoLinePairs()
+{
+    Vector3[] contour =
+    {
+        new(0f, 0f, 0f),
+        new(1f, 0f, 0f),
+        new(1f, 1f, 0f)
+    };
+
+    VisionLineVertex[] vertices = new VisionLineVertex[6];
+    int written = VisionBboxGeometry.WriteClosedContourLineVertices(contour, new Color32(10, 20, 30, 40), vertices, 0);
+    AssertEqual(6, written, "contour vertex count");
+    AssertEqual(contour[0], vertices[0].Position, "contour 0 start");
+    AssertEqual(contour[1], vertices[1].Position, "contour 0 end");
+    AssertEqual(contour[2], vertices[4].Position, "contour 2 start");
+    AssertEqual(contour[0], vertices[5].Position, "contour closes");
+    AssertEqual(0x281E140Au, vertices[0].Color, "contour packed color");
 }
 
 static void AssertShader(string path, IEnumerable<string> expectedSnippets)
