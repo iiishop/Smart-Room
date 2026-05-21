@@ -85,7 +85,7 @@ namespace SmartRoom.Networking
                 transportSwitcher.RefreshActiveTransport();
                 string url = transportSwitcher.BuildWebSocketUrl(visionPath);
 
-                DisposeSocket();
+                DisposeSocket(_visionSocket);
                 _visionSocket = new ClientWebSocket();
                 await _visionSocket.ConnectAsync(new Uri(url), _cts.Token);
 
@@ -152,7 +152,7 @@ namespace SmartRoom.Networking
             {
                 if (!_isQuitting)
                 {
-                    DisposeSocket();
+                    DisposeSocket(socket);
                 }
             }
         }
@@ -216,15 +216,18 @@ namespace SmartRoom.Networking
             _pendingLogs.Enqueue(new PendingLog(level, message, stackTrace));
         }
 
-        private void DisposeSocket()
+        private void DisposeSocket(ClientWebSocket socket)
         {
-            if (_visionSocket == null)
+            if (socket == null)
             {
                 return;
             }
 
-            TryCloseSocket(_visionSocket);
-            _visionSocket = null;
+            TryCloseSocket(socket);
+            if (VisionSocketOwnership.ShouldClearCurrentSocket(_visionSocket, socket))
+            {
+                _visionSocket = null;
+            }
         }
 
         private static void TryCloseSocket(ClientWebSocket socket)

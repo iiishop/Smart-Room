@@ -1,9 +1,11 @@
+using System.Net.WebSockets;
 using SmartRoom.Networking;
 
 try
 {
     ParseFrameResult_DecodesFrameAndMask();
     DecodeMask_ThrowsWhenCountsDoNotMatchSize();
+    SocketOwnership_DoesNotClearNewSocketWhenOldLoopDisposes();
     Console.WriteLine("VisionParserRunner: all tests passed.");
 }
 catch (Exception ex)
@@ -83,6 +85,19 @@ static void DecodeMask_ThrowsWhenCountsDoNotMatchSize()
     }
 
     throw new Exception("expected invalid mask counts to throw");
+}
+
+static void SocketOwnership_DoesNotClearNewSocketWhenOldLoopDisposes()
+{
+    using var oldSocket = new ClientWebSocket();
+    using var newSocket = new ClientWebSocket();
+
+    AssertTrue(
+        !VisionSocketOwnership.ShouldClearCurrentSocket(newSocket, oldSocket),
+        "old loop should not clear replacement socket");
+    AssertTrue(
+        VisionSocketOwnership.ShouldClearCurrentSocket(newSocket, newSocket),
+        "current loop should clear owned socket");
 }
 
 static void AssertEqual<T>(T expected, T actual, string name)
