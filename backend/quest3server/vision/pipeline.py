@@ -35,12 +35,19 @@ class VideoTrackingProvider(Protocol):
 
     def track(self, image_bgr: np.ndarray) -> list[tuple[int, np.ndarray]]: ...
 
+    def add_objects(
+        self,
+        detections: list[DetectionCandidate],
+        masks: list[np.ndarray],
+    ) -> list[tuple[int, np.ndarray]]: ...
+
 
 @dataclass(slots=True)
 class _SessionState:
     prompt: str
-    seeded_detections: list[DetectionCandidate]
+    detections_by_id: dict[int, DetectionCandidate]
     seeded: bool
+    next_object_id: int
 
 
 class GroundedSamTrackingPipeline:
@@ -75,8 +82,9 @@ class GroundedSamTrackingPipeline:
         self._tracker.reset()
         self._session = _SessionState(
             prompt=normalized,
-            seeded_detections=[],
+            detections_by_id={},
             seeded=False,
+            next_object_id=1,
         )
 
     def stop_session(self) -> None:
@@ -100,14 +108,17 @@ class GroundedSamTrackingPipeline:
                 raise VisionPipelineError(
                     f"no detections found for prompt '{session.prompt}'"
                 )
-            detections = detections[: self._max_objects]
+            detections = self._assign_object_ids(
+                session,
+                detections[: self._max_objects],
+            )
             masks = self._segmenter.segment(image_bgr, detections)
             if len(masks) != len(detections):
                 raise VisionPipelineError("segmenter returned mismatched mask count")
             propagated = self._tracker.bootstrap(image_bgr, detections, masks)
             if len(propagated) != len(detections):
                 raise VisionPipelineError("tracker bootstrap returned mismatched masks")
-            session.seeded_detections = detections
+            session.detections_by_id = {item.object_id: item for item in detections}
             session.seeded = True
             object_masks = [
                 (detection.object_id, mask)
@@ -115,9 +126,24 @@ class GroundedSamTrackingPipeline:
             ]
         else:
             object_masks = self._tracker.track(image_bgr)
+            additions = self._detect_new_objects(session, image_bgr, object_masks)
+            if additions:
+                masks = self._segmenter.segment(image_bgr, additions)
+                if len(masks) != len(additions):
+                    raise VisionPipelineError(
+                        "segmenter returned mismatched mask count for new objects"
+                    )
+                added_masks = self._tracker.add_objects(additions, masks)
+                if len(added_masks) != len(additions):
+                    raise VisionPipelineError(
+                        "tracker add_objects returned mismatched mask count"
+                    )
+                for detection in additions:
+                    session.detections_by_id[detection.object_id] = detection
+                object_masks = self._merge_object_masks(object_masks, added_masks)
 
         tracked_objects = self._build_tracked_objects(
-            session.seeded_detections,
+            session.detections_by_id,
             object_masks,
         )
         height, width = image_bgr.shape[:2]
@@ -133,13 +159,12 @@ class GroundedSamTrackingPipeline:
 
     def _build_tracked_objects(
         self,
-        detections: list[DetectionCandidate],
+        detections_by_id: dict[int, DetectionCandidate],
         object_masks: list[tuple[int, np.ndarray]],
     ) -> list[TrackedMask]:
-        metadata = {item.object_id: item for item in detections}
         tracked: list[TrackedMask] = []
         for object_id, raw_mask in object_masks:
-            detection = metadata.get(object_id)
+            detection = detections_by_id.get(object_id)
             if detection is None:
                 continue
             mask = np.asarray(raw_mask, dtype=bool)
@@ -161,3 +186,83 @@ class GroundedSamTrackingPipeline:
                 )
             )
         return tracked
+
+    def _assign_object_ids(
+        self,
+        session: _SessionState,
+        detections: list[DetectionCandidate],
+    ) -> list[DetectionCandidate]:
+        assigned: list[DetectionCandidate] = []
+        for detection in detections:
+            assigned.append(
+                DetectionCandidate(
+                    object_id=session.next_object_id,
+                    label=detection.label,
+                    score=detection.score,
+                    box_xyxy=detection.box_xyxy,
+                )
+            )
+            session.next_object_id += 1
+        return assigned
+
+    def _detect_new_objects(
+        self,
+        session: _SessionState,
+        image_bgr: np.ndarray,
+        object_masks: list[tuple[int, np.ndarray]],
+    ) -> list[DetectionCandidate]:
+        remaining_capacity = self._max_objects - len(session.detections_by_id)
+        if remaining_capacity <= 0:
+            return []
+
+        tracked_objects = self._build_tracked_objects(
+            session.detections_by_id,
+            object_masks,
+        )
+        existing_boxes = [item.box_xyxy for item in session.detections_by_id.values()]
+        existing_boxes.extend(item.box_xyxy for item in tracked_objects)
+        detected = self._detector.detect(image_bgr, session.prompt)
+        if not detected:
+            return []
+
+        additions: list[DetectionCandidate] = []
+        for detection in detected:
+            if any(
+                self._boxes_match(existing_box, detection.box_xyxy)
+                for existing_box in existing_boxes
+            ):
+                continue
+            additions.append(detection)
+            existing_boxes.append(detection.box_xyxy)
+            if len(additions) >= remaining_capacity:
+                break
+
+        return self._assign_object_ids(session, additions)
+
+    @staticmethod
+    def _merge_object_masks(
+        existing: list[tuple[int, np.ndarray]],
+        additions: list[tuple[int, np.ndarray]],
+    ) -> list[tuple[int, np.ndarray]]:
+        merged = {object_id: mask for object_id, mask in existing}
+        for object_id, mask in additions:
+            merged[object_id] = mask
+        return list(merged.items())
+
+    @staticmethod
+    def _boxes_match(
+        lhs: tuple[int, int, int, int],
+        rhs: tuple[int, int, int, int],
+    ) -> bool:
+        left = max(lhs[0], rhs[0])
+        top = max(lhs[1], rhs[1])
+        right = min(lhs[2], rhs[2])
+        bottom = min(lhs[3], rhs[3])
+        if right <= left or bottom <= top:
+            return False
+
+        overlap = (right - left) * (bottom - top)
+        lhs_area = max(1, (lhs[2] - lhs[0]) * (lhs[3] - lhs[1]))
+        rhs_area = max(1, (rhs[2] - rhs[0]) * (rhs[3] - rhs[1]))
+        union = lhs_area + rhs_area - overlap
+        return (overlap / min(lhs_area, rhs_area) >= 0.6) or (overlap / union >= 0.3)

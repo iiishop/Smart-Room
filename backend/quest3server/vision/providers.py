@@ -1,10 +1,7 @@
 from __future__ import annotations
 
 import os
-import tempfile
 from dataclasses import dataclass
-from pathlib import Path
-from shutil import rmtree
 from typing import Any
 
 import cv2
@@ -153,18 +150,24 @@ class Sam2VideoRepropagatingTracker(VideoTrackingProvider):
             ) from exc
 
         self._predictor = SAM2VideoPredictor.from_pretrained(model_name)
-        self._root_dir = frame_cache_dir or tempfile.mkdtemp(prefix="quest3-vision-")
-        self._owns_root_dir = not frame_cache_dir
-        self._session_dir: Path | None = None
-        self._seed_boxes: list[tuple[int, tuple[int, int, int, int]]] = []
-        self._next_frame_index = 0
+        self._frame_cache_dir = frame_cache_dir
+        self._state: Any | None = None
+        self._frames: list[Any] = []
+        self._frame_load_config: dict[str, Any] = {
+            "first_frame_num": 0,
+            "max_frames": 0,
+        }
+        self._tracked_object_ids: list[int] = []
+        self._current_frame_index = -1
 
     def reset(self) -> None:
-        if self._session_dir is not None and self._session_dir.exists():
-            rmtree(self._session_dir, ignore_errors=True)
-        self._session_dir = None
-        self._seed_boxes = []
-        self._next_frame_index = 0
+        if self._state is not None and hasattr(self._predictor, "reset_state"):
+            self._predictor.reset_state(self._state)
+        self._state = None
+        self._frames = []
+        self._frame_load_config = {"first_frame_num": 0, "max_frames": 0}
+        self._tracked_object_ids = []
+        self._current_frame_index = -1
 
     def bootstrap(
         self,
@@ -173,51 +176,121 @@ class Sam2VideoRepropagatingTracker(VideoTrackingProvider):
         masks: list[np.ndarray],
     ) -> list[np.ndarray]:
         self.reset()
-        session_dir = Path(self._root_dir) / "current"
-        session_dir.mkdir(parents=True, exist_ok=True)
-        self._session_dir = session_dir
-        self._seed_boxes = [(item.object_id, item.box_xyxy) for item in detections]
-        self._write_frame(image_bgr)
-        self._next_frame_index = 1
+        self._append_frame(image_bgr)
+        self._state = self._init_state()
+        for item in detections:
+            self._add_box_prompt(frame_idx=0, object_id=item.object_id, box_xyxy=item.box_xyxy)
+            self._tracked_object_ids.append(item.object_id)
         return masks
 
     def track(self, image_bgr: np.ndarray) -> list[tuple[int, np.ndarray]]:
-        if self._session_dir is None:
+        if self._state is None:
             raise VisionPipelineError("tracker has not been bootstrapped")
 
-        self._write_frame(image_bgr)
-        latest_index = self._next_frame_index
-        self._next_frame_index += 1
-        state = self._predictor.init_state(video_path=str(self._session_dir))
-        for object_id, box_xyxy in self._seed_boxes:
-            box = np.asarray(box_xyxy, dtype=np.float32)
-            self._predictor.add_new_points_or_box(
-                state,
-                frame_idx=0,
-                obj_id=object_id,
-                box=box,
-            )
-
-        latest_masks: dict[int, np.ndarray] = {}
-        for frame_idx, object_ids, masks in self._predictor.propagate_in_video(state):
-            if int(frame_idx) != latest_index:
-                continue
-            latest_masks = self._extract_masks(object_ids, masks)
-
+        frame_idx = self._append_frame(image_bgr)
+        latest_masks = self._propagate_frame(frame_idx)
         if not latest_masks:
             raise VisionPipelineError(
-                f"SAM2 video propagation produced no masks for frame {latest_index}"
+                f"SAM2 video propagation produced no masks for frame {frame_idx}"
             )
-        return [(object_id, latest_masks[object_id]) for object_id, _ in self._seed_boxes]
+        return [
+            (object_id, latest_masks[object_id])
+            for object_id in self._tracked_object_ids
+            if object_id in latest_masks
+        ]
 
-    def _write_frame(self, image_bgr: np.ndarray) -> None:
-        if self._session_dir is None:
-            raise VisionPipelineError("tracker session directory is not initialized")
-        path = self._session_dir / f"{self._next_frame_index:06d}.jpg"
-        ok, encoded = cv2.imencode(".jpg", image_bgr)
-        if not ok:
-            raise VisionPipelineError("failed to encode video frame for SAM2 tracker")
-        path.write_bytes(encoded.tobytes())
+    def add_objects(
+        self,
+        detections: list[DetectionCandidate],
+        masks: list[np.ndarray],
+    ) -> list[tuple[int, np.ndarray]]:
+        if self._state is None or self._current_frame_index < 0:
+            raise VisionPipelineError("tracker has not been bootstrapped")
+        if len(detections) != len(masks):
+            raise VisionPipelineError("new detections and masks must have the same length")
+
+        added: list[tuple[int, np.ndarray]] = []
+        for detection, fallback_mask in zip(detections, masks, strict=True):
+            frame_idx, object_ids, predicted_masks = self._add_box_prompt(
+                frame_idx=self._current_frame_index,
+                object_id=detection.object_id,
+                box_xyxy=detection.box_xyxy,
+            )
+            extracted = self._extract_masks(object_ids, predicted_masks)
+            mask = extracted.get(detection.object_id, np.asarray(fallback_mask, dtype=bool))
+            if detection.object_id not in self._tracked_object_ids:
+                self._tracked_object_ids.append(detection.object_id)
+            if int(frame_idx) != self._current_frame_index:
+                raise VisionPipelineError("SAM2 returned an unexpected frame index for add_objects")
+            added.append((detection.object_id, mask))
+        return added
+
+    def _append_frame(self, image_bgr: np.ndarray) -> int:
+        try:
+            from PIL import Image
+        except ImportError as exc:
+            raise VisionPipelineError(
+                "Pillow is required for the SAM2 streaming video tracker."
+            ) from exc
+
+        image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+        self._frames.append(Image.fromarray(image_rgb))
+        self._frame_load_config["max_frames"] = len(self._frames)
+        self._current_frame_index = len(self._frames) - 1
+        return self._current_frame_index
+
+    def _init_state(self) -> Any:
+        try:
+            return self._predictor.init_state(
+                video_path=self._load_frame,
+                frame_load_config=self._frame_load_config,
+            )
+        except TypeError as exc:
+            raise VisionPipelineError(
+                "Installed SAM2 video predictor is too old for the SAM2.1 streaming API. Upgrade the sam2 package to the latest code."
+            ) from exc
+
+    def _load_frame(self, frame_idx: int) -> Any:
+        return self._frames[frame_idx]
+
+    def _add_box_prompt(
+        self,
+        *,
+        frame_idx: int,
+        object_id: int,
+        box_xyxy: tuple[int, int, int, int],
+    ) -> tuple[Any, Any, Any]:
+        if self._state is None:
+            raise VisionPipelineError("tracker state is not initialized")
+        box = np.asarray(box_xyxy, dtype=np.float32)
+        return self._predictor.add_new_points_or_box(
+            self._state,
+            frame_idx=frame_idx,
+            obj_id=object_id,
+            box=box,
+        )
+
+    def _propagate_frame(self, frame_idx: int) -> dict[int, np.ndarray]:
+        if self._state is None:
+            raise VisionPipelineError("tracker state is not initialized")
+
+        iterator = self._build_propagation_iterator(frame_idx)
+        latest_masks: dict[int, np.ndarray] = {}
+        for propagated_frame_idx, object_ids, masks in iterator:
+            if int(propagated_frame_idx) != frame_idx:
+                continue
+            latest_masks = self._extract_masks(object_ids, masks)
+        return latest_masks
+
+    def _build_propagation_iterator(self, frame_idx: int) -> Any:
+        try:
+            return self._predictor.propagate_in_video(
+                self._state,
+                start_frame_idx=frame_idx,
+                max_frame_num_to_track=1,
+            )
+        except TypeError:
+            return self._predictor.propagate_in_video(self._state)
 
     @staticmethod
     def _extract_masks(object_ids: Any, masks: Any) -> dict[int, np.ndarray]:
@@ -231,10 +304,6 @@ class Sam2VideoRepropagatingTracker(VideoTrackingProvider):
             object_id: np.asarray(mask_array[index] > 0, dtype=bool)
             for index, object_id in enumerate(object_id_list)
         }
-
-    def __del__(self) -> None:
-        if self._owns_root_dir:
-            rmtree(self._root_dir, ignore_errors=True)
 
 
 def build_default_pipeline() -> GroundedSamTrackingPipeline | None:
