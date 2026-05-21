@@ -83,6 +83,18 @@ class GroundedSamTrackingPipeline:
     def prompt(self) -> str | None:
         return None if self._session is None else self._session.prompt
 
+    @property
+    def detect_interval(self) -> int:
+        return self._detect_interval
+
+    @property
+    def max_objects(self) -> int:
+        return self._max_objects
+
+    @property
+    def source(self) -> str:
+        return self._source
+
     def start_session(self, prompt: str) -> None:
         normalized = prompt.strip()
         if not normalized:

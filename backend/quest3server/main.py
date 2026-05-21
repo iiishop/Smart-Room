@@ -68,7 +68,10 @@ async def status() -> dict:
     with _lock:
         snapshot = dict(_state)
         snapshot["camera_intrinsics"] = dict(_camera_intrinsics)
-    snapshot["vision"] = _vision_runtime.snapshot()
+    vision_snapshot = _vision_runtime.snapshot()
+    snapshot["vision"] = vision_snapshot
+    snapshot["vision_metrics"] = vision_snapshot["metrics"]
+    snapshot["vision_latest"] = vision_snapshot["latest"]
     return snapshot
 
 

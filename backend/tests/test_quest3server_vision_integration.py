@@ -18,6 +18,9 @@ class _FakePipeline:
         self.is_active = False
         self.prompt: str | None = None
         self.frames: list[int] = []
+        self.source = "fake-vision"
+        self.detect_interval = 30
+        self.max_objects = 8
 
     def start_session(self, prompt: str) -> None:
         normalized = prompt.strip()
@@ -46,7 +49,7 @@ class _FakePipeline:
             frame_width=int(image_bgr.shape[1]),
             frame_height=int(image_bgr.shape[0]),
             prompt=self.prompt,
-            source="fake-vision",
+            source=self.source,
             mode="detection" if len(self.frames) == 1 else "propagation",
             process_time_ms=12.5,
             gpu_memory_mb=GpuMemoryStats(allocated=24.0, max_allocated=48.0),
@@ -93,6 +96,9 @@ def test_vision_session_and_streaming_api() -> None:
             assert initial.status_code == 200
             assert initial.json()["available"] is True
             assert initial.json()["active"] is False
+            assert initial.json()["source"] == "fake-vision"
+            assert initial.json()["detect_interval"] == 30
+            assert initial.json()["metrics"]["processed_frames"] == 0
 
             started = client.post("/api/vision/session", json={"prompt": "chair"})
             assert started.status_code == 200
@@ -120,8 +126,26 @@ def test_vision_session_and_streaming_api() -> None:
             body = status.json()
             assert body["last_rgb_frame_id"] == 7
             assert body["last_rgb_size"] == "2x2"
+            assert body["vision"]["source"] == "fake-vision"
+            assert body["vision"]["detect_interval"] == 30
+            assert body["vision"]["processed_frames"] == 1
+            assert body["vision"]["metrics"] == {
+                "processed_frames": 1,
+                "dropped_frames": 0,
+                "last_frame_id": 7,
+                "last_timestamp_ms": 1234,
+                "last_mode": "detection",
+                "last_process_time_ms": 12.5,
+                "last_gpu_memory_mb": {
+                    "allocated": 24.0,
+                    "max_allocated": 48.0,
+                },
+                "last_object_count": 1,
+            }
             assert body["vision"]["latest"]["frame_id"] == 7
             assert body["vision"]["latest"]["mode"] == "detection"
+            assert body["vision_latest"]["process_time_ms"] == 12.5
+            assert body["vision_metrics"]["last_mode"] == "detection"
 
             latest_rgb = client.get("/api/latest-rgb")
             assert latest_rgb.status_code == 200

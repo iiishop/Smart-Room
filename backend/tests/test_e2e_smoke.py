@@ -19,6 +19,9 @@ class _FakeFullPipeline:
         self.is_active = False
         self.prompt: str | None = None
         self._frames: list[int] = []
+        self.source = "fake-full-pipeline"
+        self.detect_interval = 30
+        self.max_objects = 8
 
     def start_session(self, prompt: str) -> None:
         normalized = prompt.strip()
@@ -50,7 +53,7 @@ class _FakeFullPipeline:
             frame_width=width,
             frame_height=height,
             prompt=self.prompt,
-            source="fake-full-pipeline",
+            source=self.source,
             mode="detection",
             process_time_ms=18.25,
             gpu_memory_mb=GpuMemoryStats(allocated=128.0, max_allocated=256.0),
@@ -283,6 +286,8 @@ class TestE2ESmoke:
             assert ci["cx"] == 320.0
             assert ci["cy"] == 180.0
             assert ci["projection_matrix"] == [1.0] * 16
+            assert "vision_metrics" in body
+            assert "vision_latest" in body
 
             vision = client.get("/api/vision")
             assert vision.status_code == 200
