@@ -54,6 +54,11 @@ namespace SmartRoom.Rendering
             Color32 color,
             bool isVisible)
         {
+            if (boundingBox.width < 0 || boundingBox.height < 0)
+            {
+                throw new ArgumentException("BoundingBox width and height must be non-negative.", nameof(boundingBox));
+            }
+
             ObjectId = objectId;
             Label = label ?? string.Empty;
             Confidence = confidence;
@@ -79,6 +84,22 @@ namespace SmartRoom.Rendering
                 labelAnchor,
                 labelSize,
                 flags);
+        }
+    }
+
+    public sealed class VisionObjectWorldData
+    {
+        public Vector3[] SampledWorldPoints { get; }
+        public Vector3 AverageWorldPosition { get; }
+        public float AverageDepthM { get; }
+
+        public VisionObjectWorldData(Vector3[] sampledWorldPoints, Vector3 averageWorldPosition, float averageDepthM)
+        {
+            SampledWorldPoints = sampledWorldPoints == null || sampledWorldPoints.Length == 0
+                ? Array.Empty<Vector3>()
+                : (Vector3[])sampledWorldPoints.Clone();
+            AverageWorldPosition = averageWorldPosition;
+            AverageDepthM = averageDepthM;
         }
     }
 }

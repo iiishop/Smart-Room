@@ -1,4 +1,5 @@
 using System;
+using UnityEngine.Serialization;
 using UnityEngine;
 
 namespace SmartRoom.Rendering
@@ -8,7 +9,14 @@ namespace SmartRoom.Rendering
     {
         private const int PaletteSize = 8;
 
-        [SerializeField] private Color32[] palette = new Color32[PaletteSize]
+        [SerializeField] private bool enabled = true;
+        [SerializeField] private bool showBoundingBoxes = true;
+        [SerializeField] private bool showLabels = true;
+        [SerializeField] private bool showAnchors;
+        [SerializeField, Min(0f)] private float boxLineWidth = 0.01f;
+        [SerializeField, Min(0f)] private float labelHeightOffset = 0.03f;
+        [FormerlySerializedAs("palette")]
+        [SerializeField] private Color32[] objectColors = new Color32[PaletteSize]
         {
             new Color32(0xF4, 0x43, 0x36, 0xFF),
             new Color32(0xE9, 0x1E, 0x63, 0xFF),
@@ -22,45 +30,63 @@ namespace SmartRoom.Rendering
 
         [SerializeField, Min(1)] private int maxObjects = 8;
         [SerializeField, Min(1)] private int labelFontSize = 24;
-        [SerializeField] private bool debugOverlayEnabled;
 
-        public Color32[] Palette => palette;
+        public bool Enabled => enabled;
+        public bool ShowBoundingBoxes => showBoundingBoxes;
+        public bool ShowLabels => showLabels;
+        public bool ShowAnchors => showAnchors;
+        public float BoxLineWidth => boxLineWidth;
+        public float LabelHeightOffset => labelHeightOffset;
+        public Color32[] ObjectColors => GetObjectColorsCopy();
         public int MaxObjects => maxObjects;
         public int LabelFontSize => labelFontSize;
-        public bool DebugOverlayEnabled => debugOverlayEnabled;
 
-        public Color32 GetPaletteColor(int index)
+        public Color32 GetObjectColor(int index)
         {
-            if (palette == null || palette.Length == 0)
+            if (objectColors == null || objectColors.Length == 0)
             {
                 return new Color32(255, 255, 255, 255);
             }
 
-            int safeIndex = Mathf.Abs(index % palette.Length);
-            return palette[safeIndex];
+            int safeIndex = Mathf.Abs(index % objectColors.Length);
+            return objectColors[safeIndex];
         }
 
         private void OnValidate()
         {
             maxObjects = Mathf.Max(1, maxObjects);
             labelFontSize = Mathf.Max(1, labelFontSize);
-            NormalizePalette();
+            boxLineWidth = Mathf.Max(0f, boxLineWidth);
+            labelHeightOffset = Mathf.Max(0f, labelHeightOffset);
+            NormalizeObjectColors();
         }
 
-        private void NormalizePalette()
+        private Color32[] GetObjectColorsCopy()
         {
-            if (palette != null && palette.Length == PaletteSize)
+            if (objectColors == null || objectColors.Length == 0)
+            {
+                return Array.Empty<Color32>();
+            }
+
+            Color32[] copy = new Color32[objectColors.Length];
+            Array.Copy(objectColors, copy, objectColors.Length);
+            return copy;
+        }
+
+        private void NormalizeObjectColors()
+        {
+            if (objectColors != null && objectColors.Length == PaletteSize)
             {
                 return;
             }
 
             Color32[] normalized = new Color32[PaletteSize];
-            if (palette != null)
+            if (objectColors != null)
             {
-                Array.Copy(palette, normalized, Math.Min(palette.Length, PaletteSize));
+                Array.Copy(objectColors, normalized, Math.Min(objectColors.Length, PaletteSize));
             }
 
-            palette = normalized;
+            objectColors = normalized;
         }
     }
 }
