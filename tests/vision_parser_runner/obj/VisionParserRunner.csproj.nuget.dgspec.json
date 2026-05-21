@@ -1,17 +1,17 @@
 {
   "format": 1,
   "restore": {
-    "C:\\Users\\iiishop\\AppData\\Local\\Temp\\opencode\\smart-room-merge-temp\\tests\\vision_parser_runner\\VisionParserRunner.csproj": {}
+    "E:\\multica_workspaces\\multica_workspaces_desktop-api.multica.ai\\2a8a7e5b-31c5-441a-a371-60c9c9e52ffd\\c00ef23b\\workdir\\Smart-Room\\tests\\vision_parser_runner\\VisionParserRunner.csproj": {}
   },
   "projects": {
-    "C:\\Users\\iiishop\\AppData\\Local\\Temp\\opencode\\smart-room-merge-temp\\tests\\vision_parser_runner\\VisionParserRunner.csproj": {
+    "E:\\multica_workspaces\\multica_workspaces_desktop-api.multica.ai\\2a8a7e5b-31c5-441a-a371-60c9c9e52ffd\\c00ef23b\\workdir\\Smart-Room\\tests\\vision_parser_runner\\VisionParserRunner.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "C:\\Users\\iiishop\\AppData\\Local\\Temp\\opencode\\smart-room-merge-temp\\tests\\vision_parser_runner\\VisionParserRunner.csproj",
+        "projectUniqueName": "E:\\multica_workspaces\\multica_workspaces_desktop-api.multica.ai\\2a8a7e5b-31c5-441a-a371-60c9c9e52ffd\\c00ef23b\\workdir\\Smart-Room\\tests\\vision_parser_runner\\VisionParserRunner.csproj",
         "projectName": "VisionParserRunner",
-        "projectPath": "C:\\Users\\iiishop\\AppData\\Local\\Temp\\opencode\\smart-room-merge-temp\\tests\\vision_parser_runner\\VisionParserRunner.csproj",
+        "projectPath": "E:\\multica_workspaces\\multica_workspaces_desktop-api.multica.ai\\2a8a7e5b-31c5-441a-a371-60c9c9e52ffd\\c00ef23b\\workdir\\Smart-Room\\tests\\vision_parser_runner\\VisionParserRunner.csproj",
         "packagesPath": "C:\\Users\\iiishop\\.nuget\\packages\\",
-        "outputPath": "C:\\Users\\iiishop\\AppData\\Local\\Temp\\opencode\\smart-room-merge-temp\\tests\\vision_parser_runner\\obj\\",
+        "outputPath": "E:\\multica_workspaces\\multica_workspaces_desktop-api.multica.ai\\2a8a7e5b-31c5-441a-a371-60c9c9e52ffd\\c00ef23b\\workdir\\Smart-Room\\tests\\vision_parser_runner\\obj\\",
         "projectStyle": "PackageReference",
         "configFilePaths": [
           "C:\\Users\\iiishop\\AppData\\Roaming\\NuGet\\NuGet.Config"

@@ -41,23 +41,6 @@ export interface VisionFrameResult {
   gpu_memory_mb?: VisionGpuMemoryMb;
 }
 
-export interface VisionProcessedObject {
-  object_id: number;
-  label: string;
-  score: number;
-  corners_3d: [number, number, number][];
-  center_3d: [number, number, number];
-  contour_3d: [number, number, number][];
-  corners_valid: boolean;
-  center_valid: boolean;
-}
-
-export interface VisionProcessedFrame {
-  frame_id: number;
-  timestamp_ms: number;
-  objects: VisionProcessedObject[];
-}
-
 export type VisionVector3 = [x: number, y: number, z: number];
 
 export interface VisionProcessedObject {
