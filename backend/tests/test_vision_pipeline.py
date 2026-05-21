@@ -9,12 +9,45 @@ from quest3server.vision.types import DetectionCandidate
 class _FakeDetector:
     def __init__(self) -> None:
         self.calls: list[str] = []
+        self._call_count = 0
+
+    def detect(self, image_bgr: np.ndarray, prompt: str) -> list[DetectionCandidate]:
+        self.calls.append(prompt)
+        self._call_count += 1
+        if self._call_count == 1:
+            return [
+                DetectionCandidate(
+                    object_id=101,
+                    label="chair",
+                    score=0.92,
+                    box_xyxy=(1, 1, 2, 2),
+                )
+            ]
+        return [
+            DetectionCandidate(
+                object_id=101,
+                label="chair",
+                score=0.92,
+                box_xyxy=(1, 1, 2, 2),
+            ),
+            DetectionCandidate(
+                object_id=202,
+                label="table",
+                score=0.81,
+                box_xyxy=(0, 0, 1, 1),
+            ),
+        ]
+
+
+class _StaticDetector:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
 
     def detect(self, image_bgr: np.ndarray, prompt: str) -> list[DetectionCandidate]:
         self.calls.append(prompt)
         return [
             DetectionCandidate(
-                object_id=1,
+                object_id=101,
                 label="chair",
                 score=0.92,
                 box_xyxy=(1, 1, 2, 2),
@@ -34,6 +67,7 @@ class _FakeTracker:
         self.reset_calls = 0
         self.bootstrap_calls = 0
         self.track_calls = 0
+        self.add_object_calls = 0
 
     def reset(self) -> None:
         self.reset_calls += 1
@@ -56,9 +90,17 @@ class _FakeTracker:
             )
         ]
 
+    def add_objects(
+        self,
+        detections: list[DetectionCandidate],
+        masks: list[np.ndarray],
+    ) -> list[tuple[int, np.ndarray]]:
+        self.add_object_calls += 1
+        return [(detection.object_id, mask) for detection, mask in zip(detections, masks, strict=True)]
+
 
 def test_grounded_pipeline_seeds_then_tracks() -> None:
-    detector = _FakeDetector()
+    detector = _StaticDetector()
     tracker = _FakeTracker()
     pipeline = GroundedSamTrackingPipeline(
         detector=detector,
@@ -93,6 +135,43 @@ def test_grounded_pipeline_seeds_then_tracks() -> None:
     assert second.frame_id == 11
     assert second.objects[0].area == 3
 
-    assert detector.calls == ["chair"]
+    assert detector.calls == ["chair", "chair"]
     assert tracker.bootstrap_calls == 1
     assert tracker.track_calls == 1
+    assert tracker.add_object_calls == 0
+
+
+def test_grounded_pipeline_adds_new_objects_without_resetting_ids() -> None:
+    detector = _FakeDetector()
+    tracker = _FakeTracker()
+    pipeline = GroundedSamTrackingPipeline(
+        detector=detector,
+        segmenter=_FakeSegmenter(),
+        tracker=tracker,
+        max_objects=4,
+    )
+    frame = np.zeros((3, 3, 3), dtype=np.uint8)
+
+    pipeline.start_session("chair")
+    first = pipeline.process_frame(
+        frame_id=10,
+        timestamp_ms=1000,
+        image_bgr=frame,
+    )
+    second = pipeline.process_frame(
+        frame_id=11,
+        timestamp_ms=1033,
+        image_bgr=frame,
+    )
+
+    assert first is not None
+    assert [item.object_id for item in first.objects] == [1]
+
+    assert second is not None
+    assert [item.object_id for item in second.objects] == [1, 2]
+    assert [item.label for item in second.objects] == ["chair", "table"]
+    assert tracker.reset_calls == 1
+    assert tracker.bootstrap_calls == 1
+    assert tracker.track_calls == 1
+    assert tracker.add_object_calls == 1
+    assert detector.calls == ["chair", "chair"]
