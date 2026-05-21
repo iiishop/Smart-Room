@@ -4,7 +4,6 @@ using System.Collections.Generic;
 using System.Reflection;
 using System.Text;
 using Meta.XR;
-using SmartRoom.Rendering;
 using SmartRoom.Vision;
 using TMPro;
 using UnityEngine;
@@ -274,7 +273,7 @@ namespace SmartRoom.Networking
 
             if (wireframeManager != null)
             {
-                wireframeManager.ClearFrameData();
+                wireframeManager.ClearAll();
                 for (int wfIdx = 0; wfIdx < objectCount; wfIdx++)
                 {
                     VisionTrackedMaskPayload wfMask = frame.objects[wfIdx];
@@ -289,11 +288,11 @@ namespace SmartRoom.Networking
                         continue;
                     }
 
-                    Color color = BboxColorTable.GetColor(wfMask.object_id);
+                                        // 8-color palette cycled by object_id
+                    Color color = Color.HSVToRGB((wfMask.object_id % 8) / 8f, 0.85f, 1f);
                     wireframeManager.SetBboxData(wfMask.object_id, eightCorners, color);
                 }
 
-                wireframeManager.UploadAndApply();
             }
 
             VisionWorldObject[] worldObjects = _worldObjectsBuffer.ToArray();
