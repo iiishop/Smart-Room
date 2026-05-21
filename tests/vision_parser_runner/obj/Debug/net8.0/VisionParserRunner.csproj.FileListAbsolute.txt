@@ -1,0 +1,15 @@
+C:\Users\iiishop\AppData\Local\Temp\opencode\smart-room-merge-temp\tests\vision_parser_runner\bin\Debug\net8.0\VisionParserRunner.exe
+C:\Users\iiishop\AppData\Local\Temp\opencode\smart-room-merge-temp\tests\vision_parser_runner\bin\Debug\net8.0\VisionParserRunner.deps.json
+C:\Users\iiishop\AppData\Local\Temp\opencode\smart-room-merge-temp\tests\vision_parser_runner\bin\Debug\net8.0\VisionParserRunner.runtimeconfig.json
+C:\Users\iiishop\AppData\Local\Temp\opencode\smart-room-merge-temp\tests\vision_parser_runner\bin\Debug\net8.0\VisionParserRunner.dll
+C:\Users\iiishop\AppData\Local\Temp\opencode\smart-room-merge-temp\tests\vision_parser_runner\bin\Debug\net8.0\VisionParserRunner.pdb
+C:\Users\iiishop\AppData\Local\Temp\opencode\smart-room-merge-temp\tests\vision_parser_runner\obj\Debug\net8.0\VisionParserRunner.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\iiishop\AppData\Local\Temp\opencode\smart-room-merge-temp\tests\vision_parser_runner\obj\Debug\net8.0\VisionParserRunner.AssemblyInfoInputs.cache
+C:\Users\iiishop\AppData\Local\Temp\opencode\smart-room-merge-temp\tests\vision_parser_runner\obj\Debug\net8.0\VisionParserRunner.AssemblyInfo.cs
+C:\Users\iiishop\AppData\Local\Temp\opencode\smart-room-merge-temp\tests\vision_parser_runner\obj\Debug\net8.0\VisionParserRunner.csproj.CoreCompileInputs.cache
+C:\Users\iiishop\AppData\Local\Temp\opencode\smart-room-merge-temp\tests\vision_parser_runner\obj\Debug\net8.0\VisionParserRunner.sourcelink.json
+C:\Users\iiishop\AppData\Local\Temp\opencode\smart-room-merge-temp\tests\vision_parser_runner\obj\Debug\net8.0\VisionParserRunner.dll
+C:\Users\iiishop\AppData\Local\Temp\opencode\smart-room-merge-temp\tests\vision_parser_runner\obj\Debug\net8.0\refint\VisionParserRunner.dll
+C:\Users\iiishop\AppData\Local\Temp\opencode\smart-room-merge-temp\tests\vision_parser_runner\obj\Debug\net8.0\VisionParserRunner.pdb
+C:\Users\iiishop\AppData\Local\Temp\opencode\smart-room-merge-temp\tests\vision_parser_runner\obj\Debug\net8.0\VisionParserRunner.genruntimeconfig.cache
+C:\Users\iiishop\AppData\Local\Temp\opencode\smart-room-merge-temp\tests\vision_parser_runner\obj\Debug\net8.0\ref\VisionParserRunner.dll

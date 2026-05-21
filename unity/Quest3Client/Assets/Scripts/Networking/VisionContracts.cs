@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 
 namespace SmartRoom.Networking
 {
@@ -124,6 +125,18 @@ namespace SmartRoom.Networking
             }
 
             return Values[(y * Width) + x] != 0;
+        }
+    }
+
+    public static class VisionLabelFormatting
+    {
+        public static string FormatLabel(string label, float score)
+        {
+            string safeLabel = string.IsNullOrWhiteSpace(label) ? "unknown" : label.Trim();
+            float safeScore = float.IsNaN(score) || float.IsInfinity(score) ? 0f : score;
+            return string.Create(
+                CultureInfo.InvariantCulture,
+                $"{safeLabel} {safeScore:0.00}");
         }
     }
 }
