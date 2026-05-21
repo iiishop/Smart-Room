@@ -38,6 +38,7 @@ _depth_preview_clients: set[WebSocket] = set()
 _heartbeat_clients: set[WebSocket] = set()
 _next_raycast_query_id = 1
 _latest_raycast_result: dict = {}
+_camera_intrinsics: dict = {}
 
 
 def _build_vision_runtime() -> Quest3VisionRuntime:
@@ -66,6 +67,7 @@ async def health() -> dict:
 async def status() -> dict:
     with _lock:
         snapshot = dict(_state)
+        snapshot["camera_intrinsics"] = dict(_camera_intrinsics)
     snapshot["vision"] = _vision_runtime.snapshot()
     return snapshot
 
@@ -88,7 +90,10 @@ async def logs(since_id: int = Query(0), limit: int = Query(200)) -> dict:
 
 @app.get("/api/vision")
 async def vision_status() -> dict[str, Any]:
-    return _vision_runtime.snapshot()
+    result = _vision_runtime.snapshot()
+    with _lock:
+        result["camera_intrinsics"] = dict(_camera_intrinsics)
+    return result
 
 
 @app.post("/api/vision/session")
@@ -324,6 +329,16 @@ async def heartbeat_socket(websocket: WebSocket) -> None:
                             "warning", "Received rgb_frame without payload_b64"
                         )
                         jpeg = None
+
+                elif payload_type == "camera_intrinsics":
+                    global _camera_intrinsics
+                    _camera_intrinsics = {
+                        "fx": payload.get("fx"),
+                        "fy": payload.get("fy"),
+                        "cx": payload.get("cx"),
+                        "cy": payload.get("cy"),
+                        "projection_matrix": payload.get("projection_matrix"),
+                    }
 
                 elif payload_type == "client_log":
                     add_log(
