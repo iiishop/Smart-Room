@@ -3,7 +3,7 @@ import unittest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SHADER_DIR = REPO_ROOT / "unity" / "Quest3Client" / "Assets" / "Shaders"
+SHADER_DIR = REPO_ROOT / "unity" / "Quest3Client" / "Assets" / "Scripts" / "Rendering"
 
 
 def read_shader(name: str) -> str:
@@ -19,6 +19,7 @@ class VisionShaderAssetTests(unittest.TestCase):
         self.assertIn("TransformWorldToHClip(vertex.positionWS)", content)
         self.assertIn("Blend SrcAlpha OneMinusSrcAlpha", content)
         self.assertIn("ZTest Always", content)
+        self.assertIn("StructuredBuffer<LineVertexData> _LineVertices;", content)
 
     def test_vision_overlay_unlit_matches_canvas_contract(self) -> None:
         content = read_shader("VisionOverlayUnlit.shader")
@@ -28,3 +29,4 @@ class VisionShaderAssetTests(unittest.TestCase):
         self.assertIn("#pragma multi_compile_local _ UNITY_UI_CLIP_RECT", content)
         self.assertIn("ZTest [unity_GUIZTestMode]", content)
         self.assertIn('"CanUseSpriteAtlas" = "True"', content)
+        self.assertIn("Stencil", content)
