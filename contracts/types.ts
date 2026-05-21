@@ -14,6 +14,23 @@ export interface VisionMaskRle {
   counts: number[];
 }
 
+export interface VisionColor32 {
+  r: number;
+  g: number;
+  b: number;
+  a: number;
+}
+
+export interface VisionOverlayConfig {
+  enabled: boolean;
+  showBoundingBoxes: boolean;
+  showLabels: boolean;
+  showAnchors: boolean;
+  boxLineWidth: number;
+  labelHeightOffset: number;
+  objectColors: VisionColor32[];
+}
+
 export interface VisionTrackedObject {
   object_id: number;
   label: string;
