@@ -8,6 +8,8 @@ namespace SmartRoom.Networking
 {
     public class VisionReceiverModule : MonoBehaviour
     {
+        public event Action<WorldPosition[]> ObjectsProcessed;
+
         [SerializeField] private BackendCommunicationManager manager;
         [SerializeField] private DepthStreamModule depthStreamModule;
         [SerializeField] private Camera rayCamera;
@@ -86,6 +88,8 @@ namespace SmartRoom.Networking
             }
 
             int objectCount = Mathf.Min(frame.objects.Length, maxObjectsPerFrame);
+            var processedObjects = new WorldPosition[objectCount * samplesPerObject];
+            int processedCount = 0;
             for (int objectIndex = 0; objectIndex < objectCount; objectIndex++)
             {
                 VisionTrackedMaskPayload trackedMask = frame.objects[objectIndex];
@@ -132,6 +136,14 @@ namespace SmartRoom.Networking
                         worldPoint.z,
                         depthM
                     );
+                    processedObjects[processedCount++] = VisionWorldPositionFactory.Create(
+                        trackedMask.object_id,
+                        trackedMask.label,
+                        trackedMask.score,
+                        worldPoint.x,
+                        worldPoint.y,
+                        worldPoint.z,
+                        depthM);
                     hitCount++;
                 }
 
@@ -151,6 +163,10 @@ namespace SmartRoom.Networking
                     );
                 }
             }
+
+            var publishedObjects = new WorldPosition[processedCount];
+            Array.Copy(processedObjects, publishedObjects, processedCount);
+            ObjectsProcessed?.Invoke(publishedObjects);
         }
 
         private bool TryGetViewportRay(float u, float v, out Ray ray, out Transform rayTransform)

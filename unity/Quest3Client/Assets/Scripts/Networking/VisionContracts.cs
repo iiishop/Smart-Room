@@ -2,6 +2,35 @@ using System;
 
 namespace SmartRoom.Networking
 {
+    public sealed class WorldPosition
+    {
+        public int ObjectId { get; }
+        public string Label { get; }
+        public float Score { get; }
+        public float X { get; }
+        public float Y { get; }
+        public float Z { get; }
+        public float DepthM { get; }
+
+        public WorldPosition(
+            int objectId,
+            string label,
+            float score,
+            float x,
+            float y,
+            float z,
+            float depthM)
+        {
+            ObjectId = objectId;
+            Label = label ?? string.Empty;
+            Score = score;
+            X = x;
+            Y = y;
+            Z = z;
+            DepthM = depthM;
+        }
+    }
+
     public sealed class VisionFrameResultData
     {
         public int FrameId { get; }

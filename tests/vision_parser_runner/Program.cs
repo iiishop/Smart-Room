@@ -6,6 +6,7 @@ try
     ParseFrameResult_DecodesFrameAndMask();
     DecodeMask_ThrowsWhenCountsDoNotMatchSize();
     SocketOwnership_DoesNotClearNewSocketWhenOldLoopDisposes();
+    WorldPositionFactory_CreatesPayloadWithCoordinates();
     Console.WriteLine("VisionParserRunner: all tests passed.");
 }
 catch (Exception ex)
@@ -98,6 +99,18 @@ static void SocketOwnership_DoesNotClearNewSocketWhenOldLoopDisposes()
     AssertTrue(
         VisionSocketOwnership.ShouldClearCurrentSocket(newSocket, newSocket),
         "current loop should clear owned socket");
+}
+
+static void WorldPositionFactory_CreatesPayloadWithCoordinates()
+{
+    WorldPosition position = VisionWorldPositionFactory.Create(7, "chair", 0.8f, 1.5f, 2.5f, 3.5f, 4.5f);
+    AssertEqual(7, position.ObjectId, "world position object id");
+    AssertEqual("chair", position.Label, "world position label");
+    AssertEqual(0.8f, position.Score, "world position score");
+    AssertEqual(1.5f, position.X, "world position x");
+    AssertEqual(2.5f, position.Y, "world position y");
+    AssertEqual(3.5f, position.Z, "world position z");
+    AssertEqual(4.5f, position.DepthM, "world position depth");
 }
 
 static void AssertEqual<T>(T expected, T actual, string name)
