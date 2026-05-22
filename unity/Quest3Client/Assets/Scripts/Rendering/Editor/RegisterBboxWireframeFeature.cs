@@ -58,20 +58,28 @@ namespace SmartRoom.Rendering.Editor
 
             bool changed = false;
 
-            // BboxWireframeRenderFeature — inline check to avoid Unity 6 generic resolution issues
-            bool hasBbox = false;
-            foreach (ScriptableRendererFeature f in data.rendererFeatures)
+            // BboxWireframeRenderFeature — resolved at runtime to avoid Unity 6 assembly resolution issues
+            System.Type bboxType = System.Type.GetType("SmartRoom.Rendering.BboxWireframeRenderFeature, Assembly-CSharp");
+            if (bboxType != null)
             {
-                if (f is BboxWireframeRenderFeature) { hasBbox = true; break; }
+                bool hasBbox = false;
+                foreach (ScriptableRendererFeature f in data.rendererFeatures)
+                {
+                    if (f != null && bboxType.IsInstanceOfType(f)) { hasBbox = true; break; }
+                }
+                if (!hasBbox)
+                {
+                    var bboxFeature = (ScriptableRendererFeature)ScriptableObject.CreateInstance(bboxType);
+                    bboxFeature.name = "BboxWireframeRenderFeature";
+                    AssetDatabase.AddObjectToAsset(bboxFeature, path);
+                    data.rendererFeatures.Add(bboxFeature);
+                    EditorUtility.SetDirty(bboxFeature);
+                    changed = true;
+                }
             }
-            if (!hasBbox)
+            else
             {
-                BboxWireframeRenderFeature bboxFeature = ScriptableObject.CreateInstance<BboxWireframeRenderFeature>();
-                bboxFeature.name = "BboxWireframeRenderFeature";
-                AssetDatabase.AddObjectToAsset(bboxFeature, path);
-                data.rendererFeatures.Add(bboxFeature);
-                EditorUtility.SetDirty(bboxFeature);
-                changed = true;
+                Debug.LogWarning("[SmartRoom] BboxWireframeRenderFeature type not found at runtime, skipping registration");
             }
 
             // VisionRendererFeature — inline check to avoid Unity 6 generic resolution issues
