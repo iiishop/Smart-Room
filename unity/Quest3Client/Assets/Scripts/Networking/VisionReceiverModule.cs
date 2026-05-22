@@ -272,8 +272,8 @@ namespace SmartRoom.Networking
                         continue;
                     }
 
-                                        // 8-color palette cycled by object_id
-                    Color color = Color.HSVToRGB((wfMask.object_id % 8) / 8f, 0.85f, 1f);
+                                        // 16-color palette cycled by object_id
+                    Color color = Color.HSVToRGB((wfMask.object_id % 16) / 16f, 0.85f, 1f);
                     wireframeManager.SetBboxData(wfMask.object_id, eightCorners, color);
                 }
 
