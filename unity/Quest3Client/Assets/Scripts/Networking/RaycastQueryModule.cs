@@ -1,5 +1,4 @@
 using System;
-using System.Reflection;
 using Meta.XR;
 using UnityEngine;
 
@@ -40,8 +39,6 @@ namespace SmartRoom.Networking
         [SerializeField] private float maxDistanceMeters = 10f;
         [SerializeField] private LayerMask raycastLayerMask = ~0;
 
-        private MethodInfo _passthroughViewportRayMethod;
-        private bool _passthroughViewportRayMethodResolved;
         private bool _loggedRaySource;
         private bool _loggedPassthroughFallback;
 
@@ -166,111 +163,36 @@ namespace SmartRoom.Networking
 
         private bool TryGetViewportRay(float u, float v, out Ray ray, out Transform rayTransform)
         {
-            if (TryGetPassthroughViewportRay(u, v, out ray))
+            if (PassthroughRayResolver.TryGetViewportRay(
+                passthroughCameraAccess,
+                rayCamera,
+                u,
+                v,
+                out ray,
+                out rayTransform,
+                out string source,
+                out string warningMessage,
+                "raycast queries"))
             {
-                rayTransform = passthroughCameraAccess != null ? passthroughCameraAccess.transform : null;
-                LogRaySourceOnce("PassthroughCameraAccess.ViewportPointToRay");
+                if (!_loggedPassthroughFallback && !string.IsNullOrEmpty(warningMessage))
+                {
+                    _loggedPassthroughFallback = true;
+                    manager?.QueueUnityLog("WARNING", warningMessage);
+                }
+
+                LogRaySourceOnce(source);
                 return true;
             }
 
-            if (rayCamera != null)
+            if (!_loggedPassthroughFallback && !string.IsNullOrEmpty(warningMessage))
             {
-                ray = rayCamera.ViewportPointToRay(new Vector3(u, v, 0f));
-                rayTransform = rayCamera.transform;
-                if (!_loggedPassthroughFallback && passthroughCameraAccess != null)
-                {
-                    _loggedPassthroughFallback = true;
-                    manager?.QueueUnityLog("WARNING", "PassthroughCameraAccess.ViewportPointToRay unavailable; falling back to Camera.ViewportPointToRay for raycast queries.");
-                }
-
-                LogRaySourceOnce($"Camera.ViewportPointToRay({rayCamera.name})");
-                return true;
+                _loggedPassthroughFallback = true;
+                manager?.QueueUnityLog("WARNING", warningMessage);
             }
 
             ray = default;
             rayTransform = null;
             return false;
-        }
-
-        private bool TryGetPassthroughViewportRay(float u, float v, out Ray ray)
-        {
-            ray = default;
-
-            if (passthroughCameraAccess == null || !passthroughCameraAccess.enabled || !passthroughCameraAccess.IsPlaying)
-            {
-                return false;
-            }
-
-            MethodInfo method = ResolvePassthroughViewportRayMethod();
-            if (method == null)
-            {
-                return false;
-            }
-
-            object arg = method.GetParameters()[0].ParameterType == typeof(Vector2)
-                ? new Vector2(u, v)
-                : new Vector3(u, v, 0f);
-
-            object target = method.IsStatic ? null : passthroughCameraAccess;
-            try
-            {
-                object result = method.Invoke(target, new[] { arg });
-                if (result is Ray castRay)
-                {
-                    ray = castRay;
-                    return true;
-                }
-            }
-            catch (TargetInvocationException ex)
-            {
-                if (!_loggedPassthroughFallback)
-                {
-                    _loggedPassthroughFallback = true;
-                    manager?.QueueUnityLog("WARNING", $"PassthroughCameraAccess.ViewportPointToRay failed: {ex.InnerException?.Message ?? ex.Message}");
-                }
-            }
-            catch (Exception ex)
-            {
-                if (!_loggedPassthroughFallback)
-                {
-                    _loggedPassthroughFallback = true;
-                    manager?.QueueUnityLog("WARNING", $"PassthroughCameraAccess.ViewportPointToRay failed: {ex.Message}");
-                }
-            }
-
-            return false;
-        }
-
-        private MethodInfo ResolvePassthroughViewportRayMethod()
-        {
-            if (_passthroughViewportRayMethodResolved)
-            {
-                return _passthroughViewportRayMethod;
-            }
-
-            _passthroughViewportRayMethodResolved = true;
-            foreach (MethodInfo method in typeof(PassthroughCameraAccess).GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static))
-            {
-                if (method.Name != "ViewportPointToRay" || method.ReturnType != typeof(Ray))
-                {
-                    continue;
-                }
-
-                ParameterInfo[] parameters = method.GetParameters();
-                if (parameters.Length != 1)
-                {
-                    continue;
-                }
-
-                Type parameterType = parameters[0].ParameterType;
-                if (parameterType == typeof(Vector2) || parameterType == typeof(Vector3))
-                {
-                    _passthroughViewportRayMethod = method;
-                    break;
-                }
-            }
-
-            return _passthroughViewportRayMethod;
         }
 
         private void LogRaySourceOnce(string source)
