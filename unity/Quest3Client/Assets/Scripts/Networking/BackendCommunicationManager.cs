@@ -389,11 +389,11 @@ namespace SmartRoom.Networking
                     }
                 }
             }
-            catch
+            catch (Exception ex)
             {
                 if (!_isQuitting)
                 {
-                    QueueUnityLog("WARNING", "Control websocket receive loop ended");
+                    QueueUnityLog("WARNING", $"Control websocket receive loop ended: {ex.Message}", stackTrace: ex.ToString());
                 }
             }
 
@@ -433,11 +433,11 @@ namespace SmartRoom.Networking
                     }
                 }
             }
-            catch
+            catch (Exception ex)
             {
                 if (!_isQuitting)
                 {
-                    QueueUnityLog("WARNING", "Vision websocket receive loop ended");
+                    QueueUnityLog("WARNING", $"Vision websocket receive loop ended: {ex.Message}", stackTrace: ex.ToString());
                 }
             }
 
@@ -455,8 +455,9 @@ namespace SmartRoom.Networking
             {
                 socket.Dispose();
             }
-            catch
+            catch (Exception ex)
             {
+                Debug.LogWarning($"TryCloseSocket failed: {ex.Message}");
             }
         }
 
@@ -494,8 +495,9 @@ namespace SmartRoom.Networking
                 {
                     await _controlSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Quit", CancellationToken.None);
                 }
-                catch
+                catch (Exception ex)
                 {
+                    Debug.LogWarning($"OnApplicationQuit close control socket failed: {ex.Message}");
                 }
 
                 _controlSocket.Dispose();
@@ -507,8 +509,9 @@ namespace SmartRoom.Networking
                 {
                     await _rgbSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Quit", CancellationToken.None);
                 }
-                catch
+                catch (Exception ex)
                 {
+                    Debug.LogWarning($"OnApplicationQuit close rgb socket failed: {ex.Message}");
                 }
 
                 _rgbSocket.Dispose();
@@ -520,8 +523,9 @@ namespace SmartRoom.Networking
                 {
                     await _depthSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Quit", CancellationToken.None);
                 }
-                catch
+                catch (Exception ex)
                 {
+                    Debug.LogWarning($"OnApplicationQuit close depth socket failed: {ex.Message}");
                 }
 
                 _depthSocket.Dispose();
@@ -533,8 +537,9 @@ namespace SmartRoom.Networking
                 {
                     await _visionSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Quit", CancellationToken.None);
                 }
-                catch
+                catch (Exception ex)
                 {
+                    Debug.LogWarning($"OnApplicationQuit close vision socket failed: {ex.Message}");
                 }
 
                 _visionSocket.Dispose();
