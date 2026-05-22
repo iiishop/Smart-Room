@@ -2,6 +2,7 @@
 using UnityEditor;
 using UnityEngine;
 using UnityEngine.Rendering.Universal;
+using SmartRoom.Rendering;
 using SmartRoom.Vision;
 
 namespace SmartRoom.Rendering.Editor
