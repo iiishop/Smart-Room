@@ -165,27 +165,44 @@ class GroundedSamTrackingPipeline:
                     for detection in additions:
                         session.detections_by_id[detection.object_id] = detection
                     object_masks = self._merge_object_masks(object_masks, added_masks)
-        else:
-            mode = "propagation"
-            object_masks = self._tracker.track(image_bgr)
 
-        tracked_objects = self._build_tracked_objects(
-            session.detections_by_id,
-            object_masks,
-        )
-        height, width = image_bgr.shape[:2]
-        return VisionFrameResult(
-            frame_id=frame_id,
-            timestamp_ms=timestamp_ms,
-            frame_width=width,
-            frame_height=height,
-            prompt=session.prompt,
-            objects=tracked_objects,
-            source=self._source,
-            mode=mode,
-            process_time_ms=elapsed_ms(started_at),
-            gpu_memory_mb=sample_gpu_memory_mb(),
-        )
+            tracked_objects = self._build_tracked_objects(
+                session.detections_by_id,
+                object_masks,
+            )
+            height, width = image_bgr.shape[:2]
+            result = VisionFrameResult(
+                frame_id=frame_id,
+                timestamp_ms=timestamp_ms,
+                frame_width=width,
+                frame_height=height,
+                prompt=session.prompt,
+                objects=tracked_objects,
+                source=self._source,
+                mode=mode,
+                process_time_ms=elapsed_ms(started_at),
+                gpu_memory_mb=sample_gpu_memory_mb(),
+            )
+            self._last_detection_result = result
+            return result
+        else:
+            # Propagation mode: reuse last detection result — per-frame
+            # tracker doesn't benefit from re-segmenting the same boxes.
+            cached = getattr(self, "_last_detection_result", None)
+            if cached is None:
+                return None
+            return VisionFrameResult(
+                frame_id=frame_id,
+                timestamp_ms=timestamp_ms,
+                frame_width=cached.frame_width,
+                frame_height=cached.frame_height,
+                prompt=cached.prompt,
+                objects=cached.objects,
+                source=cached.source,
+                mode="propagation",
+                process_time_ms=0.0,
+                gpu_memory_mb=cached.gpu_memory_mb,
+            )
 
     def _should_run_detection(self, session: _SessionState, frame_id: int) -> bool:
         return (not session.seeded) or (frame_id % self._detect_interval == 0)

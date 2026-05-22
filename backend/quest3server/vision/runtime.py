@@ -5,10 +5,12 @@ import json
 
 import cv2
 import numpy as np
+import torch
 from fastapi import WebSocket
 
 from ..log_manager import add_python_log
 from .pipeline import GroundedSamTrackingPipeline, VisionPipelineError
+from .providers import DEFAULT_VISION_PROMPT
 from .types import VisionFrameResult
 
 
@@ -68,8 +70,21 @@ class Quest3VisionRuntime:
         jpeg_bytes: bytes,
     ) -> VisionFrameResult | None:
         pipeline = self._pipeline
-        if pipeline is None or not pipeline.is_active:
+        if pipeline is None:
             return None
+
+        if not pipeline.is_active:
+            try:
+                pipeline.start_session(DEFAULT_VISION_PROMPT)
+                add_python_log(
+                    "info",
+                    f"Vision session auto-started (prompt: {DEFAULT_VISION_PROMPT})",
+                )
+                self._last_error = None
+            except VisionPipelineError as exc:
+                self._last_error = str(exc)
+                add_python_log("warning", f"Vision auto-start failed: {exc}")
+                return None
 
         if self._lock.locked():
             self._dropped_frames += 1
@@ -113,11 +128,13 @@ class Quest3VisionRuntime:
         if decoded is None:
             raise VisionPipelineError("failed to decode RGB JPEG for vision pipeline")
         try:
-            return pipeline.process_frame(
-                frame_id=frame_id,
-                timestamp_ms=timestamp_ms,
-                image_bgr=decoded,
-            )
+            with torch.inference_mode():
+                with torch.autocast("cuda", dtype=torch.bfloat16):
+                    return pipeline.process_frame(
+                        frame_id=frame_id,
+                        timestamp_ms=timestamp_ms,
+                        image_bgr=decoded,
+                    )
         except VisionPipelineError as exc:
             self._last_error = str(exc)
             add_python_log("warning", f"Vision pipeline error: {exc}")

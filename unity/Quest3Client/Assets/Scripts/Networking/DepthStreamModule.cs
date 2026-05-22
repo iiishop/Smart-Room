@@ -1,7 +1,7 @@
 using System;
 using System.IO;
 using Meta.XR.EnvironmentDepth;
-using Meta.XR.MRUtilityKit;
+using Meta.XR;
 using Unity.Collections;
 using UnityEngine;
 using UnityEngine.Rendering;

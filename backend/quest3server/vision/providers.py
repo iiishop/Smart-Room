@@ -17,6 +17,8 @@ from .pipeline import (
 )
 from .types import DetectionCandidate
 
+DEFAULT_VISION_PROMPT = "chair . table . person . sofa . monitor . cup . bottle . book . backpack . door"
+
 
 @dataclass(slots=True)
 class VisionModelSettings:
@@ -32,7 +34,7 @@ class VisionModelSettings:
     @classmethod
     def from_env(cls) -> "VisionModelSettings":
         return cls(
-            enabled=os.getenv("QUEST3_VISION_ENABLED", "0").lower()
+            enabled=os.getenv("QUEST3_VISION_ENABLED", "1").lower()
             in {"1", "true", "yes", "on"},
             grounding_dino_model=os.getenv(
                 "QUEST3_GROUNDING_DINO_MODEL",
@@ -40,7 +42,7 @@ class VisionModelSettings:
             ),
             sam2_model=os.getenv(
                 "QUEST3_SAM2_MODEL",
-                "facebook/sam2-hiera-tiny",
+                "facebook/sam2.1-hiera-tiny",
             ),
             box_threshold=float(os.getenv("QUEST3_GROUNDING_BOX_THRESHOLD", "0.25")),
             text_threshold=float(os.getenv("QUEST3_GROUNDING_TEXT_THRESHOLD", "0.25")),
@@ -141,6 +143,51 @@ class Sam2ImagePredictorSegmenter(ImageSegmentationProvider):
             mask = np.asarray(predicted_masks[0], dtype=bool)
             masks.append(mask)
         return masks
+
+
+class PerFrameSegmenterTracker(VideoTrackingProvider):
+    """Per-frame segmentation tracker — replaces SAM2 video tracking.
+
+    Instead of temporal propagation, this runs the image segmenter on every
+    frame using the stored detection boxes.  Simpler but loses inter-frame
+    mask consistency and is more expensive per frame.
+    """
+
+    def __init__(self, segmenter: ImageSegmentationProvider) -> None:
+        self._segmenter = segmenter
+        self._detections: list[DetectionCandidate] = []
+
+    def reset(self) -> None:
+        self._detections = []
+
+    def bootstrap(
+        self,
+        image_bgr: np.ndarray,
+        detections: list[DetectionCandidate],
+        masks: list[np.ndarray],
+    ) -> list[np.ndarray]:
+        self._detections = list(detections)
+        return masks
+
+    def track(self, image_bgr: np.ndarray) -> list[tuple[int, np.ndarray]]:
+        if not self._detections:
+            return []
+        masks = self._segmenter.segment(image_bgr, self._detections)
+        return [
+            (self._detections[i].object_id, mask)
+            for i, mask in enumerate(masks)
+        ]
+
+    def add_objects(
+        self,
+        detections: list[DetectionCandidate],
+        masks: list[np.ndarray],
+    ) -> list[tuple[int, np.ndarray]]:
+        self._detections.extend(detections)
+        return [
+            (detection.object_id, mask)
+            for detection, mask in zip(detections, masks, strict=True)
+        ]
 
 
 class Sam2VideoRepropagatingTracker(VideoTrackingProvider):
@@ -324,10 +371,7 @@ def build_default_pipeline() -> GroundedSamTrackingPipeline | None:
         text_threshold=settings.text_threshold,
     )
     segmenter = Sam2ImagePredictorSegmenter(model_name=settings.sam2_model)
-    tracker = Sam2VideoRepropagatingTracker(
-        model_name=settings.sam2_model,
-        frame_cache_dir=settings.frame_cache_dir,
-    )
+    tracker = PerFrameSegmenterTracker(segmenter=segmenter)
     return GroundedSamTrackingPipeline(
         detector=detector,
         segmenter=segmenter,
