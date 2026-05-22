@@ -272,8 +272,7 @@ namespace SmartRoom.Networking
                         continue;
                     }
 
-                                        // 16-color palette cycled by object_id
-                    Color color = Color.HSVToRGB((wfMask.object_id % 16) / 16f, 0.85f, 1f);
+                    Color color = VisionObjectColorTable.GetColor(wfMask.object_id);
                     wireframeManager.SetBboxData(wfMask.object_id, eightCorners, color);
                 }
 

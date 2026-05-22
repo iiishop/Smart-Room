@@ -1,4 +1,5 @@
 using System.Net.WebSockets;
+using System.Text.RegularExpressions;
 using SmartRoom.Networking;
 using SmartRoom.Vision;
 using UnityEngine;
@@ -13,6 +14,7 @@ try
     VisionOverlayShaders_ExposeExpectedShaderContracts();
     VisionBboxGeometry_ExpandsTwelveEdgesIntoTwentyFourVertices();
     VisionBboxGeometry_ClosesContoursIntoLinePairs();
+    VisionObjectColorTable_MatchesTypescriptContract();
     Console.WriteLine("VisionParserRunner: all tests passed.");
 }
 catch (Exception ex)
@@ -205,6 +207,54 @@ static void VisionBboxGeometry_ClosesContoursIntoLinePairs()
     AssertEqual(contour[2], vertices[4].Position, "contour 2 start");
     AssertEqual(contour[0], vertices[5].Position, "contour closes");
     AssertEqual(0x281E140Au, vertices[0].Color, "contour packed color");
+}
+
+static void VisionObjectColorTable_MatchesTypescriptContract()
+{
+    string repoRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
+    string contractPath = Path.Combine(repoRoot, "contracts", "bbox_wireframe_render.ts");
+    if (!File.Exists(contractPath))
+    {
+        throw new Exception($"missing contract file: {contractPath}");
+    }
+
+    string contents = File.ReadAllText(contractPath);
+    Match tableMatch = Regex.Match(
+        contents,
+        @"OBJECT_COLOR_TABLE:\s*readonly\s*\[number,\s*number,\s*number\]\[\]\s*=\s*\[(?<body>[\s\S]*?)\];",
+        RegexOptions.CultureInvariant);
+    if (!tableMatch.Success)
+    {
+        throw new Exception("OBJECT_COLOR_TABLE not found in contract");
+    }
+
+    MatchCollection colorMatches = Regex.Matches(
+        tableMatch.Groups["body"].Value,
+        @"\[\s*(?<r>\d+(?:\.\d+)?)\s*,\s*(?<g>\d+(?:\.\d+)?)\s*,\s*(?<b>\d+(?:\.\d+)?)\s*\]",
+        RegexOptions.CultureInvariant);
+
+    AssertEqual(VisionObjectColorTable.PaletteSize, colorMatches.Count, "contract palette size");
+    for (int index = 0; index < colorMatches.Count; index++)
+    {
+        Match match = colorMatches[index];
+        byte expectedR = FloatChannelToByte(match.Groups["r"].Value);
+        byte expectedG = FloatChannelToByte(match.Groups["g"].Value);
+        byte expectedB = FloatChannelToByte(match.Groups["b"].Value);
+        Color32 actual = VisionObjectColorTable.GetColor(index);
+        AssertEqual(expectedR, actual.r, $"palette[{index}] red");
+        AssertEqual(expectedG, actual.g, $"palette[{index}] green");
+        AssertEqual(expectedB, actual.b, $"palette[{index}] blue");
+        AssertEqual((byte)0xFF, actual.a, $"palette[{index}] alpha");
+    }
+
+    AssertEqual(VisionObjectColorTable.GetColor(0), VisionObjectColorTable.GetColor(16), "palette wraparound");
+}
+
+static byte FloatChannelToByte(string value)
+{
+    float parsed = float.Parse(value, System.Globalization.CultureInfo.InvariantCulture);
+    int rounded = (int)MathF.Round(parsed * 255f, MidpointRounding.AwayFromZero);
+    return (byte)Math.Clamp(rounded, 0, 255);
 }
 
 static void AssertShader(string path, IEnumerable<string> expectedSnippets)
