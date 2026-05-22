@@ -40,9 +40,7 @@ namespace SmartRoom.Rendering.Editor
             changed |= RegisterFeaturesToRenderer(MobileRendererPath);
 
             if (!changed)
-            {
                 return false;
-            }
 
             AssetDatabase.SaveAssets();
             AssetDatabase.Refresh();
@@ -59,40 +57,46 @@ namespace SmartRoom.Rendering.Editor
             }
 
             bool changed = false;
-            changed |= RegisterFeature<BboxWireframeRenderFeature>(data, path, "BboxWireframeRenderFeature");
-            changed |= RegisterFeature<VisionRendererFeature>(data, path, "VisionRendererFeature");
+
+            // BboxWireframeRenderFeature — inline check to avoid Unity 6 generic resolution issues
+            bool hasBbox = false;
+            foreach (ScriptableRendererFeature f in data.rendererFeatures)
+            {
+                if (f is BboxWireframeRenderFeature) { hasBbox = true; break; }
+            }
+            if (!hasBbox)
+            {
+                BboxWireframeRenderFeature bboxFeature = ScriptableObject.CreateInstance<BboxWireframeRenderFeature>();
+                bboxFeature.name = "BboxWireframeRenderFeature";
+                AssetDatabase.AddObjectToAsset(bboxFeature, path);
+                data.rendererFeatures.Add(bboxFeature);
+                EditorUtility.SetDirty(bboxFeature);
+                changed = true;
+            }
+
+            // VisionRendererFeature — inline check to avoid Unity 6 generic resolution issues
+            bool hasVision = false;
+            foreach (ScriptableRendererFeature f in data.rendererFeatures)
+            {
+                if (f is VisionRendererFeature) { hasVision = true; break; }
+            }
+            if (!hasVision)
+            {
+                VisionRendererFeature visionFeature = ScriptableObject.CreateInstance<VisionRendererFeature>();
+                visionFeature.name = "VisionRendererFeature";
+                AssetDatabase.AddObjectToAsset(visionFeature, path);
+                data.rendererFeatures.Add(visionFeature);
+                EditorUtility.SetDirty(visionFeature);
+                changed = true;
+            }
 
             if (changed)
             {
                 EditorUtility.SetDirty(data);
                 Debug.Log($"[SmartRoom] Registered missing render features to {path}");
             }
-            else
-            {
-                Debug.Log($"[SmartRoom] Render features already present in {path}");
-            }
 
             return changed;
-        }
-
-        private static bool RegisterFeature<TFeature>(UniversalRendererData data, string assetPath, string featureName)
-            where TFeature : ScriptableRendererFeature
-        {
-            foreach (ScriptableRendererFeature feature in data.rendererFeatures)
-            {
-                if (feature is TFeature)
-                {
-                    return false;
-                }
-            }
-
-            TFeature featureInstance = ScriptableObject.CreateInstance<TFeature>();
-            featureInstance.name = featureName;
-            AssetDatabase.AddObjectToAsset(featureInstance, assetPath);
-            data.rendererFeatures.Add(featureInstance);
-            EditorUtility.SetDirty(featureInstance);
-            EditorUtility.SetDirty(data);
-            return true;
         }
     }
 }

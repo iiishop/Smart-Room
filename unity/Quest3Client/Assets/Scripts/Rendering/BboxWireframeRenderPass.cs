@@ -1,6 +1,7 @@
 using UnityEngine;
 using UnityEngine.Rendering;
 using UnityEngine.Rendering.Universal;
+using UnityEngine.Rendering.RenderGraphModule;
 
 namespace SmartRoom.Rendering
 {
@@ -28,12 +29,11 @@ namespace SmartRoom.Rendering
             _lineAlpha = lineAlpha;
         }
 
+        [System.Obsolete]
         public override void Execute(ScriptableRenderContext context, ref RenderingData renderingData)
         {
             if (_buffer == null || _instanceCount <= 0 || _material == null)
-            {
                 return;
-            }
 
             CommandBuffer cmd = CommandBufferPool.Get(nameof(BboxWireframeRenderPass));
             try
@@ -48,6 +48,11 @@ namespace SmartRoom.Rendering
             {
                 CommandBufferPool.Release(cmd);
             }
+        }
+
+        public override void RecordRenderGraph(RenderGraph renderGraph, ContextContainer frameData)
+        {
+            // Compatibility mode: rendering handled by Execute()
         }
     }
 }
