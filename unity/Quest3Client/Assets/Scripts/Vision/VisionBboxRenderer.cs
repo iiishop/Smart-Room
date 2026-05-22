@@ -147,12 +147,9 @@ namespace SmartRoom.Vision
 
         private Color32 ResolveColor(VisionObjectProcessedData processedObject)
         {
-            if (colorPalette != null && colorPalette.TryGetColor(processedObject.Label, out Color color))
-            {
-                return color;
-            }
-
-            return Color.HSVToRGB(Mathf.Repeat(processedObject.ObjectId * 0.173f, 1f), 0.85f, 1f);
+            return colorPalette != null
+                ? colorPalette.ResolveColor(processedObject.ObjectId)
+                : VisionObjectColorTable.GetColor(processedObject.ObjectId);
         }
 
         private void ReleaseResources()

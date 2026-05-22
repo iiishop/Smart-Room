@@ -15,5 +15,6 @@
     <Compile Include="..\..\unity\Quest3Client\Assets\Scripts\Networking\VisionSocketOwnership.cs" Link="VisionSocketOwnership.cs" />
     <Compile Include="..\..\unity\Quest3Client\Assets\Scripts\Networking\VisionWorldPositionFactory.cs" Link="VisionWorldPositionFactory.cs" />
     <Compile Include="..\..\unity\Quest3Client\Assets\Scripts\Vision\VisionBboxGeometry.cs" Link="VisionBboxGeometry.cs" />
+    <Compile Include="..\..\unity\Quest3Client\Assets\Scripts\Vision\VisionObjectColorTable.cs" Link="VisionObjectColorTable.cs" />
   </ItemGroup>
 </Project>

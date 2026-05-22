@@ -13,7 +13,13 @@ namespace SmartRoom.Vision
     [CreateAssetMenu(menuName = "SmartRoom/Vision Color Palette", fileName = "VisionColorPalette")]
     public sealed class VisionColorPalette : ScriptableObject
     {
+        [SerializeField] private Color32[] objectColors = VisionObjectColorTable.CreateDefaultPalette();
         public VisionLabelColorEntry[] entries = Array.Empty<VisionLabelColorEntry>();
+
+        public Color32 ResolveColor(int objectId)
+        {
+            return VisionObjectColorTable.GetColor(objectId, objectColors);
+        }
 
         public bool TryGetColor(string label, out Color color)
         {
@@ -32,6 +38,22 @@ namespace SmartRoom.Vision
 
             color = Color.white;
             return false;
+        }
+
+        private void OnValidate()
+        {
+            if (objectColors != null && objectColors.Length == VisionObjectColorTable.PaletteSize)
+            {
+                return;
+            }
+
+            Color32[] normalized = VisionObjectColorTable.CreateDefaultPalette();
+            if (objectColors != null)
+            {
+                Array.Copy(objectColors, normalized, Math.Min(objectColors.Length, normalized.Length));
+            }
+
+            objectColors = normalized;
         }
     }
 }
