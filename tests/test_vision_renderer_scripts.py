@@ -52,6 +52,7 @@ def test_object_color_table_is_shared_across_runtime_paths():
     mask_renderer = read_script("VisionMaskRenderer.cs")
     receiver = read_networking_script("VisionReceiverModule.cs")
     overlay_config = read_rendering_script("VisionOverlayConfig.cs")
+    wireframe_manager = read_rendering_script("BboxWireframeManager.cs")
 
     assert "public const int PaletteSize = 16;" in color_table
     assert "new(0xFF, 0x33, 0x33, 0xFF)" in color_table
@@ -66,3 +67,6 @@ def test_object_color_table_is_shared_across_runtime_paths():
     assert "Color.HSVToRGB" not in receiver
     assert "private const int PaletteSize = VisionObjectColorTable.PaletteSize;" in overlay_config
     assert "VisionObjectColorTable.CreateDefaultPalette()" in overlay_config
+    assert "public Vector4 color;" in wireframe_manager
+    assert "color = new Vector4(color.r, color.g, color.b, color.a)" in wireframe_manager
+    assert "public float cr;" not in wireframe_manager

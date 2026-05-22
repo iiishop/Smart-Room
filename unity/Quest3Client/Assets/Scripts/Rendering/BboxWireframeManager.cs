@@ -15,10 +15,7 @@ namespace SmartRoom.Rendering
         public Vector3 corner5;
         public Vector3 corner6;
         public Vector3 corner7;
-        public float cr;
-        public float cg;
-        public float cb;
-        public float ca;
+        public Vector4 color;
     }
 
     public sealed class BboxWireframeManager : MonoBehaviour
@@ -89,10 +86,7 @@ namespace SmartRoom.Rendering
                 corner5 = corners[5],
                 corner6 = corners[6],
                 corner7 = corners[7],
-                cr = color.r,
-                cg = color.g,
-                cb = color.b,
-                ca = color.a
+                color = new Vector4(color.r, color.g, color.b, color.a)
             };
             _dirty = true;
         }
