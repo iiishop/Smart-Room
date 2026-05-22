@@ -65,18 +65,6 @@ Shader "SmartRoom/Vision/VisionMaskLines"
                 return color;
             }
 
-            float2 SafeNormalize(float2 value)
-            {
-                float lengthSquared = max(dot(value, value), 1e-8);
-                return value * rsqrt(lengthSquared);
-            }
-
-            float3 SafeNormalize(float3 value)
-            {
-                float lengthSquared = max(dot(value, value), 1e-8);
-                return value * rsqrt(lengthSquared);
-            }
-
             Varyings Vert(Attributes input)
             {
                 LineVertexData currentVertex = _LineVertices[input.vertexID];

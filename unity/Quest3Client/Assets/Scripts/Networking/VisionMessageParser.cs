@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
-using System.Text.Json;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 
 namespace SmartRoom.Networking
 {
@@ -13,8 +14,7 @@ namespace SmartRoom.Networking
                 throw new ArgumentException("vision payload must not be empty", nameof(json));
             }
 
-            using JsonDocument document = JsonDocument.Parse(json);
-            JsonElement root = document.RootElement;
+            JObject root = JObject.Parse(json);
 
             int frameId = ReadInt32(root, "frame_id");
             long timestampMs = ReadInt64(root, "timestamp_ms");
@@ -24,10 +24,10 @@ namespace SmartRoom.Networking
             string source = ReadString(root, "source");
 
             var objects = new List<VisionObjectData>();
-            if (root.TryGetProperty("objects", out JsonElement objectArray) &&
-                objectArray.ValueKind == JsonValueKind.Array)
+            JToken objectToken = root["objects"];
+            if (objectToken is JArray objectArray)
             {
-                foreach (JsonElement item in objectArray.EnumerateArray())
+                foreach (JToken item in objectArray)
                 {
                     int objectId = ReadInt32(item, "object_id");
                     string label = ReadString(item, "label");
@@ -105,52 +105,53 @@ namespace SmartRoom.Networking
             return new DecodedBinaryMask(maskRle.Height, maskRle.Width, values);
         }
 
-        private static MaskRleData ReadMaskRle(JsonElement item)
+        private static MaskRleData ReadMaskRle(JToken item)
         {
-            if (!item.TryGetProperty("mask_rle", out JsonElement maskRleElement) ||
-                maskRleElement.ValueKind != JsonValueKind.Object)
+            JToken maskRleToken = item["mask_rle"];
+            if (!(maskRleToken is JObject))
             {
                 throw new JsonException("mask_rle object is required");
             }
 
-            int[] size = ReadIntArray(maskRleElement, "size", expectedLength: 2);
-            int[] counts = ReadCounts(maskRleElement);
+            int[] size = ReadIntArray(maskRleToken, "size", expectedLength: 2);
+            int[] counts = ReadCounts(maskRleToken);
             return new MaskRleData(size[0], size[1], counts);
         }
 
-        private static int[] ReadCounts(JsonElement maskRleElement)
+        private static int[] ReadCounts(JToken maskRleToken)
         {
-            if (!maskRleElement.TryGetProperty("counts", out JsonElement countsElement))
+            JToken countsToken = maskRleToken["counts"];
+            if (countsToken == null)
             {
                 throw new JsonException("mask_rle.counts is required");
             }
 
-            if (countsElement.ValueKind != JsonValueKind.Array)
+            if (!(countsToken is JArray countsArray))
             {
                 throw new NotSupportedException("Only array-based COCO RLE counts are supported.");
             }
 
             var counts = new List<int>();
-            foreach (JsonElement value in countsElement.EnumerateArray())
+            foreach (JToken value in countsArray)
             {
-                counts.Add(value.GetInt32());
+                counts.Add(value.Value<int>());
             }
 
             return counts.ToArray();
         }
 
-        private static int[] ReadIntArray(JsonElement parent, string propertyName, int expectedLength)
+        private static int[] ReadIntArray(JToken parent, string propertyName, int expectedLength)
         {
-            if (!parent.TryGetProperty(propertyName, out JsonElement element) ||
-                element.ValueKind != JsonValueKind.Array)
+            JToken element = parent[propertyName];
+            if (!(element is JArray array))
             {
                 throw new JsonException($"{propertyName} array is required");
             }
 
             var values = new List<int>();
-            foreach (JsonElement value in element.EnumerateArray())
+            foreach (JToken value in array)
             {
-                values.Add(value.GetInt32());
+                values.Add(value.Value<int>());
             }
 
             if (values.Count != expectedLength)
@@ -161,44 +162,48 @@ namespace SmartRoom.Networking
             return values.ToArray();
         }
 
-        private static int ReadInt32(JsonElement parent, string propertyName)
+        private static int ReadInt32(JToken parent, string propertyName)
         {
-            if (!parent.TryGetProperty(propertyName, out JsonElement element))
+            JToken element = parent[propertyName];
+            if (element == null)
             {
                 throw new JsonException($"{propertyName} is required");
             }
 
-            return element.GetInt32();
+            return element.Value<int>();
         }
 
-        private static long ReadInt64(JsonElement parent, string propertyName)
+        private static long ReadInt64(JToken parent, string propertyName)
         {
-            if (!parent.TryGetProperty(propertyName, out JsonElement element))
+            JToken element = parent[propertyName];
+            if (element == null)
             {
                 throw new JsonException($"{propertyName} is required");
             }
 
-            return element.GetInt64();
+            return element.Value<long>();
         }
 
-        private static float ReadSingle(JsonElement parent, string propertyName)
+        private static float ReadSingle(JToken parent, string propertyName)
         {
-            if (!parent.TryGetProperty(propertyName, out JsonElement element))
+            JToken element = parent[propertyName];
+            if (element == null)
             {
                 throw new JsonException($"{propertyName} is required");
             }
 
-            return element.GetSingle();
+            return element.Value<float>();
         }
 
-        private static string ReadString(JsonElement parent, string propertyName)
+        private static string ReadString(JToken parent, string propertyName)
         {
-            if (!parent.TryGetProperty(propertyName, out JsonElement element))
+            JToken element = parent[propertyName];
+            if (element == null)
             {
                 throw new JsonException($"{propertyName} is required");
             }
 
-            return element.GetString() ?? string.Empty;
+            return element.Value<string>() ?? string.Empty;
         }
     }
 }

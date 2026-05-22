@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Text;
 using Meta.XR;
+using SmartRoom.Rendering;
 using SmartRoom.Vision;
 using UnityEngine;
 
