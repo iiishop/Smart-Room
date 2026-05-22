@@ -134,9 +134,11 @@ namespace SmartRoom.Networking
         {
             string safeLabel = string.IsNullOrWhiteSpace(label) ? "unknown" : label.Trim();
             float safeScore = float.IsNaN(score) || float.IsInfinity(score) ? 0f : score;
-            return string.Create(
+            return string.Format(
                 CultureInfo.InvariantCulture,
-                $"{safeLabel} {safeScore:0.00}");
+                "{0} {1:0.00}",
+                safeLabel,
+                safeScore);
         }
     }
 }
