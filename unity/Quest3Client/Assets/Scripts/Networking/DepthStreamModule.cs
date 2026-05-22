@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using Meta.XR.EnvironmentDepth;
+using Meta.XR.MRUtilityKit;
 using Unity.Collections;
 using UnityEngine;
 using UnityEngine.Rendering;
@@ -11,6 +12,7 @@ namespace SmartRoom.Networking
     {
         [SerializeField] private BackendCommunicationManager manager;
         [SerializeField] private EnvironmentDepthManager environmentDepthManager;
+        [SerializeField] private EnvironmentRaycastManager environmentRaycastManager;
         [SerializeField] private Shader depthArraySliceShader;
         [SerializeField] private int targetFrameRateHz = 10;
         [SerializeField] private int maxPixelsPerFrame = 0;
@@ -33,6 +35,8 @@ namespace SmartRoom.Networking
         private float[] _latestDepthMeters;
         private int _latestDepthWidth;
         private int _latestDepthHeight;
+        private bool _loggedEnvironmentRaycastFallback;
+        private EnvironmentRaycastManagerProvider _environmentRaycastProvider;
 
         private const string RawDepthGlobal = "_EnvironmentDepthTexture";
         private const string PreprocessedDepthGlobal = "_PreprocessedEnvironmentDepthTexture";
@@ -52,6 +56,13 @@ namespace SmartRoom.Networking
             {
                 environmentDepthManager = FindFirstObjectByType<EnvironmentDepthManager>();
             }
+
+            if (environmentRaycastManager == null)
+            {
+                environmentRaycastManager = FindFirstObjectByType<EnvironmentRaycastManager>();
+            }
+
+            _environmentRaycastProvider = new EnvironmentRaycastManagerProvider(environmentRaycastManager);
 
             if (depthArraySliceShader == null)
             {
@@ -92,47 +103,33 @@ namespace SmartRoom.Networking
             float u,
             float v,
             Ray ray,
-            Transform referenceTransform,
             out float depthMeters,
             out Vector3 worldPoint,
             out Vector3 cameraPoint)
         {
-            depthMeters = -1f;
-            worldPoint = Vector3.zero;
-            cameraPoint = Vector3.zero;
+            bool hit = DepthViewportRaycast.TryResolve(
+                _latestDepthMeters,
+                _latestDepthWidth,
+                _latestDepthHeight,
+                u,
+                v,
+                ray,
+                _environmentRaycastProvider,
+                out bool usedFallback,
+                out depthMeters,
+                out worldPoint,
+                out cameraPoint);
 
-            if (_latestDepthMeters == null || _latestDepthWidth <= 0 || _latestDepthHeight <= 0)
+            if (usedFallback && !_loggedEnvironmentRaycastFallback)
             {
-                return false;
+                _loggedEnvironmentRaycastFallback = true;
+                manager?.QueueUnityLog(
+                    "WARNING",
+                    "EnvironmentRaycastManager unavailable; falling back to manual depth projection. Spatial anchoring may drift until MRUK raycast is configured."
+                );
             }
 
-            u = Mathf.Clamp01(u);
-            v = Mathf.Clamp01(v);
-
-            int x = Mathf.Clamp((int)(u * _latestDepthWidth), 0, _latestDepthWidth - 1);
-            int y = Mathf.Clamp((int)(v * _latestDepthHeight), 0, _latestDepthHeight - 1);
-
-            int idx = y * _latestDepthWidth + x;
-            if (idx < 0 || idx >= _latestDepthMeters.Length)
-            {
-                return false;
-            }
-
-            float z = _latestDepthMeters[idx];
-            if (!float.IsFinite(z) || z <= 0f)
-            {
-                return false;
-            }
-
-            Vector3 world = ray.origin + ray.direction.normalized * z;
-            Vector3 cam = referenceTransform != null
-                ? referenceTransform.InverseTransformPoint(world)
-                : ray.direction.normalized * z;
-
-            depthMeters = z;
-            worldPoint = world;
-            cameraPoint = cam;
-            return true;
+            return hit;
         }
 
         private void Update()
@@ -435,6 +432,35 @@ namespace SmartRoom.Networking
             if (_depthSliceMaterial != null)
             {
                 Destroy(_depthSliceMaterial);
+            }
+        }
+
+        private sealed class EnvironmentRaycastManagerProvider : IEnvironmentRaycastProvider
+        {
+            private readonly EnvironmentRaycastManager _environmentRaycastManager;
+
+            public EnvironmentRaycastManagerProvider(EnvironmentRaycastManager environmentRaycastManager)
+            {
+                _environmentRaycastManager = environmentRaycastManager;
+            }
+
+            public bool IsAvailable => _environmentRaycastManager != null && _environmentRaycastManager.isActiveAndEnabled;
+
+            public bool TryRaycast(Ray ray, out Vector3 worldPoint)
+            {
+                worldPoint = Vector3.zero;
+                if (!IsAvailable)
+                {
+                    return false;
+                }
+
+                if (!_environmentRaycastManager.Raycast(ray, out var hitInfo))
+                {
+                    return false;
+                }
+
+                worldPoint = hitInfo.point;
+                return true;
             }
         }
     }
