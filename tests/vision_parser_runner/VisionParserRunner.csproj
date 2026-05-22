@@ -5,10 +5,12 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <DefineConstants>$(DefineConstants);VISION_TEST_ONLY_PARSER</DefineConstants>
   </PropertyGroup>
 
   <ItemGroup>
     <Compile Include="Program.cs" />
+    <Compile Include="NewtonsoftJsonStubs.cs" />
     <Compile Include="UnityEngineStubs.cs" />
     <Compile Include="..\..\unity\Quest3Client\Assets\Scripts\Networking\VisionContracts.cs" Link="VisionContracts.cs" />
     <Compile Include="..\..\unity\Quest3Client\Assets\Scripts\Networking\VisionMessageParser.cs" Link="VisionMessageParser.cs" />

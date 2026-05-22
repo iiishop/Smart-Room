@@ -1,3 +1,4 @@
+#if VISION_TEST_ONLY_PARSER
 using System;
 using System.Collections.Generic;
 using Newtonsoft.Json;
@@ -207,3 +208,4 @@ namespace SmartRoom.Networking
         }
     }
 }
+#endif

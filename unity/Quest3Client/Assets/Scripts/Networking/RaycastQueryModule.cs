@@ -123,7 +123,7 @@ namespace SmartRoom.Networking
 
             if (depthStreamModule != null)
             {
-                hit = depthStreamModule.TryRaycastViewport(u, v, ray, rayTransform, out depthM, out worldPoint, out cameraPoint);
+                hit = depthStreamModule.TryRaycastViewport(u, v, ray, out depthM, out worldPoint, out cameraPoint);
             }
 
             if (!hit && fallbackToPhysicsRaycast)

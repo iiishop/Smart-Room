@@ -191,7 +191,7 @@ namespace SmartRoom.Networking
                         continue;
                     }
 
-                    if (!depthStreamModule.TryRaycastViewport(sample.ViewportU, sample.ViewportV, ray, rayTransform, out float depthM, out Vector3 worldPoint, out _))
+                    if (!depthStreamModule.TryRaycastViewport(sample.ViewportU, sample.ViewportV, ray, out float depthM, out Vector3 worldPoint, out _))
                     {
                         continue;
                     }
@@ -364,7 +364,7 @@ namespace SmartRoom.Networking
                     continue;
                 }
 
-                if (!depthStreamModule.TryRaycastViewport(u, v, ray, rayTransform, out _, out Vector3 worldPoint, out _))
+                if (!depthStreamModule.TryRaycastViewport(u, v, ray, out _, out Vector3 worldPoint, out _))
                 {
                     continue;
                 }
@@ -566,7 +566,7 @@ namespace SmartRoom.Networking
                     continue;
                 }
 
-                if (depthStreamModule.TryRaycastViewport(u, v, ray, rayTransform, out float depthM, out Vector3 worldPt, out _))
+                if (depthStreamModule.TryRaycastViewport(u, v, ray, out float depthM, out Vector3 worldPt, out _))
                 {
                     frontCorners[i] = worldPt;
                     cornerHit[i] = true;
