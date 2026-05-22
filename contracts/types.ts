@@ -14,6 +14,23 @@ export interface VisionMaskRle {
   counts: number[];
 }
 
+export interface VisionColor32 {
+  r: number;
+  g: number;
+  b: number;
+  a: number;
+}
+
+export interface VisionOverlayConfig {
+  enabled: boolean;
+  showBoundingBoxes: boolean;
+  showLabels: boolean;
+  showAnchors: boolean;
+  boxLineWidth: number;
+  labelHeightOffset: number;
+  objectColors: VisionColor32[];
+}
+
 export interface VisionTrackedObject {
   object_id: number;
   label: string;
@@ -39,4 +56,23 @@ export interface VisionFrameResult {
   mode?: VisionFrameMode;
   process_time_ms?: number;
   gpu_memory_mb?: VisionGpuMemoryMb;
+}
+
+export type VisionVector3 = [x: number, y: number, z: number];
+
+export interface VisionProcessedObject {
+  object_id: number;
+  label: string;
+  score: number;
+  corners_3d: VisionVector3[];
+  center_3d: VisionVector3;
+  contour_3d: VisionVector3[];
+  corners_valid: boolean;
+  center_valid: boolean;
+}
+
+export interface VisionProcessedFrame {
+  frame_id: number;
+  timestamp_ms: number;
+  objects: VisionProcessedObject[];
 }

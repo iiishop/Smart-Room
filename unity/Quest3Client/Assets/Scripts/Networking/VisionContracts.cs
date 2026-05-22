@@ -1,7 +1,37 @@
 using System;
+using System.Globalization;
 
 namespace SmartRoom.Networking
 {
+    public sealed class WorldPosition
+    {
+        public int ObjectId { get; }
+        public string Label { get; }
+        public float Score { get; }
+        public float X { get; }
+        public float Y { get; }
+        public float Z { get; }
+        public float DepthM { get; }
+
+        public WorldPosition(
+            int objectId,
+            string label,
+            float score,
+            float x,
+            float y,
+            float z,
+            float depthM)
+        {
+            ObjectId = objectId;
+            Label = label ?? string.Empty;
+            Score = score;
+            X = x;
+            Y = y;
+            Z = z;
+            DepthM = depthM;
+        }
+    }
+
     public sealed class VisionFrameResultData
     {
         public int FrameId { get; }
@@ -95,6 +125,18 @@ namespace SmartRoom.Networking
             }
 
             return Values[(y * Width) + x] != 0;
+        }
+    }
+
+    public static class VisionLabelFormatting
+    {
+        public static string FormatLabel(string label, float score)
+        {
+            string safeLabel = string.IsNullOrWhiteSpace(label) ? "unknown" : label.Trim();
+            float safeScore = float.IsNaN(score) || float.IsInfinity(score) ? 0f : score;
+            return string.Create(
+                CultureInfo.InvariantCulture,
+                $"{safeLabel} {safeScore:0.00}");
         }
     }
 }
