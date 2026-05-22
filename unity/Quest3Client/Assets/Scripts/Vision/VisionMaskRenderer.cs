@@ -21,11 +21,12 @@ namespace SmartRoom.Vision
         private Material _lineMaterial;
         private VisionLineVertex[] _vertices = Array.Empty<VisionLineVertex>();
         private int _vertexCount;
+        private bool _gpuRenderingDisabled;
 
         public ComputeBuffer LineBuffer => _lineBuffer;
         public Material LineMaterial => _lineMaterial;
         public int VertexCount => _vertexCount;
-        public bool IsEnabled => renderConfig == null || renderConfig.enabled;
+        public bool IsEnabled => !_gpuRenderingDisabled && (renderConfig == null || renderConfig.enabled);
 
         private void Awake()
         {
@@ -109,11 +110,19 @@ namespace SmartRoom.Vision
                 return;
             }
 
-            _lineBuffer.SetData(_vertices, 0, 0, _vertexCount);
-            _lineMaterial.SetBuffer(LineVerticesPropertyId, _lineBuffer);
-            _lineMaterial.SetFloat(LineWidthPropertyId, Mathf.Max(1f, lineWidthPixels));
-            _lineMaterial.SetFloat(DepthOffsetPropertyId, depthOffsetMeters);
-            _lineMaterial.SetFloat(AlphaPropertyId, alpha);
+            try
+            {
+                _lineBuffer.SetData(_vertices, 0, 0, _vertexCount);
+                _lineMaterial.SetBuffer(LineVerticesPropertyId, _lineBuffer);
+                _lineMaterial.SetFloat(LineWidthPropertyId, Mathf.Max(1f, lineWidthPixels));
+                _lineMaterial.SetFloat(DepthOffsetPropertyId, depthOffsetMeters);
+                _lineMaterial.SetFloat(AlphaPropertyId, alpha);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"Failed to upload vision mask vertices for this frame: {ex}");
+                _vertexCount = 0;
+            }
         }
 
         private void EnsureMaterial()
@@ -137,6 +146,11 @@ namespace SmartRoom.Vision
 
         private void EnsureBufferCapacity(int requiredVertexCapacity)
         {
+            if (_gpuRenderingDisabled)
+            {
+                return;
+            }
+
             int safeCapacity = Mathf.Max(requiredVertexCapacity, 2);
             if (_vertices.Length < safeCapacity)
             {
@@ -153,7 +167,19 @@ namespace SmartRoom.Vision
                 _lineBuffer.Release();
             }
 
-            _lineBuffer = new ComputeBuffer(safeCapacity, 16, ComputeBufferType.Structured);
+            try
+            {
+                _lineBuffer = new ComputeBuffer(safeCapacity, 16, ComputeBufferType.Structured);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"Failed to allocate vision mask buffer: {ex}");
+                _lineBuffer = null;
+                _vertexCount = 0;
+                _gpuRenderingDisabled = true;
+                return;
+            }
+
             if (_lineMaterial != null)
             {
                 _lineMaterial.SetBuffer(LineVerticesPropertyId, _lineBuffer);

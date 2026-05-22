@@ -32,20 +32,31 @@ namespace SmartRoom.Rendering
         private Dictionary<int, int> _objectIdToSlot;
         private int[] _slotToObjectId;
         private int _activeCount;
+        private int _renderableCount;
         private bool _dirty;
+        private bool _gpuRenderingDisabled;
 
         public ComputeBuffer BboxBuffer => _bboxBuffer;
-        public int ActiveCount => _activeCount;
+        public int ActiveCount => _renderableCount;
 
         private void Awake()
         {
-            _bboxBuffer = new ComputeBuffer(MaxInstances, StrideBytes, ComputeBufferType.Structured);
             _data = new BboxWireframeInstance[MaxInstances];
             _objectIdToSlot = new Dictionary<int, int>(MaxInstances);
             _slotToObjectId = new int[MaxInstances];
             for (int i = 0; i < MaxInstances; i++)
             {
                 _slotToObjectId[i] = -1;
+            }
+
+            try
+            {
+                _bboxBuffer = new ComputeBuffer(MaxInstances, StrideBytes, ComputeBufferType.Structured);
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogError($"Failed to allocate bbox wireframe buffer: {ex}");
+                _gpuRenderingDisabled = true;
             }
         }
 
@@ -60,7 +71,7 @@ namespace SmartRoom.Rendering
 
         public void SetBboxData(int objectId, Vector3[] corners, Color color)
         {
-            if (corners == null || corners.Length < CornerCount)
+            if (_gpuRenderingDisabled || corners == null || corners.Length < CornerCount)
             {
                 return;
             }
@@ -99,6 +110,11 @@ namespace SmartRoom.Rendering
 
         public void RemoveBbox(int objectId)
         {
+            if (_gpuRenderingDisabled)
+            {
+                return;
+            }
+
             int slot;
             if (!_objectIdToSlot.TryGetValue(objectId, out slot))
             {
@@ -129,18 +145,36 @@ namespace SmartRoom.Rendering
             }
 
             _activeCount = 0;
+            _renderableCount = 0;
             _dirty = true;
         }
 
         private void LateUpdate()
         {
-            if (!_dirty || _activeCount == 0)
+            if (_gpuRenderingDisabled || !_dirty)
             {
                 return;
             }
 
-            _bboxBuffer.SetData(_data, 0, 0, _activeCount);
-            _dirty = false;
+            if (_activeCount == 0)
+            {
+                _renderableCount = 0;
+                _dirty = false;
+                return;
+            }
+
+            try
+            {
+                _bboxBuffer.SetData(_data, 0, 0, _activeCount);
+                _renderableCount = _activeCount;
+                _dirty = false;
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogError($"Failed to upload bbox wireframe data for this frame: {ex}");
+                _renderableCount = 0;
+                _dirty = false;
+            }
         }
     }
 }
