@@ -24,8 +24,7 @@ MonoBehaviour:
     probeSamplingDebugMesh: {fileID: -3555484719484374845, guid: 57d7c4c16e2765b47a4d2069b311bffe, type: 3}
     probeSamplingDebugTexture: {fileID: 2800000, guid: 24ec0e140fb444a44ab96ee80844e18e, type: 3}
     probeVolumeBlendStatesCS: {fileID: 7200000, guid: b9a23f869c4fd45f19c5ada54dd82176, type: 3}
-  m_RendererFeatures:
-  - {fileID: 3103950843457749454}
+  m_RendererFeatures: []
   m_RendererFeatureMap: 
   m_UseNativeRenderPass: 1
   xrSystemData: {fileID: 0}
@@ -55,35 +54,3 @@ MonoBehaviour:
   m_DepthTextureFormat: 0
   m_AccurateGbufferNormals: 0
   m_IntermediateTextureMode: 0
---- !u!114 &2746023457874831031
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 0}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 9d9bf5747f4e4b09b3ab6570bfe8bc10, type: 3}
-  m_Name: VisionRendererFeature
-  m_EditorClassIdentifier: Assembly-CSharp::SmartRoom.Vision.VisionRendererFeature
-  m_Active: 1
-  bboxRenderer: {fileID: 0}
-  maskRenderer: {fileID: 0}
-  passEvent: 500
---- !u!114 &3103950843457749454
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 0}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 9d9bf5747f4e4b09b3ab6570bfe8bc10, type: 3}
-  m_Name: VisionRendererFeature
-  m_EditorClassIdentifier: Assembly-CSharp::SmartRoom.Vision.VisionRendererFeature
-  m_Active: 1
-  bboxRenderer: {fileID: 0}
-  maskRenderer: {fileID: 0}
-  passEvent: 500
