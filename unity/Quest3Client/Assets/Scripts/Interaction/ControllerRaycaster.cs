@@ -33,23 +33,16 @@ namespace SmartRoom.Interaction
 
         private void Awake()
         {
+            // controllerAnchor must be assigned via Inspector (drag RightControllerAnchor here).
+            // If not assigned, try to find by name in scene.
             if (controllerAnchor == null)
             {
-                // Auto-detect: find RightControllerAnchor in OVRCameraRig hierarchy
-                var rig = FindFirstObjectByType<OVRCameraRig>();
-                if (rig != null)
-                {
-                    var tracking = rig.transform.Find("TrackingSpace");
-                    if (tracking != null)
-                    {
-                        controllerAnchor = tracking.Find("RightControllerAnchor");
-                    }
-                }
+                var found = GameObject.Find("RightControllerAnchor");
+                if (found != null) controllerAnchor = found.transform;
             }
 
             if (headAnchor == null)
             {
-                // Try Camera.main or CenterEyeAnchor
                 var mainCam = Camera.main;
                 headAnchor = mainCam != null ? mainCam.transform : transform;
             }

@@ -1,5 +1,7 @@
 using System;
+using SmartRoom.Networking;
 using UnityEngine;
+using UnityEngine.XR;
 
 namespace SmartRoom.Interaction
 {
@@ -18,8 +20,6 @@ namespace SmartRoom.Interaction
         [SerializeField] private RgbStreamModule rgbStreamModule;
 
         [Header("Input")]
-        [SerializeField] private OVRInput.Button grabButton = OVRInput.Button.PrimaryIndexTrigger;
-        [SerializeField] private OVRInput.Controller grabController = OVRInput.Controller.RTouch;
         [SerializeField] private float grabCooldownSeconds = 0.5f;
 
         [Header("Grab Settings")]
@@ -37,6 +37,8 @@ namespace SmartRoom.Interaction
         // For now, the message is sent and can be consumed via BackendCommunicationManager's events.
 
         private float _lastGrabTime;
+        private InputDevice _rightController;
+        private bool _prevTriggerPressed;
 
         private void Awake()
         {
@@ -54,17 +56,20 @@ namespace SmartRoom.Interaction
 
             if (rgbStreamModule == null)
                 rgbStreamModule = FindFirstObjectByType<RgbStreamModule>();
+
+            _rightController = InputDevices.GetDeviceAtXRNode(XRNode.RightHand);
         }
 
         private void Update()
         {
             if (Time.time - _lastGrabTime < grabCooldownSeconds) return;
 
-            // Check trigger press
-            if (OVRInput.GetDown(grabButton, grabController))
+            _rightController.TryGetFeatureValue(CommonUsages.triggerButton, out bool triggerPressed);
+            if (triggerPressed && !_prevTriggerPressed)
             {
                 TryGrab();
             }
+            _prevTriggerPressed = triggerPressed;
         }
 
         public bool TryGrab()

@@ -1,4 +1,5 @@
 using Meta.XR;
+using SmartRoom.Networking;
 using UnityEngine;
 
 namespace SmartRoom.Scanning

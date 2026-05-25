@@ -19,7 +19,6 @@ namespace SmartRoom.Interaction
         [SerializeField] private float baseRadius = 0.02f; // 2cm
         [SerializeField] private Color hitColor = Color.green;
         [SerializeField] private Color missColor = Color.red;
-        [SerializeField] private Color outOfFrustumColor = Color.yellow;
 
         [Header("Ray Settings")]
         [SerializeField] private float maxDistance = 10f;
@@ -29,7 +28,6 @@ namespace SmartRoom.Interaction
         public Vector3 HitPoint { get; private set; }
         public Vector3 HitNormal { get; private set; }
         public float HitDistance { get; private set; }
-        public EnvironmentRaycastHitStatus HitStatus { get; private set; }
         public GameObject CursorInstance { get; private set; }
 
         public event System.Action<bool, Vector3, Vector3> OnHitChanged;
@@ -117,30 +115,21 @@ namespace SmartRoom.Interaction
 
             bool wasHitting = IsHitting;
 
+            // EnvironmentRaycastManager.Raycast returns true if it hit a depth surface
             if (raycastManager.Raycast(ray, out var hit, maxDistance))
             {
-                // 命中深度表面
                 HitPoint = hit.point;
                 HitNormal = hit.normal;
                 HitDistance = hit.distance;
-                HitStatus = hit.status;
                 IsHitting = true;
 
                 CursorInstance.transform.position = hit.point;
-                // Align to surface normal (rotate so sphere "flat face" points along normal)
                 if (hit.normal != Vector3.zero)
                 {
                     CursorInstance.transform.rotation = Quaternion.LookRotation(hit.normal, Vector3.up);
                 }
 
-                // Color based on status
-                if (hit.status == EnvironmentRaycastHitStatus.Hit)
-                    _cursorMaterial?.SetColor(ColorId, hitColor);
-                else if (hit.status == EnvironmentRaycastHitStatus.HitPointOutsideOfCameraFrustum)
-                    _cursorMaterial?.SetColor(ColorId, outOfFrustumColor);
-                else
-                    _cursorMaterial?.SetColor(ColorId, missColor);
-
+                _cursorMaterial?.SetColor(ColorId, hitColor);
                 CursorInstance.SetActive(true);
             }
             else
@@ -149,16 +138,14 @@ namespace SmartRoom.Interaction
                 HitPoint = ray.origin + ray.direction * maxDistance;
                 HitNormal = Vector3.up;
                 HitDistance = maxDistance;
-                HitStatus = EnvironmentRaycastHitStatus.NoHit;
                 IsHitting = false;
 
                 CursorInstance.transform.position = HitPoint;
                 CursorInstance.transform.rotation = Quaternion.identity;
                 _cursorMaterial?.SetColor(ColorId, missColor);
-                CursorInstance.SetActive(true); // Still visible for aiming feedback
+                CursorInstance.SetActive(true);
             }
 
-            // 仅在命中状态变化时触发事件
             if (wasHitting != IsHitting)
             {
                 OnHitChanged?.Invoke(IsHitting, HitPoint, HitNormal);
