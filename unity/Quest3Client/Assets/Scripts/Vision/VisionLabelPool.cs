@@ -22,15 +22,9 @@ namespace SmartRoom.Vision
         [SerializeField] private Color labelOutlineColor = new Color(0f, 0f, 0f, 0.85f);
         [SerializeField, Range(0f, 1f)] private float labelOutlineWidth = 0.2f;
 
+        private GameObject _staticRoot;
         private PooledLabel[] _pool = Array.Empty<PooledLabel>();
         private int _activeCount;
-
-        public int Capacity => _pool.Length;
-
-        private void Awake()
-        {
-            EnsurePool();
-        }
 
         public void SetLabelCamera(Camera camera)
         {
@@ -50,9 +44,7 @@ namespace SmartRoom.Vision
             for (int index = 0; index < count; index++)
             {
                 if (!TryAcquire(objects[index]))
-                {
                     break;
-                }
             }
         }
 
@@ -61,17 +53,33 @@ namespace SmartRoom.Vision
             ReleaseAll();
         }
 
-        public void UpdateBillboards()
+        public void UpdateBillboards(Camera camera)
         {
-            BillboardActiveLabels();
+            if (camera == null) return;
+
+            // Re-verify canvas is on static root every call (defense against prefab reparenting)
+            EnsureStaticRoot();
+
+            if (worldSpaceLabelCanvas != null)
+            {
+                worldSpaceLabelCanvas.worldCamera = camera;
+                worldSpaceLabelCanvas.renderMode = RenderMode.WorldSpace;
+            }
+
+            for (int index = 0; index < _activeCount; index++)
+            {
+                Transform t = _pool[index].Transform;
+                if (t != null)
+                {
+                    t.LookAt(t.position + camera.transform.forward, camera.transform.up);
+                }
+            }
         }
 
         private bool TryAcquire(VisionObjectProcessedData processedObject)
         {
             if (_activeCount >= _pool.Length || processedObject == null || !processedObject.CenterValid)
-            {
                 return false;
-            }
 
             ref PooledLabel pooledLabel = ref _pool[_activeCount++];
             pooledLabel.Transform.position = processedObject.Center3D + ResolveLabelOffset();
@@ -86,26 +94,23 @@ namespace SmartRoom.Vision
             {
                 _pool[index].GameObject.SetActive(false);
             }
-
             _activeCount = 0;
         }
 
         private void EnsurePool()
         {
-            if (_pool.Length > 0)
-            {
-                return;
-            }
+            if (_pool.Length > 0) return;
 
             EnsureWorldSpaceCanvas();
+            EnsureStaticRoot();
 
             int targetCapacity = ResolvePoolCapacity();
             _pool = new PooledLabel[targetCapacity];
-            _activeCount = 0;
 
             for (int index = 0; index < targetCapacity; index++)
             {
-                var labelObject = new GameObject($"VisionLabel_{index}", typeof(RectTransform), typeof(CanvasRenderer), typeof(TextMeshProUGUI));
+                var labelObject = new GameObject($"VisionLabel_{index}",
+                    typeof(RectTransform), typeof(CanvasRenderer), typeof(TextMeshProUGUI));
                 labelObject.transform.SetParent(worldSpaceLabelCanvas.transform, false);
                 var rectTransform = (RectTransform)labelObject.transform;
                 rectTransform.sizeDelta = labelSize;
@@ -128,6 +133,23 @@ namespace SmartRoom.Vision
             }
         }
 
+        private void EnsureStaticRoot()
+        {
+            if (_staticRoot != null) return;
+
+            _staticRoot = GameObject.Find("VisionStaticRoot");
+            if (_staticRoot == null)
+            {
+                _staticRoot = new GameObject("VisionStaticRoot");
+                _staticRoot.hideFlags = HideFlags.HideAndDontSave;
+            }
+
+            // Detach from any moving parent and place at world origin
+            worldSpaceLabelCanvas.transform.SetParent(_staticRoot.transform, false);
+            worldSpaceLabelCanvas.transform.localPosition = Vector3.zero;
+            worldSpaceLabelCanvas.transform.localRotation = Quaternion.identity;
+        }
+
         private void EnsureWorldSpaceCanvas()
         {
             if (worldSpaceLabelCanvas != null)
@@ -137,7 +159,8 @@ namespace SmartRoom.Vision
                 return;
             }
 
-            var canvasObject = new GameObject("VisionLabelCanvas", typeof(RectTransform), typeof(Canvas), typeof(CanvasScaler), typeof(GraphicRaycaster));
+            var canvasObject = new GameObject("VisionLabelCanvas",
+                typeof(RectTransform), typeof(Canvas), typeof(CanvasScaler), typeof(GraphicRaycaster));
             canvasObject.transform.SetParent(transform, false);
 
             worldSpaceLabelCanvas = canvasObject.GetComponent<Canvas>();
@@ -153,36 +176,9 @@ namespace SmartRoom.Vision
             scaler.referencePixelsPerUnit = 100f;
         }
 
-        private void BillboardActiveLabels()
-        {
-            if (labelCamera == null)
-            {
-                return;
-            }
-
-            if (worldSpaceLabelCanvas != null)
-            {
-                worldSpaceLabelCanvas.worldCamera = labelCamera;
-            }
-
-            Transform cameraTransform = labelCamera.transform;
-            for (int index = 0; index < _activeCount; index++)
-            {
-                PooledLabel pooledLabel = _pool[index];
-                pooledLabel.Transform.LookAt(
-                    pooledLabel.Transform.position + cameraTransform.rotation * Vector3.forward,
-                    cameraTransform.rotation * Vector3.up);
-            }
-        }
-
         private Vector3 ResolveLabelOffset()
         {
-            if (renderConfig != null)
-            {
-                return renderConfig.labelOffset;
-            }
-
-            return new Vector3(0f, 0.05f, 0f);
+            return renderConfig != null ? renderConfig.labelOffset : new Vector3(0f, 0.05f, 0f);
         }
 
         private int ResolvePoolCapacity()
