@@ -1,6 +1,8 @@
 using System;
 using UnityEngine;
 
+#nullable enable
+
 namespace SmartRoom.Vision
 {
     public static class VisionObjectColorTable

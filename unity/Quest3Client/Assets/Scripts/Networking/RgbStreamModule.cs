@@ -11,6 +11,8 @@ namespace SmartRoom.Networking
         [SerializeField] private PassthroughCameraAccess passthroughCameraAccess;
         [SerializeField] private int outputWidth = 640;
         [SerializeField] private int outputHeight = 360;
+        public int LatestFrameWidth => outputWidth;
+        public int LatestFrameHeight => outputHeight;
         [SerializeField] private int jpegQuality = 65;
         [SerializeField] private int targetFrameRateHz = 60;
         [SerializeField] private bool clampToPcaMaxFramerate = true;

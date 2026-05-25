@@ -2,6 +2,8 @@ using System;
 using System.Collections.Concurrent;
 using UnityEngine;
 
+#nullable enable
+
 namespace SmartRoom.Networking
 {
     public sealed class VisionMessageParser

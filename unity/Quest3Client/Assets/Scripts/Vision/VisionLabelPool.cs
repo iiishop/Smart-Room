@@ -121,7 +121,7 @@ namespace SmartRoom.Vision
                 text.fontSize = labelFontSize;
                 text.color = labelTextColor;
                 text.alignment = TextAlignmentOptions.Center;
-                text.enableWordWrapping = false;
+                text.textWrappingMode = TMPro.TextWrappingModes.NoWrap;
                 text.overflowMode = TextOverflowModes.Overflow;
                 text.outlineColor = labelOutlineColor;
                 text.outlineWidth = labelOutlineWidth;

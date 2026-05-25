@@ -36,6 +36,11 @@ namespace SmartRoom.Networking
         private int _latestDepthWidth;
         private int _latestDepthHeight;
         private bool _loggedEnvironmentRaycastFallback;
+
+        // Public read-only access for external consumers (DepthFrameSampler, etc.)
+        public float[] LatestDepthMeters => _latestDepthMeters;
+        public int LatestDepthWidth => _latestDepthWidth;
+        public int LatestDepthHeight => _latestDepthHeight;
         private EnvironmentRaycastManagerProvider _environmentRaycastProvider;
 
         private const string RawDepthGlobal = "_EnvironmentDepthTexture";
