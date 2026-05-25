@@ -39,9 +39,6 @@ namespace SmartRoom.Networking
         [SerializeField] private float maxDistanceMeters = 10f;
         [SerializeField] private LayerMask raycastLayerMask = ~0;
 
-        private bool _loggedRaySource;
-        private bool _loggedPassthroughFallback;
-
         private void Awake()
         {
             if (manager == null)
@@ -163,47 +160,26 @@ namespace SmartRoom.Networking
 
         private bool TryGetViewportRay(float u, float v, out Ray ray, out Transform rayTransform)
         {
-            if (PassthroughRayResolver.TryGetViewportRay(
-                passthroughCameraAccess,
-                rayCamera,
-                u,
-                v,
-                out ray,
-                out rayTransform,
-                out string source,
-                out string warningMessage,
-                "raycast queries"))
-            {
-                if (!_loggedPassthroughFallback && !string.IsNullOrEmpty(warningMessage))
-                {
-                    _loggedPassthroughFallback = true;
-                    manager?.QueueUnityLog("WARNING", warningMessage);
-                }
+            ray = default;
+            rayTransform = null;
 
-                LogRaySourceOnce(source);
+            // Official PCA API (no reflection needed since MRUK v81+)
+            if (passthroughCameraAccess != null && passthroughCameraAccess.enabled && passthroughCameraAccess.IsPlaying)
+            {
+                ray = passthroughCameraAccess.ViewportPointToRay(new Vector2(u, v));
+                rayTransform = passthroughCameraAccess.transform;
                 return true;
             }
 
-            if (!_loggedPassthroughFallback && !string.IsNullOrEmpty(warningMessage))
+            // Fallback to Unity Camera
+            if (rayCamera != null)
             {
-                _loggedPassthroughFallback = true;
-                manager?.QueueUnityLog("WARNING", warningMessage);
+                ray = rayCamera.ViewportPointToRay(new Vector3(u, v, 0f));
+                rayTransform = rayCamera.transform;
+                return true;
             }
 
-            ray = default;
-            rayTransform = null;
             return false;
-        }
-
-        private void LogRaySourceOnce(string source)
-        {
-            if (_loggedRaySource)
-            {
-                return;
-            }
-
-            _loggedRaySource = true;
-            manager?.QueueUnityLog("INFO", $"RaycastQueryModule ray source: {source}");
         }
 
         private static string GetSurfaceLabel(Collider col)

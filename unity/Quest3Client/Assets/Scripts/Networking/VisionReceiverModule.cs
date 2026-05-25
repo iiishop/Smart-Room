@@ -41,10 +41,8 @@ namespace SmartRoom.Networking
         [SerializeField] private int maxObjectsPerFrame = 8;
         [SerializeField] private float bboxDepthOffsetMeters = 0.05f;
 
-        private bool _loggedRaySource;
-        private bool _loggedPassthroughFallback;
-        private readonly ConcurrentQueue<string> _pendingVisionMessages = new ConcurrentQueue<string>();
-        private readonly List<VisionWorldObject> _worldObjectsBuffer = new List<VisionWorldObject>(16);
+        private ConcurrentQueue<string> _pendingVisionMessages = new ConcurrentQueue<string>();
+        private List<VisionWorldObject> _worldObjectsBuffer = new List<VisionWorldObject>(16);
         private VisionWorldObject[] _latestWorldObjects = Array.Empty<VisionWorldObject>();
 
         public event Action<VisionWorldObject[]> WorldObjectsUpdated;
@@ -452,47 +450,26 @@ namespace SmartRoom.Networking
 
         private bool TryGetViewportRay(float u, float v, out Ray ray, out Transform rayTransform)
         {
-            if (PassthroughRayResolver.TryGetViewportRay(
-                passthroughCameraAccess,
-                rayCamera,
-                u,
-                v,
-                out ray,
-                out rayTransform,
-                out string source,
-                out string warningMessage,
-                "vision receiver"))
-            {
-                if (!_loggedPassthroughFallback && !string.IsNullOrEmpty(warningMessage))
-                {
-                    _loggedPassthroughFallback = true;
-                    manager?.QueueUnityLog("WARNING", warningMessage);
-                }
+            ray = default;
+            rayTransform = null;
 
-                LogRaySourceOnce(source);
+            // Official PCA API (no reflection needed since MRUK v81+)
+            if (passthroughCameraAccess != null && passthroughCameraAccess.enabled && passthroughCameraAccess.IsPlaying)
+            {
+                ray = passthroughCameraAccess.ViewportPointToRay(new Vector2(u, v));
+                rayTransform = passthroughCameraAccess.transform;
                 return true;
             }
 
-            if (!_loggedPassthroughFallback && !string.IsNullOrEmpty(warningMessage))
+            // Fallback to Unity Camera
+            if (rayCamera != null)
             {
-                _loggedPassthroughFallback = true;
-                manager?.QueueUnityLog("WARNING", warningMessage);
+                ray = rayCamera.ViewportPointToRay(new Vector3(u, v, 0f));
+                rayTransform = rayCamera.transform;
+                return true;
             }
 
-            ray = default;
-            rayTransform = null;
             return false;
-        }
-
-        private void LogRaySourceOnce(string source)
-        {
-            if (_loggedRaySource)
-            {
-                return;
-            }
-
-            _loggedRaySource = true;
-            manager?.QueueUnityLog("INFO", $"VisionReceiverModule ray source: {source}");
         }
 
         private void PublishWorldObjects(VisionWorldObject[] worldObjects)
