@@ -1,5 +1,5 @@
 using Meta.XR;
-using Meta.XR.EnvironmentDepth;
+using Meta.XR.MRUtilityKit;
 using UnityEngine;
 
 namespace SmartRoom.Interaction
@@ -7,16 +7,19 @@ namespace SmartRoom.Interaction
     /// <summary>
     /// 深度锁定小球：接收 ControllerRaycaster 的射线，
     /// 用 EnvironmentRaycastManager 做深度碰撞，把小球吸附在真实物体表面。
-    /// 挂载：独立 GameObject（不挂在手柄下，因为小球位置是世界空间）
+    /// 
+    /// 挂载：独立 GameObject（不挂在手柄下）
+    /// 要求：Inspector 中拖入 cursorMaterial（必须，防止 IL2CPP strip 导致粉色错误材质）
+    ///       创建子 GameObject "CursorSphere" 作为视觉小球。
     /// </summary>
     public sealed class DepthCursor : MonoBehaviour
     {
         [Header("References")]
         [SerializeField] private EnvironmentRaycastManager raycastManager;
         [SerializeField] private ControllerRaycaster controllerRaycaster;
+        [SerializeField] private Material cursorMaterial;
 
         [Header("Cursor Visuals")]
-        [SerializeField] private GameObject cursorPrefab;
         [SerializeField] private float baseRadius = 0.02f; // 2cm
         [SerializeField] private Color hitColor = Color.green;
         [SerializeField] private Color missColor = Color.red;
@@ -29,11 +32,13 @@ namespace SmartRoom.Interaction
         public Vector3 HitPoint { get; private set; }
         public Vector3 HitNormal { get; private set; }
         public float HitDistance { get; private set; }
-        public GameObject CursorInstance { get; private set; }
 
         public event System.Action<bool, Vector3, Vector3> OnHitChanged;
 
-        private Material _cursorMaterial;
+        private Transform _cursorTransform;
+        private MeshRenderer _cursorRenderer;
+        private Material _cursorMaterialInstance;
+        private static readonly int BaseColorId = Shader.PropertyToID("_BaseColor");
         private static readonly int ColorId = Shader.PropertyToID("_Color");
 
         private void Awake()
@@ -44,55 +49,43 @@ namespace SmartRoom.Interaction
             if (controllerRaycaster == null)
                 controllerRaycaster = FindFirstObjectByType<ControllerRaycaster>();
 
+            if (cursorMaterial == null)
+            {
+                Debug.LogError("[DepthCursor] cursorMaterial is required. Drag a URP/Unlit material in the Inspector. " +
+                               "Without it, IL2CPP builds will show a pink error sphere.");
+                enabled = false;
+                return;
+            }
+
             maxDistance = controllerRaycaster != null
                 ? controllerRaycaster.CurrentMaxDistance
                 : maxDistance;
 
-            InitializeCursor();
+            CreateCursor();
         }
 
-        private void InitializeCursor()
+        private void CreateCursor()
         {
-            if (cursorPrefab == null)
-            {
-                // Create a simple sphere if no prefab provided
-                CursorInstance = GameObject.CreatePrimitive(PrimitiveType.Sphere);
-                CursorInstance.name = "DepthCursor_Sphere";
-                CursorInstance.hideFlags = HideFlags.HideAndDontSave;
-                Destroy(CursorInstance.GetComponent<Collider>());
-            }
-            else
-            {
-                CursorInstance = Instantiate(cursorPrefab, transform);
-                CursorInstance.name = "DepthCursor_Sphere";
-            }
+            // --- Create sphere mesh ---
+            var sphereGo = new GameObject("CursorSphere");
+            sphereGo.transform.SetParent(transform);
+            sphereGo.transform.localPosition = Vector3.zero;
+            sphereGo.transform.localRotation = Quaternion.identity;
+            sphereGo.transform.localScale = Vector3.one * (baseRadius / 0.5f); // Unity default sphere radius = 0.5
 
-            // Scale the sphere to base radius (default Unity sphere has radius 0.5)
-            var sphereScale = baseRadius / 0.5f;
-            CursorInstance.transform.localScale = Vector3.one * sphereScale;
+            var mf = sphereGo.AddComponent<MeshFilter>();
+            mf.sharedMesh = CreateSphereMesh();
 
-            // Get or create material
-            var renderer = CursorInstance.GetComponent<Renderer>();
-            if (renderer != null)
-            {
-                _cursorMaterial = renderer.material;
-                // Ensure it's an instance so we can modify per-instance
-                if (!_cursorMaterial.name.Contains("(Instance)"))
-                {
-                    _cursorMaterial = new Material(_cursorMaterial);
-                    renderer.material = _cursorMaterial;
-                }
-            }
-            else
-            {
-                _cursorMaterial = new Material(Shader.Find("Universal Render Pipeline/Unlit"));
-                CursorInstance.AddComponent<MeshRenderer>().material = _cursorMaterial;
-            }
+            _cursorRenderer = sphereGo.AddComponent<MeshRenderer>();
+            _cursorMaterialInstance = new Material(cursorMaterial);
+            _cursorMaterialInstance.SetColor(BaseColorId, missColor);
+            _cursorMaterialInstance.SetColor(ColorId, missColor);
+            _cursorRenderer.sharedMaterial = _cursorMaterialInstance;
 
-            _cursorMaterial.SetColor(ColorId, missColor);
-            CursorInstance.SetActive(false);
+            _cursorTransform = sphereGo.transform;
+            sphereGo.SetActive(false);
 
-            Debug.Log("[DepthCursor] Initialized cursor sphere");
+            Debug.Log("[DepthCursor] Sphere created as child of " + gameObject.name);
         }
 
         private void OnEnable()
@@ -113,16 +106,14 @@ namespace SmartRoom.Interaction
         }
 
         /// <summary>
-        /// 核心方法：每帧调用，用深度射线更新小球位置。
-        /// 返回是否命中深度表面。
+        /// 每帧用深度射线更新小球位置。返回是否命中深度表面。
         /// </summary>
         public bool UpdateCursor(Ray ray)
         {
-            if (raycastManager == null || CursorInstance == null) return false;
+            if (raycastManager == null || _cursorTransform == null) return false;
 
             bool wasHitting = IsHitting;
 
-            // EnvironmentRaycastManager.Raycast returns true if it hit a depth surface
             if (raycastManager.Raycast(ray, out var hit, maxDistance))
             {
                 HitPoint = hit.point;
@@ -130,27 +121,26 @@ namespace SmartRoom.Interaction
                 HitDistance = Vector3.Distance(ray.origin, hit.point);
                 IsHitting = true;
 
-                CursorInstance.transform.position = hit.point;
+                _cursorTransform.position = hit.point;
                 if (hit.normal != Vector3.zero)
                 {
-                    CursorInstance.transform.rotation = Quaternion.LookRotation(hit.normal, Vector3.up);
+                    _cursorTransform.rotation = Quaternion.LookRotation(hit.normal, Vector3.up);
                 }
 
-                _cursorMaterial?.SetColor(ColorId, hitColor);
-                CursorInstance.SetActive(true);
+                SetCursorColor(hitColor);
+                _cursorTransform.gameObject.SetActive(true);
             }
             else
             {
-                // 未命中：小球浮动在射线最远端
                 HitPoint = ray.origin + ray.direction * maxDistance;
                 HitNormal = Vector3.up;
                 HitDistance = maxDistance;
                 IsHitting = false;
 
-                CursorInstance.transform.position = HitPoint;
-                CursorInstance.transform.rotation = Quaternion.identity;
-                _cursorMaterial?.SetColor(ColorId, missColor);
-                CursorInstance.SetActive(true);
+                _cursorTransform.position = HitPoint;
+                _cursorTransform.rotation = Quaternion.identity;
+                SetCursorColor(missColor);
+                _cursorTransform.gameObject.SetActive(true);
             }
 
             if (wasHitting != IsHitting)
@@ -161,40 +151,88 @@ namespace SmartRoom.Interaction
             return IsHitting;
         }
 
+        private void SetCursorColor(Color color)
+        {
+            if (_cursorMaterialInstance != null)
+            {
+                _cursorMaterialInstance.SetColor(BaseColorId, color);
+                _cursorMaterialInstance.SetColor(ColorId, color);
+            }
+        }
+
         public void Show()
         {
-            if (CursorInstance != null) CursorInstance.SetActive(true);
+            if (_cursorTransform != null) _cursorTransform.gameObject.SetActive(true);
         }
 
         public void Hide()
         {
-            if (CursorInstance != null) CursorInstance.SetActive(false);
+            if (_cursorTransform != null) _cursorTransform.gameObject.SetActive(false);
         }
 
-        /// <summary>
-        /// 返回当前命中点。未命中时返回射线末端点（用于调试）
-        /// </summary>
         public Vector3 GetHitPoint()
         {
             return HitPoint;
         }
 
-        private void Update()
-        {
-            // If not driven by event (e.g., no ControllerRaycaster), poll manually
-            if (controllerRaycaster == null || !controllerRaycaster.IsActive)
-            {
-                // Passive mode: just keep cursor where it is
-            }
-        }
-
         private void OnDestroy()
         {
-            if (CursorInstance != null)
+            if (_cursorMaterialInstance != null)
+                Destroy(_cursorMaterialInstance);
+        }
+
+        /// <summary>
+        /// 创建一个简单的 UV sphere mesh（不依赖 Unity 内置 Sphere primitive，
+        /// 避免 CreatePrimitive 在 build 中引入不必要的 collider 等）。
+        /// </summary>
+        private static Mesh CreateSphereMesh()
+        {
+            var mesh = new Mesh { name = "DepthCursorSphere" };
+            int segments = 16;
+            int rings = 12;
+            int vertCount = (segments + 1) * (rings + 1);
+            var verts = new Vector3[vertCount];
+            var uvs = new Vector2[vertCount];
+            var tris = new int[6 * segments * rings];
+
+            for (int ring = 0; ring <= rings; ring++)
             {
-                if (_cursorMaterial != null) Destroy(_cursorMaterial);
-                Destroy(CursorInstance);
+                float phi = Mathf.PI * ring / rings;
+                for (int seg = 0; seg <= segments; seg++)
+                {
+                    float theta = 2f * Mathf.PI * seg / segments;
+                    int i = ring * (segments + 1) + seg;
+                    verts[i] = new Vector3(
+                        Mathf.Sin(phi) * Mathf.Cos(theta),
+                        Mathf.Cos(phi),
+                        Mathf.Sin(phi) * Mathf.Sin(theta)
+                    );
+                    uvs[i] = new Vector2((float)seg / segments, (float)ring / rings);
+                }
             }
+
+            int ti = 0;
+            for (int ring = 0; ring < rings; ring++)
+            {
+                for (int seg = 0; seg < segments; seg++)
+                {
+                    int a = ring * (segments + 1) + seg;
+                    int b = a + segments + 1;
+                    tris[ti++] = a;
+                    tris[ti++] = b;
+                    tris[ti++] = a + 1;
+                    tris[ti++] = a + 1;
+                    tris[ti++] = b;
+                    tris[ti++] = b + 1;
+                }
+            }
+
+            mesh.vertices = verts;
+            mesh.uv = uvs;
+            mesh.triangles = tris;
+            mesh.RecalculateNormals();
+            mesh.RecalculateBounds();
+            return mesh;
         }
     }
 }

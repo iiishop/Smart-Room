@@ -1,14 +1,16 @@
 using System;
 using SmartRoom.Networking;
 using UnityEngine;
-using UnityEngine.XR;
 
 namespace SmartRoom.Interaction
 {
     /// <summary>
-    /// 编排层：监听扳机输入，串联 ControllerRaycaster → DepthCursor → PixelProjector，
-    /// 在用户扣下扳机时：冻结当前 3D 点 → 投影到 2D 像素 → 发送 point prompt 给 Python SAM。
+    /// 编排层：监听右手柄扳机输入，串联 ControllerRaycaster → DepthCursor → PixelProjector，
+    /// 在用户扣下扳机时：取 3D 命中点 → 投影到 PCA 像素 → 发送 point prompt JSON 给 Python 后端。
+    /// 
     /// 挂载：独立 GameObject（ObjectGrabberRoot）
+    /// 
+    /// 输入：使用 OVRInput（Meta XR SDK），对应右手柄食指扳机。
     /// </summary>
     public sealed class ObjectGrabber : MonoBehaviour
     {
@@ -33,11 +35,8 @@ namespace SmartRoom.Interaction
 
         public event Action<Vector3, Vector2Int> OnGrabStarted;
         public event Action<string> OnGrabFailed;
-        // Note: OnSegmentationComplete will be wired when Python backend supports point prompts.
-        // For now, the message is sent and can be consumed via BackendCommunicationManager's events.
 
         private float _lastGrabTime;
-        private InputDevice _rightController;
         private bool _prevTriggerPressed;
 
         private void Awake()
@@ -56,15 +55,15 @@ namespace SmartRoom.Interaction
 
             if (rgbStreamModule == null)
                 rgbStreamModule = FindFirstObjectByType<RgbStreamModule>();
-
-            _rightController = InputDevices.GetDeviceAtXRNode(XRNode.RightHand);
         }
 
         private void Update()
         {
             if (Time.time - _lastGrabTime < grabCooldownSeconds) return;
 
-            _rightController.TryGetFeatureValue(CommonUsages.triggerButton, out bool triggerPressed);
+            // OVRInput: Meta XR SDK v85 扳机输入
+            // OVRInput.RawButton.RIndexTrigger = 右手柄食指扳机
+            bool triggerPressed = OVRInput.Get(OVRInput.RawButton.RIndexTrigger);
             if (triggerPressed && !_prevTriggerPressed)
             {
                 TryGrab();
@@ -113,14 +112,10 @@ namespace SmartRoom.Interaction
             LastGrabValid = true;
             IsGrabbing = true;
 
-            // Debug log
             Debug.Log($"[ObjectGrabber] GRAB at world=({hitPoint.x:F2},{hitPoint.y:F2},{hitPoint.z:F2}) " +
                       $"pixel=({pixel.Value.x},{pixel.Value.y})");
 
-            // Fire event for subscribers (e.g., UI feedback, sound)
             OnGrabStarted?.Invoke(hitPoint, pixel.Value);
-
-            // Send point prompt to Python backend
             SendPointPrompt(pixel.Value.x, pixel.Value.y);
 
             IsGrabbing = false;
@@ -140,9 +135,9 @@ namespace SmartRoom.Interaction
                 type = "point_prompt",
                 x = px,
                 y = py,
-                label = 1, // 1 = foreground (positive point for SAM)
-                frame_width = rgbStreamModule != null ? rgbStreamModule.LatestFrameWidth : imageWidthHint,
-                frame_height = rgbStreamModule != null ? rgbStreamModule.LatestFrameHeight : imageHeightHint,
+                label = 1,
+                frame_width = rgbStreamModule != null ? rgbStreamModule.LatestFrameWidth : 640,
+                frame_height = rgbStreamModule != null ? rgbStreamModule.LatestFrameHeight : 480,
                 timestamp_ms = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
             };
 
@@ -150,9 +145,6 @@ namespace SmartRoom.Interaction
             backendManager.QueueControlJson(json);
             Debug.Log($"[ObjectGrabber] Sent point prompt: x={px} y={py}");
         }
-
-        private int imageWidthHint = 640;
-        private int imageHeightHint = 480;
 
         private void FailGrab(string reason)
         {
