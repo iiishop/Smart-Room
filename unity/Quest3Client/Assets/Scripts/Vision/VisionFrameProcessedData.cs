@@ -21,17 +21,19 @@ namespace SmartRoom.Vision
     {
         public VisionObjectProcessedData()
         {
-            Corners3D = Array.Empty<Vector3>();
-            Contour3D = Array.Empty<Vector3>();
+            Label = string.Empty;
         }
 
         public int ObjectId;
         public string Label;
         public float Score;
-        public Vector3[] Corners3D = Array.Empty<Vector3>();
         public Vector3 Center3D;
-        public Vector3[] Contour3D = Array.Empty<Vector3>();
-        public bool CornersValid;
         public bool CenterValid;
+        public float DepthMeters;   // distance from camera for dynamic worldScale
+
+        // Mask overlay data: size = [height, width], counts = RLE run lengths
+        public int MaskHeight;
+        public int MaskWidth;
+        public int[] MaskCounts;
     }
 }

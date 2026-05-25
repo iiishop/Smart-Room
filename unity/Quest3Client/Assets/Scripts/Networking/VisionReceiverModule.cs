@@ -3,7 +3,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Text;
 using Meta.XR;
-using SmartRoom.Rendering;
+
 using SmartRoom.Vision;
 using UnityEngine;
 
@@ -34,7 +34,6 @@ namespace SmartRoom.Networking
 
         [SerializeField] private BackendCommunicationManager manager;
         [SerializeField] private DepthStreamModule depthStreamModule;
-        [SerializeField] private BboxWireframeManager wireframeManager;
         [SerializeField] private Camera rayCamera;
         [SerializeField] private PassthroughCameraAccess passthroughCameraAccess;
         [SerializeField] private int samplesPerObject = 3;
@@ -71,11 +70,6 @@ namespace SmartRoom.Networking
             if (passthroughCameraAccess == null)
             {
                 passthroughCameraAccess = FindFirstObjectByType<PassthroughCameraAccess>();
-            }
-
-            if (wireframeManager == null)
-            {
-                wireframeManager = FindFirstObjectByType<BboxWireframeManager>();
             }
 
             samplesPerObject = Mathf.Clamp(samplesPerObject, 1, 16);
@@ -253,29 +247,6 @@ namespace SmartRoom.Networking
             Array.Copy(processedObjects, publishedObjects, processedCount);
             ObjectsProcessed?.Invoke(publishedObjects);
 
-            if (wireframeManager != null)
-            {
-                wireframeManager.ClearAll();
-                for (int wfIdx = 0; wfIdx < objectCount; wfIdx++)
-                {
-                    VisionTrackedMaskPayload wfMask = frame.objects[wfIdx];
-                    if (wfMask?.box_xyxy == null || wfMask.box_xyxy.Length != 4)
-                    {
-                        continue;
-                    }
-
-                    TryBuildBboxCorners(frame, wfMask, out Vector3[] eightCorners);
-                    if (eightCorners == null)
-                    {
-                        continue;
-                    }
-
-                    Color color = VisionObjectColorTable.GetColor(wfMask.object_id);
-                    wireframeManager.SetBboxData(wfMask.object_id, eightCorners, color);
-                }
-
-            }
-
             VisionWorldObject[] worldObjects = _worldObjectsBuffer.ToArray();
             PublishWorldObjects(worldObjects);
             EmitProcessedFrame(frame, worldObjects);
@@ -317,26 +288,25 @@ namespace SmartRoom.Networking
                 VisionWorldObject worldObject = worldObjects[index];
                 trackedObjectMap.TryGetValue(worldObject.ObjectId, out VisionTrackedMaskPayload trackedMask);
 
-                Vector3[] corners = Array.Empty<Vector3>();
-                bool cornersValid = trackedMask != null && TryBuildBboxCorners(frame, trackedMask, out corners);
-
-                Vector3[] contour = Array.Empty<Vector3>();
-                if (trackedMask != null)
-                {
-                    contour = BuildContourWorldPoints(frame, trackedMask);
-                }
-
                 processedObjects[index] = new VisionObjectProcessedData
                 {
                     ObjectId = worldObject.ObjectId,
                     Label = worldObject.Label,
                     Score = worldObject.Score,
-                    Corners3D = corners,
                     Center3D = worldObject.WorldPosition,
-                    Contour3D = contour,
-                    CornersValid = cornersValid,
-                    CenterValid = true
+                    CenterValid = true,
+                    DepthMeters = Vector3.Distance(
+                        rayCamera != null ? rayCamera.transform.position : Vector3.zero,
+                        worldObject.WorldPosition)
                 };
+
+                // Pass mask RLE for 2D overlay rendering
+                if (trackedMask?.mask_rle != null && trackedMask.mask_rle.size != null && trackedMask.mask_rle.size.Length >= 2)
+                {
+                    processedObjects[index].MaskHeight = trackedMask.mask_rle.size[0];
+                    processedObjects[index].MaskWidth = trackedMask.mask_rle.size[1];
+                    processedObjects[index].MaskCounts = trackedMask.mask_rle.counts ?? Array.Empty<int>();
+                }
             }
 
             processedFrame.Objects = processedObjects;

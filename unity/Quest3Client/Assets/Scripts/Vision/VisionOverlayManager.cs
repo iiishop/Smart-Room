@@ -6,16 +6,14 @@ namespace SmartRoom.Vision
     public sealed class VisionOverlayManager : MonoBehaviour
     {
         [SerializeField] private VisionReceiverModule receiverModule;
-        [SerializeField] private VisionBboxRenderer bboxRenderer;
-        [SerializeField] private VisionMaskRenderer maskRenderer;
+        [SerializeField] private VisionMaskOverlay maskOverlay;
         [SerializeField] private VisionLabelPool labelPool;
         [SerializeField] private Camera labelCamera;
 
         private void Awake()
         {
             receiverModule ??= FindFirstObjectByType<VisionReceiverModule>();
-            bboxRenderer ??= GetComponent<VisionBboxRenderer>();
-            maskRenderer ??= GetComponent<VisionMaskRenderer>();
+            maskOverlay ??= GetComponent<VisionMaskOverlay>();
             labelPool ??= GetComponent<VisionLabelPool>();
             labelCamera ??= Camera.main;
             labelPool?.SetLabelCamera(labelCamera);
@@ -36,14 +34,15 @@ namespace SmartRoom.Vision
                 receiverModule.OnFrameProcessed -= HandleFrameProcessed;
             }
 
-            bboxRenderer?.Clear();
-            maskRenderer?.Clear();
+            maskOverlay?.Clear();
             labelPool?.Clear();
         }
 
         private void LateUpdate()
         {
-            labelPool?.UpdateBillboards();
+            if (labelCamera == null) return;
+            maskOverlay?.UpdateBillboards(labelCamera);
+            labelPool?.UpdateBillboards(labelCamera);
         }
 
         private void HandleFrameProcessed(VisionFrameProcessedData frame)
@@ -52,8 +51,7 @@ namespace SmartRoom.Vision
                 ? frame.Objects
                 : System.Array.Empty<VisionObjectProcessedData>();
 
-            bboxRenderer?.UpdateBuffers(objects);
-            maskRenderer?.UpdateContours(objects);
+            maskOverlay?.SyncObjects(objects);
             labelPool?.SyncObjects(objects);
         }
     }
