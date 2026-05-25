@@ -1,3 +1,4 @@
+using Meta.XR;
 using Meta.XR.EnvironmentDepth;
 using UnityEngine;
 
