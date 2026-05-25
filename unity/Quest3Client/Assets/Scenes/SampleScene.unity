@@ -1570,6 +1570,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::SmartRoom.Networking.DepthStreamModule
   manager: {fileID: 1313628475}
   environmentDepthManager: {fileID: 570327737}
+  environmentRaycastManager: {fileID: 0}
   depthArraySliceShader: {fileID: 0}
   targetFrameRateHz: 10
   maxPixelsPerFrame: 19200
@@ -1591,6 +1592,7 @@ MonoBehaviour:
   manager: {fileID: 1313628475}
   depthStreamModule: {fileID: 1313628476}
   rayCamera: {fileID: 1000850322}
+  passthroughCameraAccess: {fileID: 0}
   fallbackToPhysicsRaycast: 0
   maxDistanceMeters: 10
   raycastLayerMask:
@@ -1613,7 +1615,9 @@ MonoBehaviour:
   rayCamera: {fileID: 1000850322}
   passthroughCameraAccess: {fileID: 462733173}
   samplesPerObject: 3
+  contourSamplesPerObject: 12
   maxObjectsPerFrame: 8
+  bboxDepthOffsetMeters: 0.05
 --- !u!1 &1359161931
 GameObject:
   m_ObjectHideFlags: 0
@@ -2357,9 +2361,8 @@ GameObject:
   m_Component:
   - component: {fileID: 2100000002}
   - component: {fileID: 2100000003}
-  - component: {fileID: 2100000004}
-  - component: {fileID: 2100000005}
   - component: {fileID: 2100000006}
+  - component: {fileID: 2100000007}
   m_Layer: 0
   m_Name: VisionOverlayRig
   m_TagString: Untagged
@@ -2395,45 +2398,9 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::SmartRoom.Vision.VisionOverlayManager
   receiverModule: {fileID: 1313628478}
-  bboxRenderer: {fileID: 2100000004}
-  maskRenderer: {fileID: 2100000005}
+  maskOverlay: {fileID: 2100000007}
   labelPool: {fileID: 2100000006}
   labelCamera: {fileID: 1000850322}
---- !u!114 &2100000004
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 2100000001}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 233727c3077e4272a1cad91d59607195, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: Assembly-CSharp::SmartRoom.Vision.VisionBboxRenderer
-  renderConfig: {fileID: 11400000, guid: 5d0e1f2a3b4c5d6e9f0a1b2c3d4e5f60, type: 2}
-  colorPalette: {fileID: 11400000, guid: 6e1f2a3b4c5d6e7f0a1b2c3d4e5f6071, type: 2}
-  lineShader: {fileID: 0}
-  lineWidthPixels: 2
-  alpha: 1
---- !u!114 &2100000005
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 2100000001}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: c74688b70e1a46aea3f1e86dc35ffb86, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: Assembly-CSharp::SmartRoom.Vision.VisionMaskRenderer
-  renderConfig: {fileID: 11400000, guid: 5d0e1f2a3b4c5d6e9f0a1b2c3d4e5f60, type: 2}
-  colorPalette: {fileID: 11400000, guid: 6e1f2a3b4c5d6e7f0a1b2c3d4e5f6071, type: 2}
-  lineShader: {fileID: 0}
-  lineWidthPixels: 2
-  depthOffsetMeters: 0.01
-  alpha: 0.85
 --- !u!114 &2100000006
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -2456,6 +2423,21 @@ MonoBehaviour:
   labelTextColor: {r: 1, g: 1, b: 1, a: 1}
   labelOutlineColor: {r: 0, g: 0, b: 0, a: 0.85}
   labelOutlineWidth: 0.2
+--- !u!114 &2100000007
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 2100000001}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 09225c1aa41367f45ba3962592a92849, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::SmartRoom.Vision.VisionMaskOverlay
+  maskShader: {fileID: 0}
+  alpha: 0.35
+  worldScale: 0.001
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0
