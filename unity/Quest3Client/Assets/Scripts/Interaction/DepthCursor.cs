@@ -98,17 +98,23 @@ namespace SmartRoom.Interaction
         private void OnEnable()
         {
             if (controllerRaycaster != null)
-                controllerRaycaster.OnRayUpdated += UpdateCursor;
+                controllerRaycaster.OnRayUpdated += HandleRayUpdated;
         }
 
         private void OnDisable()
         {
             if (controllerRaycaster != null)
-                controllerRaycaster.OnRayUpdated -= UpdateCursor;
+                controllerRaycaster.OnRayUpdated -= HandleRayUpdated;
+        }
+
+        private void HandleRayUpdated(Ray ray)
+        {
+            UpdateCursor(ray);
         }
 
         /// <summary>
-        /// 核心方法：每帧调用，用深度射线更新小球位置
+        /// 核心方法：每帧调用，用深度射线更新小球位置。
+        /// 返回是否命中深度表面。
         /// </summary>
         public bool UpdateCursor(Ray ray)
         {
@@ -121,7 +127,7 @@ namespace SmartRoom.Interaction
             {
                 HitPoint = hit.point;
                 HitNormal = hit.normal;
-                HitDistance = hit.distance;
+                HitDistance = Vector3.Distance(ray.origin, hit.point);
                 IsHitting = true;
 
                 CursorInstance.transform.position = hit.point;
