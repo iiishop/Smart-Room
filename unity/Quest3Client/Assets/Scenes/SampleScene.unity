@@ -2436,8 +2436,8 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::SmartRoom.Vision.VisionMaskOverlay
   maskShader: {fileID: 0}
+  passthroughCameraAccess: {fileID: 462733173}
   alpha: 0.35
-  worldScale: 0.001
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0
