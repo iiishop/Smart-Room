@@ -33,7 +33,7 @@ namespace SmartRoom.Interaction
         [SerializeField] private float targetSpacing = 0.015f; // target 3D Euclidean distance between points (meters)
 
         [Header("Rendering")]
-        [SerializeField] private float pointSize = 0.005f;
+        [SerializeField] private float pointSize = 0.012f; // larger for Gaussian billboard (soft edges look smaller)
         [SerializeField] private int maxPoints = 4096;
 
         [Header("Sphere Boundary Ring")]
@@ -44,7 +44,6 @@ namespace SmartRoom.Interaction
 
         // Internal
         private Material _probeMaterial;
-        private Mesh _quadMesh;
         private ComputeBuffer _pointBuffer;
         private readonly List<ProbePoint> _points = new List<ProbePoint>();
         private bool _wasActive;
@@ -77,7 +76,6 @@ namespace SmartRoom.Interaction
                 raycastManager = FindFirstObjectByType<EnvironmentRaycastManager>();
 
             InitializeMaterial();
-            CreateQuadMesh();
             CreateBoundaryRing();
 
             Debug.Log($"[DepthProbe] Awake — depthCursor={depthCursor != null} " +
@@ -87,40 +85,25 @@ namespace SmartRoom.Interaction
 
         private void InitializeMaterial()
         {
-            var shader = Shader.Find("SmartRoom/Scanning/DepthProbePoint");
+            var shader = Shader.Find("SmartRoom/Scanning/DepthProbeGaussian");
             if (shader == null)
             {
-                Debug.LogError("[DepthProbe] Shader 'SmartRoom/Scanning/DepthProbePoint' not found. " +
-                               "Ensure DepthProbePoint.shader is in AlwaysIncludedShaders.");
+                // Fallback to old shader
+                shader = Shader.Find("SmartRoom/Scanning/DepthProbePoint");
+            }
+            if (shader == null)
+            {
+                Debug.LogError("[DepthProbe] No probe shader found. " +
+                               "Ensure DepthProbeGaussian.shader is in AlwaysIncludedShaders.");
                 enabled = false;
                 return;
             }
             _probeMaterial = new Material(shader);
         }
 
-        private void CreateQuadMesh()
-        {
-            _quadMesh = new Mesh { name = "ProbePointQuad" };
-            _quadMesh.vertices = new[]
-            {
-                new Vector3(-0.5f, -0.5f, 0),
-                new Vector3( 0.5f, -0.5f, 0),
-                new Vector3( 0.5f,  0.5f, 0),
-                new Vector3(-0.5f,  0.5f, 0),
-            };
-            _quadMesh.uv = new[]
-            {
-                new Vector2(0, 0), new Vector2(1, 0),
-                new Vector2(1, 1), new Vector2(0, 1),
-            };
-            _quadMesh.triangles = new[] { 0, 1, 2, 0, 2, 3 };
-            _quadMesh.RecalculateBounds();
-        }
-
         private void OnDestroy()
         {
             ReleaseBuffer();
-            if (_quadMesh != null) Destroy(_quadMesh);
             if (_probeMaterial != null) Destroy(_probeMaterial);
             if (_ringObject != null) Destroy(_ringObject);
         }
@@ -209,11 +192,18 @@ namespace SmartRoom.Interaction
                     if (!raycastManager.Raycast(ray, out EnvironmentRaycastHit hit, maxDistance))
                         continue;
 
-                    // Sphere containment
-                    if ((hit.point - sphereCenter).sqrMagnitude > sphereRadiusSq)
+                    // Sphere containment + edge fade
+                    float distFromCenterSq = (hit.point - sphereCenter).sqrMagnitude;
+                    if (distFromCenterSq > sphereRadiusSq)
                         continue;
 
+                    float distFromCenter = Mathf.Sqrt(distFromCenterSq);
+                    float edgeT = 1.0f - Mathf.Clamp01(distFromCenter / sphereRadius);
+                    // Smoothstep for soft boundary: points near edge → smaller, more transparent
+                    float edgeFade = edgeT * edgeT; // quadratic falloff toward edge
+
                     Color color = ComputeAngleColor(hit.point, hit.normal, camPos);
+                    color.a = edgeFade;
 
                     _points.Add(new ProbePoint
                     {
@@ -265,7 +255,8 @@ namespace SmartRoom.Interaction
                 return;
             }
 
-            // Render
+            // Render with billboard shader via DrawProcedural
+            // 6 vertices per point (2 triangles = 1 camera-facing quad)
             ReleaseBuffer();
             _pointBuffer = new ComputeBuffer(_points.Count, sizeof(float) * 4);
             _pointBuffer.SetData(_points);
@@ -273,8 +264,10 @@ namespace SmartRoom.Interaction
             _probeMaterial.SetBuffer(ProbePointsId, _pointBuffer);
             _probeMaterial.SetFloat(PointSizeId, pointSize);
 
-            var bounds = new Bounds(sphereCenter, Vector3.one * sphereRadius * 2f);
-            Graphics.DrawMeshInstancedProcedural(_quadMesh, 0, _probeMaterial, bounds, _points.Count);
+            // DrawProcedural: vertex shader generates billboard quads from StructuredBuffer
+            Graphics.DrawProcedural(_probeMaterial,
+                new Bounds(sphereCenter, Vector3.one * sphereRadius * 2f),
+                MeshTopology.Triangles, 6 * _points.Count, 1);
 
             DiagLog($"rendered {_points.Count} pts (dropped {dropped}) — center=({sphereCenter.x:F2},{sphereCenter.y:F2},{sphereCenter.z:F2})");
         }
