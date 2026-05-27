@@ -44,6 +44,7 @@ namespace SmartRoom.Interaction
 
         // Internal
         private Material _probeMaterial;
+        private Mesh _quadMesh;
         private ComputeBuffer _pointBuffer;
         private readonly List<ProbePoint> _points = new List<ProbePoint>();
         private bool _wasActive;
@@ -76,6 +77,7 @@ namespace SmartRoom.Interaction
                 raycastManager = FindFirstObjectByType<EnvironmentRaycastManager>();
 
             InitializeMaterial();
+            CreateQuadMesh();
             CreateBoundaryRing();
 
             Debug.Log($"[DepthProbe] Awake — depthCursor={depthCursor != null} " +
@@ -85,20 +87,34 @@ namespace SmartRoom.Interaction
 
         private void InitializeMaterial()
         {
-            var shader = Shader.Find("SmartRoom/Scanning/DepthProbeGaussian");
+            var shader = Shader.Find("SmartRoom/Scanning/DepthProbeLit");
+            if (shader == null)
+                shader = Shader.Find("SmartRoom/Scanning/DepthProbePoint"); // fallback
             if (shader == null)
             {
-                // Fallback to old shader
-                shader = Shader.Find("SmartRoom/Scanning/DepthProbePoint");
-            }
-            if (shader == null)
-            {
-                Debug.LogError("[DepthProbe] No probe shader found. " +
-                               "Ensure DepthProbeGaussian.shader is in AlwaysIncludedShaders.");
+                Debug.LogError("[DepthProbe] No probe shader found.");
                 enabled = false;
                 return;
             }
             _probeMaterial = new Material(shader);
+            _probeMaterial.SetVector("_LightDir", new Vector4(0.5f, 0.8f, 0.3f, 0f));
+            _probeMaterial.SetFloat("_Ambient", 0.3f);
+        }
+
+        private void CreateQuadMesh()
+        {
+            _quadMesh = new Mesh { name = "ProbePointQuad" };
+            _quadMesh.vertices = new[]
+            {
+                new Vector3(-0.5f, -0.5f, 0), new Vector3( 0.5f, -0.5f, 0),
+                new Vector3( 0.5f,  0.5f, 0), new Vector3(-0.5f,  0.5f, 0),
+            };
+            _quadMesh.uv = new[]
+            {
+                new Vector2(0, 0), new Vector2(1, 0), new Vector2(1, 1), new Vector2(0, 1),
+            };
+            _quadMesh.triangles = new[] { 0, 1, 2, 0, 2, 3 };
+            _quadMesh.RecalculateBounds();
         }
 
         private void OnDestroy()
@@ -198,12 +214,14 @@ namespace SmartRoom.Interaction
                         continue;
 
                     float distFromCenter = Mathf.Sqrt(distFromCenterSq);
+                    // EDL-style: edge points get DARKER (not transparent)
+                    // Luminance = 1.0 at center, 0.2 at edge
                     float edgeT = 1.0f - Mathf.Clamp01(distFromCenter / sphereRadius);
-                    // Smoothstep for soft boundary: points near edge → smaller, more transparent
-                    float edgeFade = edgeT * edgeT; // quadratic falloff toward edge
+                    float luminance = 0.2f + 0.8f * (edgeT * edgeT); // smooth falloff
 
                     Color color = ComputeAngleColor(hit.point, hit.normal, camPos);
-                    color.a = edgeFade;
+                    // Encode luminance into alpha channel (shader multiplies RGB by alpha for darkness)
+                    color.a = luminance;
 
                     _points.Add(new ProbePoint
                     {
@@ -255,8 +273,7 @@ namespace SmartRoom.Interaction
                 return;
             }
 
-            // Render with billboard shader via DrawProcedural
-            // 6 vertices per point (2 triangles = 1 camera-facing quad)
+            // Render
             ReleaseBuffer();
             _pointBuffer = new ComputeBuffer(_points.Count, sizeof(float) * 4);
             _pointBuffer.SetData(_points);
@@ -264,10 +281,8 @@ namespace SmartRoom.Interaction
             _probeMaterial.SetBuffer(ProbePointsId, _pointBuffer);
             _probeMaterial.SetFloat(PointSizeId, pointSize);
 
-            // DrawProcedural: vertex shader generates billboard quads from StructuredBuffer
-            Graphics.DrawProcedural(_probeMaterial,
-                new Bounds(sphereCenter, Vector3.one * sphereRadius * 2f),
-                MeshTopology.Triangles, 6 * _points.Count, 1);
+            var bounds = new Bounds(sphereCenter, Vector3.one * sphereRadius * 2f);
+            Graphics.DrawMeshInstancedProcedural(_quadMesh, 0, _probeMaterial, bounds, _points.Count);
 
             DiagLog($"rendered {_points.Count} pts (dropped {dropped}) — center=({sphereCenter.x:F2},{sphereCenter.y:F2},{sphereCenter.z:F2})");
         }
@@ -359,21 +374,20 @@ namespace SmartRoom.Interaction
         }
 
         /// <summary>
-        /// Create a LineRenderer circle showing the sphere boundary at the cursor position.
-        /// Aligned to the surface normal so the ring sits on the surface plane.
+        /// 3D wireframe sphere: three orthogonal great circles.
+        /// Always looks spherical from any viewing angle — no dependency on surface normal.
         /// </summary>
         private void CreateBoundaryRing()
         {
             _ringObject = new GameObject("ProbeBoundaryRing");
             _ringObject.transform.SetParent(transform);
             _ringRenderer = _ringObject.AddComponent<LineRenderer>();
-            _ringRenderer.positionCount = ringSegments;
-            _ringRenderer.loop = true;
+            _ringRenderer.positionCount = ringSegments * 3;
+            _ringRenderer.loop = false;
             _ringRenderer.useWorldSpace = true;
             _ringRenderer.startWidth = ringWidth;
             _ringRenderer.endWidth = ringWidth;
 
-            // URP/Unlit for no lighting artifacts
             var shader = Shader.Find("Universal Render Pipeline/Unlit");
             if (shader == null) shader = Shader.Find("Unlit/Color");
             _ringRenderer.material = new Material(shader);
@@ -381,10 +395,6 @@ namespace SmartRoom.Interaction
             _ringRenderer.enabled = false;
         }
 
-        /// <summary>
-        /// Show/hide the boundary ring at a position, aligned to a surface normal.
-        /// Ring radius = sphereRadius * 0.95 (slightly inset from the probe edge).
-        /// </summary>
         private void UpdateBoundaryRing(bool visible, Vector3 center, Vector3 normal)
         {
             if (_ringRenderer == null || !showBoundaryRing) return;
@@ -396,26 +406,21 @@ namespace SmartRoom.Interaction
             }
 
             _ringRenderer.enabled = true;
-            float ringR = sphereRadius * 0.95f;
+            float r = sphereRadius * 0.95f;
 
-            // Compute ring plane basis vectors
-            Vector3 right, up;
-            if (Mathf.Abs(Vector3.Dot(normal, Vector3.up)) > 0.999f)
-            {
-                right = Vector3.right;
-                up = Vector3.forward;
-            }
-            else
-            {
-                right = Vector3.Cross(normal, Vector3.up).normalized;
-                up = Vector3.Cross(right, normal).normalized;
-            }
-
+            // Three orthogonal great circles
             for (int i = 0; i < ringSegments; i++)
             {
                 float angle = 2f * Mathf.PI * i / ringSegments;
-                Vector3 offset = right * (Mathf.Cos(angle) * ringR) + up * (Mathf.Sin(angle) * ringR);
-                _ringRenderer.SetPosition(i, center + offset);
+                float x = Mathf.Cos(angle) * r;
+                float y = Mathf.Sin(angle) * r;
+
+                // XY circle (flat on XY plane)
+                _ringRenderer.SetPosition(i, center + new Vector3(x, y, 0));
+                // XZ circle (flat on XZ plane)
+                _ringRenderer.SetPosition(ringSegments + i, center + new Vector3(x, 0, y));
+                // YZ circle (flat on YZ plane)
+                _ringRenderer.SetPosition(2 * ringSegments + i, center + new Vector3(0, x, y));
             }
         }
     }
