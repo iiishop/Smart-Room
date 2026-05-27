@@ -27,6 +27,11 @@ namespace SmartRoom.Interaction
         [Header("Ray Settings")]
         [SerializeField] private float maxDistance = 10f;
 
+        [Header("Smoothing")]
+        [SerializeField] private float positionSmoothSpeed = 20f;  // higher = snappier
+        [SerializeField] private int missToleranceFrames = 5;       // hold position for N frames before accepting miss
+        [SerializeField] private float colorSmoothSpeed = 8f;       // smooth color transitions
+
         // Runtime state
         public bool IsHitting { get; private set; }
         public Vector3 HitPoint { get; private set; }
@@ -40,6 +45,13 @@ namespace SmartRoom.Interaction
         private Material _cursorMaterialInstance;
         private static readonly int BaseColorId = Shader.PropertyToID("_BaseColor");
         private static readonly int ColorId = Shader.PropertyToID("_Color");
+
+        // Smoothing state
+        private Vector3 _smoothPosition;
+        private Vector3 _smoothNormal;
+        private Color _smoothColor;
+        private int _consecutiveMisses;
+        private bool _initialized;
 
         private void Awake()
         {
@@ -106,47 +118,85 @@ namespace SmartRoom.Interaction
         }
 
         /// <summary>
-        /// 每帧用深度射线更新小球位置。返回是否命中深度表面。
+        /// 时序平滑 + 丢失容忍的射线更新。
+        /// - 命中时：指数平滑位置，防止微小抖动
+        /// - 丢失时：保持最后位置 N 帧（容忍偶发 miss），超时后平滑收回到远端
+        /// - 颜色平滑过渡，无闪烁
         /// </summary>
         public bool UpdateCursor(Ray ray)
         {
             if (raycastManager == null || _cursorTransform == null) return false;
 
-            bool wasHitting = IsHitting;
+            bool rawHit = raycastManager.Raycast(ray, out var hit, maxDistance);
+            Vector3 targetPos;
+            Vector3 targetNormal;
+            Color targetColor;
+            bool targetHitting;
 
-            if (raycastManager.Raycast(ray, out var hit, maxDistance))
+            if (rawHit)
             {
-                HitPoint = hit.point;
-                HitNormal = hit.normal;
-                HitDistance = Vector3.Distance(ray.origin, hit.point);
-                IsHitting = true;
-
-                _cursorTransform.position = hit.point;
-                if (hit.normal != Vector3.zero)
-                {
-                    _cursorTransform.rotation = Quaternion.LookRotation(hit.normal, Vector3.up);
-                }
-
-                SetCursorColor(hitColor);
-                _cursorTransform.gameObject.SetActive(true);
+                targetPos = hit.point;
+                targetNormal = hit.normal != Vector3.zero ? hit.normal : Vector3.up;
+                targetColor = hitColor;
+                targetHitting = true;
+                _consecutiveMisses = 0;
             }
             else
             {
-                HitPoint = ray.origin + ray.direction * maxDistance;
-                HitNormal = Vector3.up;
-                HitDistance = maxDistance;
-                IsHitting = false;
-
-                _cursorTransform.position = HitPoint;
-                _cursorTransform.rotation = Quaternion.identity;
-                SetCursorColor(missColor);
-                _cursorTransform.gameObject.SetActive(true);
+                _consecutiveMisses++;
+                if (_consecutiveMisses <= missToleranceFrames && _initialized)
+                {
+                    // Hold last known position — tolerate brief misses
+                    targetPos = _smoothPosition;
+                    targetNormal = _smoothNormal;
+                    targetColor = _smoothColor;
+                    targetHitting = IsHitting; // maintain previous state
+                }
+                else
+                {
+                    // Real miss — move to far position
+                    targetPos = ray.origin + ray.direction * maxDistance;
+                    targetNormal = Vector3.up;
+                    targetColor = missColor;
+                    targetHitting = false;
+                }
             }
+
+            // Initialize on first frame
+            if (!_initialized)
+            {
+                _smoothPosition = targetPos;
+                _smoothNormal = targetNormal;
+                _smoothColor = targetColor;
+                _initialized = true;
+            }
+            else
+            {
+                // Exponential smoothing
+                float t = 1f - Mathf.Exp(-positionSmoothSpeed * Time.deltaTime);
+                _smoothPosition = Vector3.Lerp(_smoothPosition, targetPos, t);
+                _smoothNormal = Vector3.Slerp(_smoothNormal, targetNormal, t).normalized;
+            }
+
+            // Smooth color
+            _smoothColor = Color.Lerp(_smoothColor, targetColor, Mathf.Clamp01(colorSmoothSpeed * Time.deltaTime));
+
+            // Apply
+            bool wasHitting = IsHitting;
+            IsHitting = targetHitting;
+            HitPoint = _smoothPosition;
+            HitNormal = _smoothNormal;
+            HitDistance = Vector3.Distance(ray.origin, _smoothPosition);
+
+            _cursorTransform.position = _smoothPosition;
+            if (_smoothNormal != Vector3.zero)
+                _cursorTransform.rotation = Quaternion.LookRotation(_smoothNormal, Vector3.up);
+
+            SetCursorColor(_smoothColor);
+            _cursorTransform.gameObject.SetActive(true);
 
             if (wasHitting != IsHitting)
-            {
                 OnHitChanged?.Invoke(IsHitting, HitPoint, HitNormal);
-            }
 
             return IsHitting;
         }

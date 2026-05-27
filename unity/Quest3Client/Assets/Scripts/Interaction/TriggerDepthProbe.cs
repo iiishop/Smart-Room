@@ -36,12 +36,22 @@ namespace SmartRoom.Interaction
         [SerializeField] private float pointSize = 0.005f;
         [SerializeField] private int maxPoints = 4096;
 
+        [Header("Sphere Boundary Ring")]
+        [SerializeField] private bool showBoundaryRing = true;
+        [SerializeField] private Color ringColor = new Color(0.3f, 1f, 0.3f, 0.6f);
+        [SerializeField] private int ringSegments = 64;
+        [SerializeField] private float ringWidth = 0.002f;
+
         // Internal
         private Material _probeMaterial;
         private Mesh _quadMesh;
         private ComputeBuffer _pointBuffer;
         private readonly List<ProbePoint> _points = new List<ProbePoint>();
         private bool _wasActive;
+
+        // Boundary ring
+        private LineRenderer _ringRenderer;
+        private GameObject _ringObject;
 
         // Rate-limited diagnostic logging
         private float _lastDiagLogTime;
@@ -68,6 +78,7 @@ namespace SmartRoom.Interaction
 
             InitializeMaterial();
             CreateQuadMesh();
+            CreateBoundaryRing();
 
             Debug.Log($"[DepthProbe] Awake — depthCursor={depthCursor != null} " +
                       $"camera={xrCamera != null} raycastMgr={raycastManager != null} " +
@@ -111,6 +122,7 @@ namespace SmartRoom.Interaction
             ReleaseBuffer();
             if (_quadMesh != null) Destroy(_quadMesh);
             if (_probeMaterial != null) Destroy(_probeMaterial);
+            if (_ringObject != null) Destroy(_ringObject);
         }
 
         private void LateUpdate()
@@ -123,6 +135,7 @@ namespace SmartRoom.Interaction
                 {
                     _points.Clear();
                     ReleaseBuffer();
+                    UpdateBoundaryRing(false, Vector3.zero, Vector3.up);
                     _wasActive = false;
                 }
                 return;
@@ -149,6 +162,7 @@ namespace SmartRoom.Interaction
 
             Vector3 sphereCenter = depthCursor.GetHitPoint();
             Vector3 camPos = xrCamera.transform.position;
+            UpdateBoundaryRing(true, sphereCenter, depthCursor.HitNormal);
             float distToCenter = Vector3.Distance(sphereCenter, camPos);
 
             if (distToCenter > maxDistance)
@@ -349,6 +363,67 @@ namespace SmartRoom.Interaction
             if (Time.time - _lastDiagLogTime < DiagLogInterval) return;
             _lastDiagLogTime = Time.time;
             Debug.LogWarning($"[DepthProbe] {msg}");
+        }
+
+        /// <summary>
+        /// Create a LineRenderer circle showing the sphere boundary at the cursor position.
+        /// Aligned to the surface normal so the ring sits on the surface plane.
+        /// </summary>
+        private void CreateBoundaryRing()
+        {
+            _ringObject = new GameObject("ProbeBoundaryRing");
+            _ringObject.transform.SetParent(transform);
+            _ringRenderer = _ringObject.AddComponent<LineRenderer>();
+            _ringRenderer.positionCount = ringSegments;
+            _ringRenderer.loop = true;
+            _ringRenderer.useWorldSpace = true;
+            _ringRenderer.startWidth = ringWidth;
+            _ringRenderer.endWidth = ringWidth;
+
+            // URP/Unlit for no lighting artifacts
+            var shader = Shader.Find("Universal Render Pipeline/Unlit");
+            if (shader == null) shader = Shader.Find("Unlit/Color");
+            _ringRenderer.material = new Material(shader);
+            _ringRenderer.material.color = ringColor;
+            _ringRenderer.enabled = false;
+        }
+
+        /// <summary>
+        /// Show/hide the boundary ring at a position, aligned to a surface normal.
+        /// Ring radius = sphereRadius * 0.95 (slightly inset from the probe edge).
+        /// </summary>
+        private void UpdateBoundaryRing(bool visible, Vector3 center, Vector3 normal)
+        {
+            if (_ringRenderer == null || !showBoundaryRing) return;
+
+            if (!visible)
+            {
+                _ringRenderer.enabled = false;
+                return;
+            }
+
+            _ringRenderer.enabled = true;
+            float ringR = sphereRadius * 0.95f;
+
+            // Compute ring plane basis vectors
+            Vector3 right, up;
+            if (Mathf.Abs(Vector3.Dot(normal, Vector3.up)) > 0.999f)
+            {
+                right = Vector3.right;
+                up = Vector3.forward;
+            }
+            else
+            {
+                right = Vector3.Cross(normal, Vector3.up).normalized;
+                up = Vector3.Cross(right, normal).normalized;
+            }
+
+            for (int i = 0; i < ringSegments; i++)
+            {
+                float angle = 2f * Mathf.PI * i / ringSegments;
+                Vector3 offset = right * (Mathf.Cos(angle) * ringR) + up * (Mathf.Sin(angle) * ringR);
+                _ringRenderer.SetPosition(i, center + offset);
+            }
         }
     }
 }
