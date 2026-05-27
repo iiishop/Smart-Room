@@ -102,21 +102,34 @@ namespace SmartRoom.Interaction
             var pixel = pixelProjector.WorldToPixel(hitPoint);
             if (pixel == null)
             {
-                FailGrab("Target outside PCA camera frustum");
-                return false;
+                // PCA frustum check failed — log and continue anyway.
+                // TriggerDepthProbe only needs the world point; SAM pipeline is disabled.
+                Debug.LogWarning($"[ObjectGrabber] WorldToPixel returned null for hitPoint=({hitPoint.x:F2},{hitPoint.y:F2},{hitPoint.z:F2}). " +
+                                 "PCA camera frustum may be misaligned. Proceeding with depth probe only (no SAM prompt).");
+                // Don't return — still fire OnGrabStarted for depth probe
             }
 
             _lastGrabTime = Time.time;
             LastGrabWorldPoint = hitPoint;
-            LastGrabPixel = pixel.Value;
+            LastGrabPixel = pixel ?? new Vector2Int(-1, -1);
             LastGrabValid = true;
             IsGrabbing = true;
 
-            Debug.Log($"[ObjectGrabber] GRAB at world=({hitPoint.x:F2},{hitPoint.y:F2},{hitPoint.z:F2}) " +
-                      $"pixel=({pixel.Value.x},{pixel.Value.y})");
+            if (pixel != null)
+            {
+                Debug.Log($"[ObjectGrabber] GRAB at world=({hitPoint.x:F2},{hitPoint.y:F2},{hitPoint.z:F2}) " +
+                          $"pixel=({pixel.Value.x},{pixel.Value.y})");
+            }
+            else
+            {
+                Debug.Log($"[ObjectGrabber] GRAB at world=({hitPoint.x:F2},{hitPoint.y:F2},{hitPoint.z:F2}) " +
+                          "pixel=N/A (PCA frustum miss — depth probe only)");
+            }
 
-            OnGrabStarted?.Invoke(hitPoint, pixel.Value);
-            SendPointPrompt(pixel.Value.x, pixel.Value.y);
+            OnGrabStarted?.Invoke(hitPoint, pixel ?? Vector2Int.zero);
+
+            if (pixel != null)
+                SendPointPrompt(pixel.Value.x, pixel.Value.y);
 
             IsGrabbing = false;
             return true;
