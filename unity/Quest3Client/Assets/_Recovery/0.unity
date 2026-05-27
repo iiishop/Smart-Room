@@ -946,6 +946,8 @@ MonoBehaviour:
   minDotForColor: 0.1
   pointSize: 0.005
   maxPoints: 4096
+  nearColor: {r: 1, g: 0, b: 0, a: 1}
+  farColor: {r: 0, g: 0, b: 1, a: 1}
 --- !u!4 &888868698
 Transform:
   m_ObjectHideFlags: 0
