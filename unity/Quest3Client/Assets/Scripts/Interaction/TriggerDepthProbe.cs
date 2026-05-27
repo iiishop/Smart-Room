@@ -1,42 +1,51 @@
 using System.Collections.Generic;
 using Meta.XR;
-using SmartRoom.Networking;
+using Meta.XR.MRUtilityKit;
 using UnityEngine;
 
 namespace SmartRoom.Interaction
 {
     /// <summary>
-    /// 深度探针：扣扳机后，以命中点为中心 20cm 立方体范围内，
-    /// 采样深度帧，将所有表面点渲染为彩色点云（红=近，蓝=远）。
+    /// 深度探针 v2 — 基于 EnvironmentRaycastManager 的精确射线检测。
+    /// 参考 OpenQuestCapture 架构：从相机打密集射线，用 Meta SDK 原生 raycast 获取
+    /// 精确表面命中点 + 法线，无需 depth frame 采样和内参投影。
     /// 
-    /// 挂载：独立 GameObject
+    /// 交互：按住右手柄扳机 → 以 DepthCursor 为球心、sphereRadius 为半径的
+    /// 球体内，显示与深度表面重合的彩色点云。松开 → 消失。
+    /// 着色：表面角度（白=正对表面、鲜艳=斜掠角）。
+    /// 
+    /// 挂载：独立 GameObject（TriggerDepthProbeRoot）
     /// </summary>
     public sealed class TriggerDepthProbe : MonoBehaviour
     {
         [Header("References")]
-        [SerializeField] private ObjectGrabber objectGrabber;
         [SerializeField] private DepthCursor depthCursor;
-        [SerializeField] private DepthFrameSampler depthSampler;
-        [SerializeField] private PassthroughCameraAccess pca;
+        [SerializeField] private Camera xrCamera;
+        [SerializeField] private EnvironmentRaycastManager raycastManager;
 
-        [Header("Probe Settings")]
-        [SerializeField] private float boxSize = 0.2f;          // 20cm cube
-        [SerializeField] private float pointSize = 0.005f;      // 5mm per point
-        [SerializeField] private int subsampleStep = 2;         // sample every Nth pixel
-        [SerializeField] private float displayDuration = 5f;    // how long to show
+        [Header("Probe Shape")]
+        [SerializeField] private float sphereRadius = 0.2f;
+        [SerializeField] private float maxDistance = 10f;
+
+        [Header("Ray Density")]
+        [SerializeField] private int rayGrid = 60; // oversample: 60×60 max, then thin to uniform 3D spacing
+        [SerializeField] private int minGrid = 12;
+        [SerializeField] private float targetSpacing = 0.015f; // target 3D Euclidean distance between points (meters)
+
+        [Header("Rendering")]
+        [SerializeField] private float pointSize = 0.005f;
         [SerializeField] private int maxPoints = 4096;
 
-        [Header("Colors")]
-        [SerializeField] private Color nearColor = Color.red;
-        [SerializeField] private Color farColor = Color.blue;
-
+        // Internal
         private Material _probeMaterial;
         private Mesh _quadMesh;
         private ComputeBuffer _pointBuffer;
-        private List<ProbePoint> _points = new List<ProbePoint>();
-        private bool _active;
-        private float _activationTime;
-        private Bounds _renderBounds;
+        private readonly List<ProbePoint> _points = new List<ProbePoint>();
+        private bool _wasActive;
+
+        // Rate-limited diagnostic logging
+        private float _lastDiagLogTime;
+        private const float DiagLogInterval = 2f;
 
         private static readonly int ProbePointsId = Shader.PropertyToID("_ProbePoints");
         private static readonly int PointSizeId = Shader.PropertyToID("_PointSize");
@@ -48,23 +57,21 @@ namespace SmartRoom.Interaction
 
         private void Awake()
         {
-            if (objectGrabber == null)
-                objectGrabber = FindFirstObjectByType<ObjectGrabber>();
-
             if (depthCursor == null)
                 depthCursor = FindFirstObjectByType<DepthCursor>();
 
-            if (depthSampler == null)
-                depthSampler = FindFirstObjectByType<DepthFrameSampler>();
+            if (xrCamera == null)
+                xrCamera = Camera.main;
 
-            if (pca == null)
-                pca = FindFirstObjectByType<PassthroughCameraAccess>();
+            if (raycastManager == null)
+                raycastManager = FindFirstObjectByType<EnvironmentRaycastManager>();
 
             InitializeMaterial();
             CreateQuadMesh();
 
-            if (objectGrabber != null)
-                objectGrabber.OnGrabStarted += OnGrabStarted;
+            Debug.Log($"[DepthProbe] Awake — depthCursor={depthCursor != null} " +
+                      $"camera={xrCamera != null} raycastMgr={raycastManager != null} " +
+                      $"material={_probeMaterial != null} enabled={enabled}");
         }
 
         private void InitializeMaterial()
@@ -72,7 +79,7 @@ namespace SmartRoom.Interaction
             var shader = Shader.Find("SmartRoom/Scanning/DepthProbePoint");
             if (shader == null)
             {
-                Debug.LogError("[TriggerDepthProbe] Shader 'SmartRoom/Scanning/DepthProbePoint' not found. " +
+                Debug.LogError("[DepthProbe] Shader 'SmartRoom/Scanning/DepthProbePoint' not found. " +
                                "Ensure DepthProbePoint.shader is in AlwaysIncludedShaders.");
                 enabled = false;
                 return;
@@ -92,10 +99,8 @@ namespace SmartRoom.Interaction
             };
             _quadMesh.uv = new[]
             {
-                new Vector2(0, 0),
-                new Vector2(1, 0),
-                new Vector2(1, 1),
-                new Vector2(0, 1),
+                new Vector2(0, 0), new Vector2(1, 0),
+                new Vector2(1, 1), new Vector2(0, 1),
             };
             _quadMesh.triangles = new[] { 0, 1, 2, 0, 2, 3 };
             _quadMesh.RecalculateBounds();
@@ -103,157 +108,150 @@ namespace SmartRoom.Interaction
 
         private void OnDestroy()
         {
-            if (objectGrabber != null)
-                objectGrabber.OnGrabStarted -= OnGrabStarted;
-
             ReleaseBuffer();
             if (_quadMesh != null) Destroy(_quadMesh);
             if (_probeMaterial != null) Destroy(_probeMaterial);
         }
 
-        private void OnGrabStarted(Vector3 worldPoint, Vector2Int pixel)
-        {
-            ActivateProbe(worldPoint);
-        }
-
-        /// <summary>
-        /// 在指定世界坐标激活探针
-        /// </summary>
-        public void ActivateProbe(Vector3 worldCenter)
-        {
-            _active = true;
-            _activationTime = Time.time;
-            _renderBounds = new Bounds(worldCenter, Vector3.one * boxSize);
-            Debug.Log($"[TriggerDepthProbe] Activated at ({worldCenter.x:F2}, {worldCenter.y:F2}, {worldCenter.z:F2})");
-        }
-
         private void LateUpdate()
         {
-            if (!_active) return;
+            bool triggerHeld = OVRInput.Get(OVRInput.RawButton.RIndexTrigger);
 
-            if (Time.time - _activationTime > displayDuration)
+            if (!triggerHeld)
             {
-                Deactivate();
+                if (_wasActive)
+                {
+                    _points.Clear();
+                    ReleaseBuffer();
+                    _wasActive = false;
+                }
                 return;
             }
 
-            BuildProbePoints();
-            RenderProbePoints();
-        }
+            _wasActive = true;
 
-        private void BuildProbePoints()
-        {
-            if (depthSampler == null || !depthSampler.HasFrame || pca == null) return;
-
-            int dw = depthSampler.LayoutWidth;
-            int dh = depthSampler.LayoutHeight;
-            if (dw <= 0 || dh <= 0) return;
-
-            // Compute the 2D bounding box of the probe cube projected to screen UV
-            Vector3 center = _renderBounds.center;
-            Vector3 half = _renderBounds.extents;
-
-            // 8 corners of the box in world space
-            Vector3[] corners = new Vector3[8];
-            int ci = 0;
-            for (int ix = -1; ix <= 1; ix += 2)
-            for (int iy = -1; iy <= 1; iy += 2)
-            for (int iz = -1; iz <= 1; iz += 2)
-                corners[ci++] = center + new Vector3(ix * half.x, iy * half.y, iz * half.z);
-
-            // Project corners to UV, find min/max
-            float uMin = 1f, uMax = 0f, vMin = 1f, vMax = 0f;
-            int inFrustum = 0;
-            for (int i = 0; i < 8; i++)
+            // Validate state
+            if (depthCursor == null || !depthCursor.IsHitting)
             {
-                var local = pca.transform.InverseTransformPoint(corners[i]);
-                if (local.z <= 0f) continue; // behind camera
-
-                // Get UV from PCA — use the intrinsics
-                var intrinsics = pca.Intrinsics;
-                float xNorm = local.x / local.z;
-                float yNorm = local.y / local.z;
-                float u = (xNorm * intrinsics.FocalLength.x + intrinsics.PrincipalPoint.x) / dw;
-                float v = (yNorm * intrinsics.FocalLength.y + intrinsics.PrincipalPoint.y) / dh;
-                // V is from top in screen coords, but depth frame uses top-left = 0.
-                // PCA ViewportPointToRay uses bottom-left = 0, so we flip V.
-                v = 1f - v;
-
-                u = Mathf.Clamp01(u);
-                v = Mathf.Clamp01(v);
-                uMin = Mathf.Min(uMin, u);
-                uMax = Mathf.Max(uMax, u);
-                vMin = Mathf.Min(vMin, v);
-                vMax = Mathf.Max(vMax, v);
-                inFrustum++;
+                DiagLog("depthCursor not hitting");
+                return;
+            }
+            if (xrCamera == null)
+            {
+                DiagLog("no XR camera");
+                return;
+            }
+            if (raycastManager == null)
+            {
+                DiagLog("no EnvironmentRaycastManager");
+                return;
             }
 
-            if (inFrustum == 0) return;
+            Vector3 sphereCenter = depthCursor.GetHitPoint();
+            Vector3 camPos = xrCamera.transform.position;
+            float distToCenter = Vector3.Distance(sphereCenter, camPos);
 
-            // Expand slightly to avoid missing edge points
-            float margin = 0.02f;
-            uMin = Mathf.Max(0f, uMin - margin);
-            uMax = Mathf.Min(1f, uMax + margin);
-            vMin = Mathf.Max(0f, vMin - margin);
-            vMax = Mathf.Min(1f, vMax + margin);
+            if (distToCenter > maxDistance)
+            {
+                DiagLog($"sphere too far: {distToCenter:F1}m");
+                return;
+            }
 
-            // Iterate over pixels in this UV rect
-            int step = subsampleStep;
+            // Project sphere to viewport
+            ComputeSphereViewportBounds(sphereCenter, camPos, xrCamera,
+                out float uMin, out float uMax, out float vMin, out float vMax);
+
+            if (uMin > uMax || vMin > vMax)
+            {
+                DiagLog($"sphere outside view: u=[{uMin:F3},{uMax:F3}] v=[{vMin:F3},{vMax:F3}]");
+                return;
+            }
+
+            // --- Distance-compensated grid: maintain roughly constant point count
+            // regardless of how far the sphere is. A far sphere covers fewer viewport
+            // pixels, so we increase ray density to compensate.
+            float uExtent = uMax - uMin;
+            float vExtent = vMax - vMin;
+            float viewportArea = uExtent * vExtent;
+            float densityScale = 1f / Mathf.Sqrt(Mathf.Max(0.0001f, viewportArea));
+            int gridW = Mathf.Max(minGrid, Mathf.CeilToInt(rayGrid * densityScale * uExtent));
+            int gridH = Mathf.Max(minGrid, Mathf.CeilToInt(rayGrid * densityScale * vExtent));
+
+            float du = uExtent / (gridW - 1);
+            float dv = vExtent / (gridH - 1);
+            float sphereRadiusSq = sphereRadius * sphereRadius;
+
             _points.Clear();
 
-            float depthMin = float.MaxValue;
-            float depthMax = float.MinValue;
-
-            // First pass: collect points + find depth range
-            var tempPoints = new List<(Vector3 worldPos, float depth)>();
-            for (float v = vMin; v <= vMax; v += (float)step / dh)
+            for (int gy = 0; gy < gridH && _points.Count < maxPoints; gy++)
             {
-                for (float u = uMin; u <= uMax; u += (float)step / dw)
+                for (int gx = 0; gx < gridW && _points.Count < maxPoints; gx++)
                 {
-                    if (_points.Count + tempPoints.Count >= maxPoints) goto doneCollecting;
+                    float u = uMin + gx * du;
+                    float v = vMin + gy * dv;
 
-                    float depth = depthSampler.Sample(u, 1f - v); // flip V for depth frame (top-left origin)
-                    if (depth <= 0f || !float.IsFinite(depth)) continue;
+                    Ray ray = xrCamera.ViewportPointToRay(new Vector3(u, v, 0f));
 
-                    var ray = pca.ViewportPointToRay(new Vector2(u, 1f - v));
-                    Vector3 worldPt = ray.origin + ray.direction.normalized * depth;
-
-                    // Check if inside the box
-                    Vector3 delta = worldPt - center;
-                    if (Mathf.Abs(delta.x) > half.x || Mathf.Abs(delta.y) > half.y || Mathf.Abs(delta.z) > half.z)
+                    if (!raycastManager.Raycast(ray, out EnvironmentRaycastHit hit, maxDistance))
                         continue;
 
-                    tempPoints.Add((worldPt, depth));
-                    if (depth < depthMin) depthMin = depth;
-                    if (depth > depthMax) depthMax = depth;
+                    // Sphere containment
+                    if ((hit.point - sphereCenter).sqrMagnitude > sphereRadiusSq)
+                        continue;
+
+                    Color color = ComputeAngleColor(hit.point, hit.normal, camPos);
+
+                    _points.Add(new ProbePoint
+                    {
+                        data = new Vector4(hit.point.x, hit.point.y, hit.point.z, PackColor(color))
+                    });
                 }
             }
-            doneCollecting:
 
-            if (tempPoints.Count == 0) return;
-
-            // Ensure depth range is valid
-            if (Mathf.Approximately(depthMin, depthMax))
-                depthMax = depthMin + 0.01f;
-
-            // Second pass: build colored points
-            for (int i = 0; i < tempPoints.Count; i++)
+            if (_points.Count == 0)
             {
-                var (worldPt, depth) = tempPoints[i];
-                float t = Mathf.Clamp01((depth - depthMin) / (depthMax - depthMin));
-                Color color = Color.Lerp(nearColor, farColor, t);
-
-                _points.Add(new ProbePoint
-                {
-                    data = new Vector4(worldPt.x, worldPt.y, worldPt.z, PackColor(color))
-                });
+                DiagLog($"no hits in sphere — center=({sphereCenter.x:F2},{sphereCenter.y:F2},{sphereCenter.z:F2}) dist={distToCenter:F2}m");
+                return;
             }
-        }
 
-        private void RenderProbePoints()
-        {
-            if (_points.Count == 0 || _probeMaterial == null || _quadMesh == null) return;
+            // --- Thin to uniform 3D Euclidean spacing ---
+            // Viewport-uniform rays produce non-uniform surface spacing:
+            // head-on areas = sparse, grazing areas = dense.
+            // Reject points that are too close to an already-accepted neighbor in 3D.
+            float minDistSq = targetSpacing * targetSpacing;
+            var thinned = new List<ProbePoint>(_points.Count);
+            for (int i = 0; i < _points.Count; i++)
+            {
+                var p = _points[i];
+                Vector3 pp = new Vector3(p.data.x, p.data.y, p.data.z);
+                bool tooClose = false;
+                for (int j = 0; j < thinned.Count; j++)
+                {
+                    var a = thinned[j];
+                    float dx = pp.x - a.data.x;
+                    float dy = pp.y - a.data.y;
+                    float dz = pp.z - a.data.z;
+                    if (dx * dx + dy * dy + dz * dz < minDistSq)
+                    {
+                        tooClose = true;
+                        break;
+                    }
+                }
+                if (!tooClose)
+                    thinned.Add(p);
+            }
 
+            int dropped = _points.Count - thinned.Count;
+            _points.Clear();
+            _points.AddRange(thinned);
+
+            if (_points.Count == 0)
+            {
+                DiagLog($"all points thinned out — sphere center=({sphereCenter.x:F2},{sphereCenter.y:F2},{sphereCenter.z:F2})");
+                return;
+            }
+
+            // Render
             ReleaseBuffer();
             _pointBuffer = new ComputeBuffer(_points.Count, sizeof(float) * 4);
             _pointBuffer.SetData(_points);
@@ -261,14 +259,64 @@ namespace SmartRoom.Interaction
             _probeMaterial.SetBuffer(ProbePointsId, _pointBuffer);
             _probeMaterial.SetFloat(PointSizeId, pointSize);
 
-            Graphics.DrawMeshInstancedProcedural(_quadMesh, 0, _probeMaterial, _renderBounds, _points.Count);
+            var bounds = new Bounds(sphereCenter, Vector3.one * sphereRadius * 2f);
+            Graphics.DrawMeshInstancedProcedural(_quadMesh, 0, _probeMaterial, bounds, _points.Count);
+
+            DiagLog($"rendered {_points.Count} pts (dropped {dropped}) — center=({sphereCenter.x:F2},{sphereCenter.y:F2},{sphereCenter.z:F2})");
         }
 
-        private void Deactivate()
+        /// <summary>
+        /// 计算球体在 viewport 空间的投影区域。
+        /// 用小角度近似：球心的 viewport UV + 球半径对应的 UV 范围。
+        /// </summary>
+        private void ComputeSphereViewportBounds(
+            Vector3 sphereCenter, Vector3 camPos, Camera cam,
+            out float uMin, out float uMax, out float vMin, out float vMax)
         {
-            _active = false;
-            _points.Clear();
-            ReleaseBuffer();
+            uMin = 1f; uMax = 0f; vMin = 1f; vMax = 0f;
+
+            float dist = Vector3.Distance(sphereCenter, camPos);
+            if (dist <= 0.001f) return;
+
+            // Check if sphere center is in front of camera
+            Vector3 camForward = cam.transform.forward;
+            Vector3 toSphere = sphereCenter - camPos;
+            float localZ = Vector3.Dot(toSphere, camForward);
+            if (localZ <= 0f) return;
+
+            // Viewport UV of sphere center — use camera pixel dimensions, NOT Screen.width/height
+            // In VR (Single Pass Instanced), Screen.width is the stereo backbuffer width,
+            // but camera.WorldToScreenPoint returns coordinates in the left eye's pixel rect.
+            Vector3 screenPt = cam.WorldToScreenPoint(sphereCenter);
+            float u = screenPt.x / cam.pixelWidth;
+            float v = screenPt.y / cam.pixelHeight;
+
+            // Focal length in pixels (from vertical FOV) — use camera pixelHeight
+            float focalPixels = cam.pixelHeight / (2f * Mathf.Tan(cam.fieldOfView * 0.5f * Mathf.Deg2Rad));
+
+            // Sphere angular radius → pixel radius → viewport radius
+            float pixelRadius = focalPixels * sphereRadius / dist;
+            float uRadius = pixelRadius / cam.pixelWidth;
+            float vRadius = pixelRadius / cam.pixelHeight;
+
+            uMin = Mathf.Max(0f, u - uRadius);
+            uMax = Mathf.Min(1f, u + uRadius);
+            vMin = Mathf.Max(0f, v - vRadius);
+            vMax = Mathf.Min(1f, v + vRadius);
+        }
+
+        /// <summary>
+        /// 世界空间法线 → RGB 着色（法线贴图风格）。
+        /// 平面 = 均匀色，曲面 = 渐变，折角 = 突变——直接传达表面 3D 形状。
+        /// </summary>
+        private Color ComputeAngleColor(Vector3 hitPoint, Vector3 normal, Vector3 camPos)
+        {
+            // Map world-space normal from [-1,1] to [0,1] RGB
+            // R = right (+X), G = up (+Y), B = forward (+Z)
+            float r = normal.x * 0.5f + 0.5f;
+            float g = normal.y * 0.5f + 0.5f;
+            float b = normal.z * 0.5f + 0.5f;
+            return new Color(r, g, b, 1f);
         }
 
         private void ReleaseBuffer()
@@ -280,9 +328,12 @@ namespace SmartRoom.Interaction
             }
         }
 
-        /// <summary>
-        /// Pack Color32 into a single float (for StructuredBuffer<Vector4>.w)
-        /// </summary>
+        private void OnDisable()
+        {
+            _points.Clear();
+            ReleaseBuffer();
+        }
+
         private static float PackColor(Color c)
         {
             uint r = (uint)(Mathf.Clamp01(c.r) * 255f);
@@ -293,9 +344,11 @@ namespace SmartRoom.Interaction
             return System.BitConverter.Int32BitsToSingle((int)packed);
         }
 
-        private void OnDisable()
+        private void DiagLog(string msg)
         {
-            Deactivate();
+            if (Time.time - _lastDiagLogTime < DiagLogInterval) return;
+            _lastDiagLogTime = Time.time;
+            Debug.LogWarning($"[DepthProbe] {msg}");
         }
     }
 }
