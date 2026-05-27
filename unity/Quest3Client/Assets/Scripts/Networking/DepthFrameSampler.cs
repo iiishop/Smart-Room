@@ -16,6 +16,7 @@ namespace SmartRoom.Networking
         public bool HasFrame => _latestDepth != null && _latestDepth.Length > 0;
 
         private float[] _latestDepth;
+        private bool _loggedFirstFrame;
 
         private void Awake()
         {
@@ -33,6 +34,12 @@ namespace SmartRoom.Networking
                 _latestDepth = depthStreamModule.LatestDepthMeters;
                 LayoutWidth = depthStreamModule.LatestDepthWidth;
                 LayoutHeight = depthStreamModule.LatestDepthHeight;
+
+                if (!_loggedFirstFrame && HasFrame)
+                {
+                    _loggedFirstFrame = true;
+                    Debug.Log($"[DepthFrameSampler] First depth frame received: {LayoutWidth}x{LayoutHeight}, {_latestDepth.Length} floats");
+                }
             }
         }
 

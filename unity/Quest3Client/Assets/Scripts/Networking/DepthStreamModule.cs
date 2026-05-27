@@ -36,6 +36,7 @@ namespace SmartRoom.Networking
         private int _latestDepthWidth;
         private int _latestDepthHeight;
         private bool _loggedEnvironmentRaycastFallback;
+        private bool _loggedFirstLocalFrame;
 
         // Public read-only access for external consumers (DepthFrameSampler, etc.)
         public float[] LatestDepthMeters => _latestDepthMeters;
@@ -53,45 +54,27 @@ namespace SmartRoom.Networking
         private void Awake()
         {
             if (manager == null)
-            {
                 manager = FindFirstObjectByType<BackendCommunicationManager>();
-            }
 
             if (environmentDepthManager == null)
-            {
                 environmentDepthManager = FindFirstObjectByType<EnvironmentDepthManager>();
-            }
 
             if (environmentRaycastManager == null)
-            {
                 environmentRaycastManager = FindFirstObjectByType<EnvironmentRaycastManager>();
-            }
 
             _environmentRaycastProvider = new EnvironmentRaycastManagerProvider(environmentRaycastManager);
 
             if (depthArraySliceShader == null)
-            {
                 depthArraySliceShader = Shader.Find(RuntimeShaderName);
-            }
-
             if (depthArraySliceShader == null)
-            {
                 depthArraySliceShader = Shader.Find(ResourceShaderName);
-            }
-
             if (depthArraySliceShader == null)
-            {
                 depthArraySliceShader = Resources.Load<Shader>(ResourceShaderAssetPath);
-            }
 
             if (depthArraySliceShader != null)
-            {
                 _depthSliceMaterial = new Material(depthArraySliceShader);
-            }
             else
-            {
                 _lastStatusMessage = "Depth shader not found. Assign depthArraySliceShader in inspector or keep Resources/SmartRoomDepthArraySliceToFloat.shader in build.";
-            }
         }
 
         private void Start()
@@ -105,118 +88,104 @@ namespace SmartRoom.Networking
         }
 
         public bool TryRaycastViewport(
-            float u,
-            float v,
-            Ray ray,
-            out float depthMeters,
-            out Vector3 worldPoint,
-            out Vector3 cameraPoint)
+            float u, float v, Ray ray,
+            out float depthMeters, out Vector3 worldPoint, out Vector3 cameraPoint)
         {
             bool hit = DepthViewportRaycast.TryResolve(
-                _latestDepthMeters,
-                _latestDepthWidth,
-                _latestDepthHeight,
-                u,
-                v,
-                ray,
-                _environmentRaycastProvider,
-                out bool usedFallback,
-                out depthMeters,
-                out worldPoint,
-                out cameraPoint);
+                _latestDepthMeters, _latestDepthWidth, _latestDepthHeight,
+                u, v, ray, _environmentRaycastProvider,
+                out bool usedFallback, out depthMeters, out worldPoint, out cameraPoint);
 
             if (usedFallback && !_loggedEnvironmentRaycastFallback)
             {
                 _loggedEnvironmentRaycastFallback = true;
-                manager?.QueueUnityLog(
-                    "WARNING",
-                    "EnvironmentRaycastManager unavailable; falling back to manual depth projection. Spatial anchoring may drift until MRUK raycast is configured."
-                );
+                manager?.QueueUnityLog("WARNING",
+                    "EnvironmentRaycastManager unavailable; falling back to manual depth projection.");
             }
-
             return hit;
         }
 
         private void Update()
         {
-            if (manager == null)
-            {
-                return;
-            }
-
-            if (!manager.IsDepthConnected)
-            {
-                return;
-            }
-
-            if (Time.time < _nextAt)
-            {
-                return;
-            }
-
+            if (Time.time < _nextAt) return;
             _nextAt = Time.time + ResolveInterval();
 
-            if (!TryBuildDepthPacket(out byte[] packet, out int outWidth, out int outHeight))
+            // ── Phase 1: Local depth readback (always, no backend needed) ──
+            bool readOk = TryReadbackDepthFrame();
+            if (!readOk)
             {
                 if (Time.time >= _nextWarnAt)
                 {
                     _nextWarnAt = Time.time + 2f;
-                    manager.QueueUnityLog("WARNING", $"Depth skipped: {_lastStatusMessage}");
+                    Debug.LogWarning($"[DepthStreamModule] Depth readback failed: {_lastStatusMessage}");
                 }
                 return;
             }
 
+            // ── Phase 2: Build & send packet to backend (optional) ──
+            if (manager == null || !manager.IsDepthConnected)
+                return; // local-only mode — _latestDepthMeters already set above
+
+            if (syncTimestampWithLatestRgb)
+            {
+                long rgbTs = manager.LatestRgbTimestampMs;
+                if (rgbTs <= 0) return; // no RGB frame yet, skip this depth packet
+                if (rgbTs == _lastSyncedRgbTimestampMs) return; // same RGB frame, skip
+                _lastSyncedRgbTimestampMs = rgbTs;
+            }
+
+            byte[] packet = BuildPacket(_frameId, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                _latestDepthWidth, _latestDepthHeight, _latestDepthMeters);
             manager.QueueDepthPacket(packet);
             _sentCount++;
+
             if (_sentCount % 20 == 0)
+                manager.QueueUnityLog("INFO", $"Depth sent count={_sentCount}, frame_id={_frameId}, size={_latestDepthWidth}x{_latestDepthHeight}");
+
+            if (_lastSentWidth != _latestDepthWidth || _lastSentHeight != _latestDepthHeight || _lastStride != _lastStride)
             {
-                manager.QueueUnityLog(
-                    "INFO",
-                    $"Depth sent count={_sentCount}, frame_id={_frameId}, size={outWidth}x{outHeight}"
-                );
+                _lastSentWidth = _latestDepthWidth;
+                _lastSentHeight = _latestDepthHeight;
+                manager?.QueueUnityLog("INFO",
+                    $"Depth sampling config: output={_latestDepthWidth}x{_latestDepthHeight}, interval={ResolveInterval():F3}s, ts_sync={(syncTimestampWithLatestRgb ? "rgb" : "local")}");
             }
         }
 
-        private bool TryBuildDepthPacket(out byte[] packet, out int outWidth, out int outHeight)
+        /// <summary>
+        /// Phase 1: GPU readback → populate _latestDepthMeters.
+        /// Always runs locally — no backend dependency.
+        /// </summary>
+        private bool TryReadbackDepthFrame()
         {
-            packet = null;
-            outWidth = 0;
-            outHeight = 0;
-
             if (environmentDepthManager == null)
             {
                 _lastStatusMessage = "EnvironmentDepthManager missing in scene";
                 return false;
             }
-
             if (!EnvironmentDepthManager.IsSupported)
             {
-                _lastStatusMessage = "EnvironmentDepthManager.IsSupported == false (device/plugin unsupported)";
+                _lastStatusMessage = "EnvironmentDepthManager.IsSupported == false";
                 return false;
             }
-
             if (!HasScenePermission())
             {
-                _lastStatusMessage = "Missing USE_SCENE permission. Enable OVRManager scene permission or request at runtime.";
+                _lastStatusMessage = "Missing USE_SCENE permission";
                 return false;
             }
-
             if (!environmentDepthManager.enabled)
             {
                 environmentDepthManager.enabled = true;
-                _lastStatusMessage = "EnvironmentDepthManager was disabled and has been enabled";
+                _lastStatusMessage = "EnvironmentDepthManager was disabled, now enabled";
                 return false;
             }
-
             if (!environmentDepthManager.IsDepthAvailable)
             {
-                _lastStatusMessage = "Depth not available yet (check passthrough, PST fixes, and scene permission)";
+                _lastStatusMessage = "Depth not available yet";
                 return false;
             }
-
             if (_depthSliceMaterial == null)
             {
-                _lastStatusMessage = "Depth slice material unavailable (shader missing)";
+                _lastStatusMessage = "Depth slice material unavailable";
                 return false;
             }
 
@@ -227,22 +196,19 @@ namespace SmartRoom.Networking
                 _lastStatusMessage = $"Global depth texture not found: {globalTextureName}";
                 return false;
             }
-
             if (sourceDepth.width <= 0 || sourceDepth.height <= 0)
             {
                 _lastStatusMessage = $"Depth texture invalid size: {sourceDepth.width}x{sourceDepth.height}";
                 return false;
             }
-
             if (sourceDepth.dimension != TextureDimension.Tex2DArray)
             {
-                _lastStatusMessage = $"Depth texture dimension unsupported: {sourceDepth.dimension} (expected Tex2DArray)";
+                _lastStatusMessage = $"Depth texture dimension unsupported: {sourceDepth.dimension}";
                 return false;
             }
-
             if (!SystemInfo.SupportsRenderTextureFormat(RenderTextureFormat.RFloat))
             {
-                _lastStatusMessage = "RenderTextureFormat.RFloat unsupported on this device";
+                _lastStatusMessage = "RenderTextureFormat.RFloat unsupported";
                 return false;
             }
 
@@ -276,9 +242,7 @@ namespace SmartRoom.Networking
             int totalPixels = sourceWidth * sourceHeight;
             int stride = 1;
             if (maxPixelsPerFrame > 0 && totalPixels > maxPixelsPerFrame)
-            {
                 stride = Mathf.CeilToInt(Mathf.Sqrt((float)totalPixels / maxPixelsPerFrame));
-            }
 
             int sampleWidth = Mathf.Max(1, sourceWidth / stride);
             int sampleHeight = Mathf.Max(1, sourceHeight / stride);
@@ -289,72 +253,50 @@ namespace SmartRoom.Networking
             {
                 int srcY = Mathf.Min(sourceHeight - 1, y * stride);
                 if (flipVertical)
-                {
                     srcY = (sourceHeight - 1) - srcY;
-                }
 
                 int rowBase = srcY * sourceWidth;
                 for (int x = 0; x < sampleWidth; x++)
                 {
                     int srcX = Mathf.Min(sourceWidth - 1, x * stride);
-                    int srcIndex = rowBase + srcX;
-                    float depthM = floatData[srcIndex];
+                    float depthM = floatData[rowBase + srcX];
 
                     if (float.IsNaN(depthM) || float.IsInfinity(depthM) || depthM < 0f)
-                    {
                         depthM = 0f;
-                    }
 
                     meters[idx++] = depthM;
                 }
             }
 
             _frameId++;
-            outWidth = sampleWidth;
-            outHeight = sampleHeight;
-
             _latestDepthWidth = sampleWidth;
             _latestDepthHeight = sampleHeight;
             _latestDepthMeters = meters;
-
-            long timestampMs;
-            if (syncTimestampWithLatestRgb)
-            {
-                long rgbTs = manager != null ? manager.LatestRgbTimestampMs : 0;
-                if (rgbTs <= 0)
-                {
-                    _lastStatusMessage = "Waiting for RGB timestamp to sync depth frame";
-                    return false;
-                }
-
-                if (rgbTs == _lastSyncedRgbTimestampMs)
-                {
-                    _lastStatusMessage = "Waiting for next RGB frame timestamp for 1:1 sync";
-                    return false;
-                }
-
-                _lastSyncedRgbTimestampMs = rgbTs;
-                timestampMs = rgbTs;
-            }
-            else
-            {
-                timestampMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            }
-
-            if (_lastSentWidth != sampleWidth || _lastSentHeight != sampleHeight || _lastStride != stride)
-            {
-                _lastSentWidth = sampleWidth;
-                _lastSentHeight = sampleHeight;
-                _lastStride = stride;
-                manager?.QueueUnityLog(
-                    "INFO",
-                    $"Depth sampling config: source={sourceWidth}x{sourceHeight}, stride={stride}, output={sampleWidth}x{sampleHeight}, maxPixelsPerFrame={(maxPixelsPerFrame > 0 ? maxPixelsPerFrame.ToString() : "native")}, interval={ResolveInterval():F3}s, ts_sync={(syncTimestampWithLatestRgb ? "rgb" : "local")}" 
-                );
-            }
-
-            packet = BuildPacket(_frameId, timestampMs, sampleWidth, sampleHeight, meters);
             _lastStatusMessage = "OK";
+
+            if (!_loggedFirstLocalFrame)
+            {
+                _loggedFirstLocalFrame = true;
+                Debug.Log($"[DepthStreamModule] First local depth frame: {sampleWidth}x{sampleHeight}, {meters.Length} floats, range=[{Min(meters):F2}, {Max(meters):F2}]m");
+            }
+
             return true;
+        }
+
+        private static float Min(float[] arr)
+        {
+            float m = float.MaxValue;
+            for (int i = 0; i < arr.Length; i++)
+                if (arr[i] > 0f && arr[i] < m) m = arr[i];
+            return m == float.MaxValue ? 0f : m;
+        }
+
+        private static float Max(float[] arr)
+        {
+            float m = float.MinValue;
+            for (int i = 0; i < arr.Length; i++)
+                if (arr[i] > m) m = arr[i];
+            return m == float.MinValue ? 0f : m;
         }
 
         private float ResolveInterval()
@@ -367,12 +309,7 @@ namespace SmartRoom.Networking
         {
             if (_depthRt == null || _depthRt.width != width || _depthRt.height != height)
             {
-                if (_depthRt != null)
-                {
-                    _depthRt.Release();
-                    Destroy(_depthRt);
-                }
-
+                if (_depthRt != null) { _depthRt.Release(); Destroy(_depthRt); }
                 _depthRt = new RenderTexture(width, height, 0, RenderTextureFormat.RFloat)
                 {
                     useMipMap = false,
@@ -382,9 +319,7 @@ namespace SmartRoom.Networking
             }
 
             if (_depthReadbackTexture == null || _depthReadbackTexture.width != width || _depthReadbackTexture.height != height)
-            {
                 _depthReadbackTexture = new Texture2D(width, height, TextureFormat.RFloat, false);
-            }
         }
 
         private static bool HasScenePermission()
@@ -423,21 +358,9 @@ namespace SmartRoom.Networking
 
         private void OnDestroy()
         {
-            if (_depthRt != null)
-            {
-                _depthRt.Release();
-                Destroy(_depthRt);
-            }
-
-            if (_depthReadbackTexture != null)
-            {
-                Destroy(_depthReadbackTexture);
-            }
-
-            if (_depthSliceMaterial != null)
-            {
-                Destroy(_depthSliceMaterial);
-            }
+            if (_depthRt != null) { _depthRt.Release(); Destroy(_depthRt); }
+            if (_depthReadbackTexture != null) Destroy(_depthReadbackTexture);
+            if (_depthSliceMaterial != null) Destroy(_depthSliceMaterial);
         }
 
         private sealed class EnvironmentRaycastManagerProvider : IEnvironmentRaycastProvider
@@ -454,16 +377,8 @@ namespace SmartRoom.Networking
             public bool TryRaycast(Ray ray, out Vector3 worldPoint)
             {
                 worldPoint = Vector3.zero;
-                if (!IsAvailable)
-                {
-                    return false;
-                }
-
-                if (!_environmentRaycastManager.Raycast(ray, out var hitInfo))
-                {
-                    return false;
-                }
-
+                if (!IsAvailable) return false;
+                if (!_environmentRaycastManager.Raycast(ray, out var hitInfo)) return false;
                 worldPoint = hitInfo.point;
                 return true;
             }
