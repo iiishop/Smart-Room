@@ -39,6 +39,9 @@ dist/
 *.apk
 *.aab
 *.unitypackage
+frontend/node_modules/
+static/*
+!static/.gitkeep
 
 # Unity transient/build output outside project-root ignore defaults
 unity/**/.utmp/
