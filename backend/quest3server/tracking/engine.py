@@ -50,6 +50,8 @@ class TrackingEngine:
 
     _IMAGE_PREDICTOR_MODEL = "facebook/sam2.1-hiera-tiny"
     _FLORENCE2_MODEL = "florence-community/Florence-2-base"
+    _CLIP_MODEL = "openai/clip-vit-base-patch32"
+    _CLIP_SIM_THRESHOLD = 0.18  # below this: try region description as fallback label
 
     def __init__(self) -> None:
         self._label = ""
@@ -60,6 +62,8 @@ class TrackingEngine:
         self._sam2_image: Any = None
         self._florence2: Any = None
         self._florence2_proc: Any = None
+        self._clip_model: Any = None
+        self._clip_proc: Any = None
 
     # ── public API ────────────────────────────────────────────────────
 
@@ -74,9 +78,10 @@ class TrackingEngine:
     def detect(self, pixel_x: float, pixel_y: float, rgb_bgr: np.ndarray) -> TrackingResult:
         """Detect and describe the object at (pixel_x, pixel_y) in rgb_bgr.
 
-        Two-stage pipeline:
-        1. Florence-2 <OD> → all detection bboxes + labels
-        2. Find which bbox contains the cursor → SAM2 box prompt → refined mask → bbox
+        Three-stage pipeline:
+        1. Florence-2 multi-task ensemble → all detection bboxes + labels
+        2. Find bbox containing cursor → CLIP label verification → calibrated score
+        3. SAM2 box-prompt refinement → tight mask → clean bbox
         """
         self._ensure_models()
 
@@ -88,36 +93,52 @@ class TrackingEngine:
         # ══════ Stage 1: Florence-2 detection ══════
         detections = self._run_detection(rgb_rgb, w, h)
         if not detections:
-            # Fallback to point prompt if detection fails
             return self._fallback_point_prompt(rgb_rgb, px, py)
 
         # Find the smallest detection bbox containing the cursor point
-        target_bbox, target_label, target_score = self._find_containing_bbox(
+        target_bbox, target_label, _ = self._find_containing_bbox(
             detections, px, py
         )
 
         if target_bbox is None:
-            # No detection bbox contains the point — fallback
             return self._fallback_point_prompt(rgb_rgb, px, py)
 
-        # ══════ Stage 2: SAM2 box-prompt refinement ══════
+        # ══════ CLIP label verification ══════
+        verified_label, clip_score = self._verify_label_with_clip(
+            rgb_rgb, target_bbox, target_label,
+        )
+        # If CLIP strongly disagrees with the label, try region description
+        if clip_score < self._CLIP_SIM_THRESHOLD:
+            logger.warning(
+                "CLIP verification low (%.3f) for '%s', trying region description",
+                clip_score, verified_label,
+            )
+            alt_label = self._describe_region(rgb_rgb, *target_bbox)
+            if alt_label != verified_label and alt_label != "object":
+                alt_score, _ = self._verify_label_with_clip(rgb_rgb, target_bbox, alt_label)
+                if alt_score > clip_score:
+                    verified_label = alt_label
+                    clip_score = alt_score
+
+        # ══════ Stage 3: SAM2 box-prompt refinement ══════
         refined_bbox = self._refine_with_sam2_box(rgb_rgb, target_bbox)
 
-        # Clean label of any residual location tokens
-        label = _clean_label(target_label)
+        label = _clean_label(verified_label)
 
         self._label = label
-        self._score = target_score
+        self._score = clip_score
         self._box_xyxy = refined_bbox
         self._state = TrackState.TRACKING
 
-        logger.info("Detected: %s (score=%.3f, bbox=%s)", label, target_score, refined_bbox)
+        logger.info(
+            "Detected: %s (CLIP=%.3f, bbox=%s)", label, clip_score, refined_bbox,
+        )
 
         return TrackingResult(
             object_id=1,
             state=TrackState.TRACKING,
             label=label,
-            score=target_score,
+            score=clip_score,
             box_xyxy=refined_bbox,
             center_pixel=(
                 (refined_bbox[0] + refined_bbox[2]) / 2.0,
@@ -277,7 +298,43 @@ class TrackingEngine:
 
         return best, best_label, best_score
 
-    # ══════ Stage 2: SAM2 box-prompt refinement ══════
+    # ══════ CLIP label verification ══════
+
+    def _verify_label_with_clip(
+        self, rgb: np.ndarray, bbox: list[int], label: str,
+    ) -> tuple[str, float]:
+        """Verify Florence-2 label by matching cropped region against label text with CLIP.
+
+        Returns (label, cosine_similarity). The similarity score becomes the
+        calibrated confidence, replacing the hardcoded 0.85.
+
+        Reference: https://huggingface.co/openai/clip-vit-base-patch32
+        """
+        x0, y0, x1, y1 = [max(0, int(v)) for v in bbox]
+        crop = rgb[y0:y1, x0:x1]
+        if crop.size == 0 or crop.shape[0] < 3 or crop.shape[1] < 3:
+            return label, 0.0
+
+        with torch.inference_mode():
+            crop_pil = Image.fromarray(crop)
+            inputs = self._clip_proc(
+                images=crop_pil, return_tensors="pt",
+            ).to("cuda")
+            text_inputs = self._clip_proc(
+                text=[label], return_tensors="pt", padding=True,
+            ).to("cuda")
+
+            image_features = self._clip_model.get_image_features(**inputs)
+            text_features = self._clip_model.get_text_features(**text_inputs)
+
+        # Cosine similarity
+        image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+        text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+        similarity = float((image_features @ text_features.T).item())
+
+        return label, similarity
+
+    # ══════ Stage 2 (ex-3): SAM2 box-prompt refinement ══════
 
     def _refine_with_sam2_box(
         self, rgb: np.ndarray, rough_bbox: list[int]
@@ -405,7 +462,7 @@ class TrackingEngine:
         if self._sam2_image is not None:
             return
         from sam2.sam2_image_predictor import SAM2ImagePredictor
-        from transformers import AutoProcessor, Florence2ForConditionalGeneration
+        from transformers import AutoProcessor, CLIPModel, CLIPProcessor, Florence2ForConditionalGeneration
 
         self._sam2_image = SAM2ImagePredictor.from_pretrained(self._IMAGE_PREDICTOR_MODEL)
         self._florence2 = Florence2ForConditionalGeneration.from_pretrained(
@@ -413,8 +470,10 @@ class TrackingEngine:
             torch_dtype=torch.bfloat16,
         ).to("cuda")
         self._florence2_proc = AutoProcessor.from_pretrained(self._FLORENCE2_MODEL)
+        self._clip_model = CLIPModel.from_pretrained(self._CLIP_MODEL).to("cuda")
+        self._clip_proc = CLIPProcessor.from_pretrained(self._CLIP_MODEL)
         logger.info(
-            "TrackingEngine models loaded (SAM2-tiny + Florence-2-base, %.1f GB VRAM)",
+            "TrackingEngine models loaded (SAM2-tiny + Florence-2-base + CLIP-ViT-B/32, %.1f GB VRAM)",
             torch.cuda.memory_allocated() / 1024 ** 3,
         )
 
