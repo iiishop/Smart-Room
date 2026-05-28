@@ -78,9 +78,9 @@ class TrackingEngine:
     def detect(self, pixel_x: float, pixel_y: float, rgb_bgr: np.ndarray) -> TrackingResult:
         """Detect and describe the object at (pixel_x, pixel_y) in rgb_bgr.
 
-        Three-stage pipeline:
-        1. Florence-2 multi-task ensemble → all detection bboxes + labels
-        2. Find bbox containing cursor → CLIP label verification → calibrated score
+        Three-stage pipeline with small-object fallback:
+        1. Florence-2 multi-task ensemble on full image
+        2. If cursor bbox not found → crop around cursor → re-detect on crop
         3. SAM2 box-prompt refinement → tight mask → clean bbox
         """
         self._ensure_models()
@@ -90,15 +90,23 @@ class TrackingEngine:
         py = int(np.clip(pixel_y, 0, h - 1))
         rgb_rgb = cv2.cvtColor(rgb_bgr, cv2.COLOR_BGR2RGB)
 
-        # ══════ Stage 1: Florence-2 detection ══════
+        # ══════ Stage 1: Florence-2 full-image detection ══════
         detections = self._run_detection(rgb_rgb, w, h)
-        if not detections:
-            return self._fallback_point_prompt(rgb_rgb, px, py)
 
-        # Find the smallest detection bbox containing the cursor point
-        target_bbox, target_label, _ = self._find_containing_bbox(
-            detections, px, py
-        )
+        target_bbox: list[int] | None = None
+        target_label = ""
+        from_crop = False
+
+        if detections:
+            target_bbox, target_label, _ = self._find_containing_bbox(detections, px, py)
+
+        # ══════ Small-object fallback: crop around cursor, re-detect ══════
+        if target_bbox is None:
+            logger.info("No bbox at (%d,%d) in full image, trying crop re-detection", px, py)
+            crop_result = self._try_crop_detection(rgb_rgb, px, py, w, h)
+            if crop_result is not None:
+                target_bbox, target_label = crop_result[0], crop_result[1]
+                from_crop = True
 
         if target_bbox is None:
             return self._fallback_point_prompt(rgb_rgb, px, py)
@@ -298,6 +306,85 @@ class TrackingEngine:
 
         return best, best_label, best_score
 
+    # ══════ Small-object crop re-detection ══════
+
+    _CROP_DETECT_SIZE = 400  # px — crop window around cursor for small-object re-detection
+
+    def _try_crop_detection(
+        self, rgb: np.ndarray, px: int, py: int, img_w: int, img_h: int,
+    ) -> tuple[list[int], str] | None:
+        """Crop a window around (px,py) and re-run Florence-2 ensemble.
+
+        Small objects (cups, phones, cables) occupy too few pixels in a full
+        640×360 frame for Florence-2 <OD> to pick up. By cropping a tight
+        window around the cursor, the object's relative scale increases
+        dramatically and detection recall improves.
+
+        Returns (bbox_in_full_coords, label) or None if still nothing found.
+        """
+        half = self._CROP_DETECT_SIZE // 2
+        crop_x0 = max(0, px - half)
+        crop_y0 = max(0, py - half)
+        crop_x1 = min(img_w, crop_x0 + self._CROP_DETECT_SIZE)
+        crop_y1 = min(img_h, crop_y0 + self._CROP_DETECT_SIZE)
+        # Re-anchor to keep the crop exactly CROP_DETECT_SIZE when possible
+        if crop_x1 - crop_x0 < self._CROP_DETECT_SIZE and crop_x0 > 0:
+            crop_x0 = max(0, crop_x1 - self._CROP_DETECT_SIZE)
+        if crop_y1 - crop_y0 < self._CROP_DETECT_SIZE and crop_y0 > 0:
+            crop_y0 = max(0, crop_y1 - self._CROP_DETECT_SIZE)
+
+        crop = rgb[crop_y0:crop_y1, crop_x0:crop_x1]
+        crop_h, crop_w = crop.shape[:2]
+        if crop_w < 64 or crop_h < 64:
+            return None  # too small to be useful
+
+        detections = self._run_detection(crop, crop_w, crop_h)
+        if not detections:
+            return None
+
+        # Remap cursor to crop coordinates
+        crop_px = px - crop_x0
+        crop_py = py - crop_y0
+        _, label, _ = self._find_containing_bbox(detections, crop_px, crop_py)
+        if not label:
+            # Even if the cursor isn't inside a bbox, grab the largest detection
+            # in the crop (it's likely the object the user pointed at)
+            detections.sort(key=lambda d: (d[0][2] - d[0][0]) * (d[0][3] - d[0][1]), reverse=True)
+            best = detections[0]
+            label = best[1]
+
+            # Pick the bbox closest to the cursor if multiple exist
+            best_dist = float("inf")
+            for bbox, lbl, _ in detections:
+                cx = (bbox[0] + bbox[2]) / 2
+                cy = (bbox[1] + bbox[3]) / 2
+                dist = (cx - crop_px) ** 2 + (cy - crop_py) ** 2
+                if dist < best_dist:
+                    best_dist = dist
+                    label = lbl
+                    # Use this bbox for coordinate remapping
+                    crop_bbox = bbox
+
+            # Remap from crop coords back to full-image coords
+            full_bbox = [
+                crop_x0 + crop_bbox[0], crop_y0 + crop_bbox[1],
+                crop_x0 + crop_bbox[2], crop_y0 + crop_bbox[3],
+            ]
+            logger.info("Crop re-detect: '%s' (not directly under cursor)", label)
+            return (full_bbox, label)
+        else:
+            # Cursor IS inside a bbox — find which one
+            for bbox, lbl, _ in detections:
+                if bbox[0] <= crop_px <= bbox[2] and bbox[1] <= crop_py <= bbox[3]:
+                    full_bbox = [
+                        crop_x0 + bbox[0], crop_y0 + bbox[1],
+                        crop_x0 + bbox[2], crop_y0 + bbox[3],
+                    ]
+                    logger.info("Crop re-detect: '%s' at cursor", lbl)
+                    return (full_bbox, lbl)
+            # Shouldn't reach here if _find_containing_bbox returned a label
+            return None
+
     # ══════ CLIP label verification ══════
 
     def _verify_label_with_clip(
@@ -447,7 +534,13 @@ class TrackingEngine:
     # ══════ Fallback: SAM2 point prompt ══════
 
     def _fallback_point_prompt(self, rgb: np.ndarray, px: int, py: int) -> TrackingResult:
-        """Fallback when detection fails: use SAM2 point prompt directly."""
+        """Fallback when detection fails: use SAM2 point prompt directly.
+
+        For label generation, crops the SAM2 mask region + padding and runs
+        Florence-2 <DETAILED_CAPTION> on the isolated object image, avoiding
+        background interference that causes mislabeling (e.g., 'a laptop'
+        when the cursor is on a cup next to a laptop).
+        """
         point = np.array([[px, py]], dtype=np.float32)
         try:
             with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
@@ -473,8 +566,8 @@ class TrackingEngine:
                 box_xyxy=(0, 0, 0, 0),
             )
 
-        # Try to get label from region description
-        label = self._describe_region(rgb, *bbox)
+        # Crop the mask region + padding, caption the isolated object
+        label = self._caption_crop(rgb, *bbox)
 
         self._label = label
         self._score = float(scores[0])
@@ -532,6 +625,45 @@ class TrackingEngine:
         except Exception as exc:
             logger.warning("Florence-2 region description failed: %s", exc)
             return "object"
+
+    def _caption_crop(
+        self, rgb: np.ndarray, x0: int, y0: int, x1: int, y1: int, pad_ratio: float = 0.15,
+    ) -> str:
+        """Crop and pad a bbox region, then run Florence-2 caption on the isolated object.
+
+        Unlike _describe_region which passes the full image with location tokens,
+        this method crops the object out, pads a border, and runs a clean caption
+        with no background interference. Much better for small objects surrounded
+        by dominant context (e.g., a cup on a laptop desk).
+
+        Tries <DETAILED_CAPTION> first (most descriptive), falls back to <CAPTION>.
+        """
+        h, w = rgb.shape[:2]
+        bw, bh = max(4, x1 - x0), max(4, y1 - y0)
+        pad_x = max(8, int(bw * pad_ratio))
+        pad_y = max(8, int(bh * pad_ratio))
+        cx0 = max(0, x0 - pad_x)
+        cy0 = max(0, y0 - pad_y)
+        cx1 = min(w, x1 + pad_x)
+        cy1 = min(h, y1 + pad_y)
+
+        crop = rgb[cy0:cy1, cx0:cx1]
+        if crop.size == 0:
+            return "object"
+
+        for task in ("<DETAILED_CAPTION>", "<CAPTION>"):
+            try:
+                raw = self._florence2_infer(crop, task, max_tokens=64)
+                parsed = self._florence2_proc.post_process_generation(
+                    raw, task=task, image_size=(crop.shape[1], crop.shape[0]),
+                )
+                label = parsed.get(task, "").strip()
+                if label and len(label) > 2:
+                    return _clean_label(label)
+            except Exception as exc:
+                logger.warning("Florence-2 %s on crop failed: %s", task, exc)
+
+        return "object"
 
     # ══════ Model loading ══════
 
