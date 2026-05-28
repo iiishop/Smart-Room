@@ -334,22 +334,42 @@ class TrackingEngine:
 
         return label, similarity
 
-    # ══════ Stage 2 (ex-3): SAM2 box-prompt refinement ══════
+    # ══════ Stage 3: SAM2 multi-point + box refinement ══════
+
+    _SAM2_GRID_SIZE = 4  # N×N grid of positive points inside the detection bbox
 
     def _refine_with_sam2_box(
         self, rgb: np.ndarray, rough_bbox: list[int]
     ) -> tuple[int, int, int, int]:
-        """Refine a detection bbox using SAM2 box prompt.
+        """Refine a detection bbox using SAM2 box + multi-point prompt.
 
-        The detection bbox constrains SAM2 to that region, giving a tight mask.
+        Box provides the coarse spatial constraint; positive grid points inside the
+        bbox tell SAM2 which pixels belong to the object; negative points outside
+        each edge explicitly reject background. Multi-point prompts are officially
+        supported by SAM2 and improve edge precision over single-box prompts.
+
+        Reference: https://huggingface.co/docs/transformers/model_doc/sam2
         """
         x0, y0, x1, y1 = rough_bbox
         input_box = np.array([[x0, y0, x1, y1]], dtype=np.float32)
+
+        # Positive points: grid sampled from bbox interior
+        pos_points = self._sample_grid_points(x0, y0, x1, y1, grid=self._SAM2_GRID_SIZE)
+        pos_labels = np.ones(len(pos_points), dtype=np.int32)
+
+        # Negative points: just outside each edge
+        neg_points = self._sample_boundary_points(x0, y0, x1, y1)
+        neg_labels = np.zeros(len(neg_points), dtype=np.int32) if len(neg_points) > 0 else np.array([], dtype=np.int32)
+
+        all_points = np.concatenate([pos_points, neg_points], axis=0)
+        all_labels = np.concatenate([pos_labels, neg_labels], axis=0)
 
         try:
             with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
                 self._sam2_image.set_image(rgb)
                 masks, scores, _ = self._sam2_image.predict(
+                    point_coords=all_points,
+                    point_labels=all_labels,
                     box=input_box,
                     multimask_output=False,
                 )
@@ -362,10 +382,67 @@ class TrackingEngine:
                     int(bbox_x.max()), int(bbox_y.max()),
                 )
         except Exception as exc:
-            logger.warning("SAM2 box prompt failed, using detection bbox: %s", exc)
+            # Fallback: box-only if multi-point fails
+            logger.warning("SAM2 multi-point failed, trying box-only: %s", exc)
+            try:
+                with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
+                    self._sam2_image.set_image(rgb)
+                    masks, scores, _ = self._sam2_image.predict(
+                        box=input_box, multimask_output=False,
+                    )
+                mask = np.asarray(masks[0], dtype=bool)
+                if mask.any():
+                    bbox_y, bbox_x = np.where(mask)
+                    return (
+                        int(bbox_x.min()), int(bbox_y.min()),
+                        int(bbox_x.max()), int(bbox_y.max()),
+                    )
+            except Exception as exc2:
+                logger.warning("SAM2 box-only fallback also failed: %s", exc2)
 
-        # Fallback: return the detection bbox as-is
         return (x0, y0, x1, y1)
+
+    @staticmethod
+    def _sample_grid_points(
+        x0: int, y0: int, x1: int, y1: int, grid: int = 4,
+    ) -> np.ndarray:
+        """Sample center points of an N×N grid within the bbox.
+
+        For very small bboxes (< grid*2 px per dimension), returns just the
+        bbox center point rather than trying to fit a full grid.
+        """
+        bw, bh = x1 - x0, y1 - y0
+        if bw < grid * 2 or bh < grid * 2:
+            return np.array([[x0 + bw / 2.0, y0 + bh / 2.0]], dtype=np.float32)
+
+        cell_w = bw / grid
+        cell_h = bh / grid
+        points = []
+        for i in range(grid):
+            for j in range(grid):
+                points.append([
+                    x0 + (i + 0.5) * cell_w,
+                    y0 + (j + 0.5) * cell_h,
+                ])
+        return np.array(points, dtype=np.float32)
+
+    @staticmethod
+    def _sample_boundary_points(
+        x0: int, y0: int, x1: int, y1: int,
+    ) -> np.ndarray:
+        """Sample one negative point outside each edge of the bbox.
+
+        Margin is 10% of the bbox dimension or 5px, whichever is larger.
+        This tells SAM2 explicitly 'not this region'.
+        """
+        margin_x = max(5, int((x1 - x0) * 0.1))
+        margin_y = max(5, int((y1 - y0) * 0.1))
+        return np.array([
+            [x0 - margin_x, (y0 + y1) / 2.0],  # left
+            [x1 + margin_x, (y0 + y1) / 2.0],  # right
+            [(x0 + x1) / 2.0, y0 - margin_y],  # top
+            [(x0 + x1) / 2.0, y1 + margin_y],  # bottom
+        ], dtype=np.float32)
 
     # ══════ Fallback: SAM2 point prompt ══════
 
