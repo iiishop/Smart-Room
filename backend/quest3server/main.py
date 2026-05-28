@@ -11,6 +11,7 @@ from typing import Any
 import cv2
 import numpy as np
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi.responses import Response
 
 from .log_manager import add_log, add_python_log, list_logs
 from .tracking import TrackingEngine, TrackState
@@ -45,6 +46,7 @@ _camera_intrinsics: dict = {}
 _tracking_engine: TrackingEngine | None = None
 _tracking_clients: set[WebSocket] = set()
 _models_ready = False
+_last_detection_crop_jpeg: bytes | None = None  # cropped bbox region from last detection
 
 
 @app.on_event("startup")
@@ -522,6 +524,20 @@ async def track_start(body: dict) -> dict[str, Any]:
     py = int(pixel_y * h) if pixel_y <= 1.0 else int(pixel_y)
     result = engine.detect(px, py, _latest_rgb_bgr.copy())
     add_python_log("info", f"Tracking detect at ({px},{py}) -> {result.label}")
+
+    # Crop and store the detected bbox region for preview
+    global _last_detection_crop_jpeg
+    x0, y0, x1, y1 = result.box_xyxy
+    x0_c = max(0, int(x0))
+    y0_c = max(0, int(y0))
+    x1_c = min(w, int(x1))
+    y1_c = min(h, int(y1))
+    if x1_c > x0_c and y1_c > y0_c:
+        crop = _latest_rgb_bgr[y0_c:y1_c, x0_c:x1_c]
+        ok, buf = cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, 90])
+        if ok:
+            _last_detection_crop_jpeg = buf.tobytes()
+
     return {"ok": True, "result": result.to_payload()}
 
 
@@ -541,6 +557,33 @@ async def track_status() -> dict[str, Any]:
         "state": _tracking_engine.state.value,
         "label": _tracking_engine.label,
     }
+
+
+@app.get("/api/models/status")
+async def models_status() -> dict[str, Any]:
+    """Report which AI models are loaded and ready."""
+    engine = _tracking_engine
+    if engine is None:
+        return {
+            "ready": False,
+            "sam2": False,
+            "florence2": False,
+            "clip": False,
+        }
+    return {
+        "ready": _models_ready,
+        "sam2": engine._sam2_image is not None,
+        "florence2": engine._florence2 is not None,
+        "clip": engine._clip_model is not None,
+    }
+
+
+@app.get("/api/track/last-crop")
+async def track_last_crop():
+    """Return the JPEG of the cropped bbox region from the last detection."""
+    if _last_detection_crop_jpeg is None:
+        raise HTTPException(status_code=404, detail="No detection crop available")
+    return Response(content=_last_detection_crop_jpeg, media_type="image/jpeg")
 
 
 @app.websocket("/ws/tracking")

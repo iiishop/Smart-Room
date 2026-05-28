@@ -90,6 +90,8 @@ class DashboardWindow(QMainWindow):
         self._latest_track_result: dict | None = None
         self._track_bbox_pixel: tuple[int, int, int, int] | None = None  # (x0,y0,x1,y1)
         self._track_label: str = ""
+        self._model_status: dict = {}
+        self._crop_pixmap: QPixmap | None = None
 
         # LUT
         self._lut_loaded = False
@@ -286,6 +288,17 @@ class DashboardWindow(QMainWindow):
         result_group.setLayout(result_layout)
         layout.addWidget(result_group)
 
+        # Crop preview
+        crop_group = QGroupBox("Detection Crop")
+        crop_layout = QVBoxLayout()
+        self._lbl_crop = QLabel("No detection yet")
+        self._lbl_crop.setMinimumSize(200, 150)
+        self._lbl_crop.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._lbl_crop.setStyleSheet("background-color: #1a1a1a; border-radius: 4px;")
+        crop_layout.addWidget(self._lbl_crop)
+        crop_group.setLayout(crop_layout)
+        layout.addWidget(crop_group)
+
         layout.addStretch()
         w.setLayout(layout)
         return w
@@ -337,14 +350,46 @@ class DashboardWindow(QMainWindow):
             state = data.get("state", "idle")
             label = data.get("label", "")
 
-            self._lbl_track_models.setText("Models: loaded (SAM2 + Florence-2)")
             self._lbl_track_state.setText(
                 f"State: {'● ' + state if active else '○ ' + state}"
             )
             if label:
                 self._lbl_track_label.setText(f"Label: {label}")
+
+            # Model status
+            ms = fetch_json("/api/models/status")
+            self._model_status = ms
+            parts = []
+            parts.append(f"SAM2: {'✓' if ms.get('sam2') else '✗'}")
+            parts.append(f"Florence-2: {'✓' if ms.get('florence2') else '✗'}")
+            parts.append(f"CLIP: {'✓' if ms.get('clip') else '✗'}")
+            self._lbl_track_models.setText("Models: " + "  |  ".join(parts))
+
+            # Crop refresh
+            if active and state == "tracking":
+                self._refresh_crop()
         except Exception:
             self._lbl_track_models.setText("Models: -")
+
+    def _refresh_crop(self) -> None:
+        """Fetch the latest detection crop and display it."""
+        try:
+            req = urllib.request.Request(f"{API_BASE}/api/track/last-crop", method="GET")
+            with urllib.request.urlopen(req, timeout=1.0) as res:
+                data = res.read()
+            pixmap = QPixmap()
+            if pixmap.loadFromData(data):
+                scaled = pixmap.scaled(
+                    self._lbl_crop.width(), self._lbl_crop.height(),
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                self._lbl_crop.setPixmap(scaled)
+                self._lbl_crop.setText("")
+        except urllib.error.HTTPError:
+            pass  # 404 = no crop yet
+        except Exception:
+            pass
 
     def _refresh_previews(self) -> None:
         self._refresh_rgb()
@@ -533,6 +578,9 @@ class DashboardWindow(QMainWindow):
             self._track_bbox_pixel = None
             self._track_label = ""
             self._latest_track_result = None
+            self._crop_pixmap = None
+            self._lbl_crop.setText("No detection yet")
+            self._lbl_crop.setPixmap(QPixmap())
             self._lbl_result_label.setText("Label: -")
             self._lbl_result_score.setText("Score: -")
             self._lbl_result_bbox.setText("Bbox: -")
