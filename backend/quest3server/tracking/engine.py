@@ -130,36 +130,129 @@ class TrackingEngine:
         self._label = ""
         self._box_xyxy = (0, 0, 0, 0)
 
-    # ══════ Stage 1: Florence-2 detection ══════
+    # ══════ Stage 1: Florence-2 multi-task ensemble detection ══════
+
+    _DETECTION_IOU_THRESHOLD = 0.5
+    _DRC_MIN_BBOX_AREA = 400  # filter tiny regions from dense captioning
 
     def _run_detection(
         self, rgb: np.ndarray, img_w: int, img_h: int
     ) -> list[tuple[list[int], str, float]]:
-        """Run Florence-2 <OD> and return list of (bbox, label, score).
+        """Run Florence-2 multi-task ensemble: <OD> + <DENSE_REGION_CAPTION>.
 
-        Also tries <OPEN_VOCABULARY_DETECTION> as fallback if <OD> returns nothing.
+        <OD> provides reliable detection bboxes with concise class labels.
+        <DENSE_REGION_CAPTION> generates richer descriptive labels and often
+        catches objects missed by <OD> (small, occluded, or unusual objects).
+
+        Merge strategy:
+        - Overlapping bboxes → keep OD bbox, replace label with DRC description.
+        - Non-overlapping DRC bboxes → added to pool (objects <OD> missed).
+        - Falls back to <OPEN_VOCABULARY_DETECTION> if both tasks return empty.
         """
-        for task_prompt in ("<OD>", "<OPEN_VOCABULARY_DETECTION>"):
-            try:
-                raw = self._florence2_infer(rgb, task_prompt, max_tokens=768)
-                parsed = self._florence2_proc.post_process_generation(
-                    raw, task=task_prompt, image_size=(img_w, img_h),
-                )
-                regions = parsed.get(task_prompt, {})
-                bboxes = regions.get("bboxes", [])
-                labels = regions.get("labels", [])
-                if not bboxes:
-                    continue
+        od_detections = self._run_single_task(rgb, img_w, img_h, "<OD>", max_tokens=768)
+        drc_detections = self._run_single_task(rgb, img_w, img_h, "<DENSE_REGION_CAPTION>", max_tokens=512)
 
-                results = []
-                for i, (box, label) in enumerate(zip(bboxes, labels)):
-                    x0, y0, x1, y1 = [int(v) for v in box]
-                    results.append(([x0, y0, x1, y1], _clean_label(str(label)), 0.85))
-                if results:
-                    return results
-            except Exception as exc:
-                logger.warning("Florence-2 %s failed: %s", task_prompt, exc)
-        return []
+        # Filter DRC: drop tiny regions (noise from dense captioning)
+        drc_detections = [
+            (bbox, label, score) for bbox, label, score in drc_detections
+            if (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]) >= self._DRC_MIN_BBOX_AREA
+        ]
+
+        if not od_detections and not drc_detections:
+            logger.info("Ensemble empty, falling back to <OPEN_VOCABULARY_DETECTION>")
+            return self._run_single_task(rgb, img_w, img_h, "<OPEN_VOCABULARY_DETECTION>", max_tokens=768)
+
+        merged = self._merge_od_drc(od_detections, drc_detections)
+        logger.info(
+            "Ensemble: %d OD + %d DRC → %d merged detections",
+            len(od_detections), len(drc_detections), len(merged),
+        )
+        return merged
+
+    def _run_single_task(
+        self, rgb: np.ndarray, img_w: int, img_h: int,
+        task: str, max_tokens: int = 768,
+    ) -> list[tuple[list[int], str, float]]:
+        """Run a single Florence-2 task and return (bbox, label, score) list."""
+        try:
+            raw = self._florence2_infer(rgb, task, max_tokens=max_tokens)
+            parsed = self._florence2_proc.post_process_generation(
+                raw, task=task, image_size=(img_w, img_h),
+            )
+            regions = parsed.get(task, {})
+            bboxes = regions.get("bboxes", [])
+            labels = regions.get("labels", [])
+            if not bboxes:
+                return []
+
+            results = []
+            for box, label in zip(bboxes, labels):
+                x0, y0, x1, y1 = [int(v) for v in box]
+                results.append(([x0, y0, x1, y1], _clean_label(str(label)), 0.85))
+            return results
+        except Exception as exc:
+            logger.warning("Florence-2 %s failed: %s", task, exc)
+            return []
+
+    def _merge_od_drc(
+        self,
+        od: list[tuple[list[int], str, float]],
+        drc: list[tuple[list[int], str, float]],
+    ) -> list[tuple[list[int], str, float]]:
+        """Merge <OD> and <DENSE_REGION_CAPTION> detections.
+
+        For each DRC detection, find the best-matching OD bbox by IoU:
+        - IoU ≥ threshold → keep OD bbox, replace label with DRC label (richer).
+        - No match → add DRC detection as a new entry (object <OD> missed).
+
+        Confidence: OD-matched = 0.85, DRC-only = 0.65 (less reliable for
+        detection precision but adds recall).
+        """
+        if not drc:
+            return od
+        if not od:
+            return [(bbox, label, 0.65) for bbox, label, _ in drc]
+
+        merged = list(od)  # start with OD as base
+        drc_matched = [False] * len(drc)
+
+        for di, (dr_bbox, dr_label, _) in enumerate(drc):
+            best_iou = 0.0
+            best_oi = -1
+            for oi, (od_bbox, _, _) in enumerate(od):
+                iou = self._compute_iou(dr_bbox, od_bbox)
+                if iou > best_iou:
+                    best_iou = iou
+                    best_oi = oi
+
+            if best_iou >= self._DETECTION_IOU_THRESHOLD and best_oi >= 0:
+                # Replace OD label with richer DRC description
+                merged[best_oi] = (merged[best_oi][0], dr_label, 0.85)
+                drc_matched[di] = True
+
+        # Add unmatched DRC detections (objects <OD> missed)
+        for di, (dr_bbox, dr_label, _) in enumerate(drc):
+            if not drc_matched[di]:
+                merged.append((dr_bbox, dr_label, 0.65))
+
+        return merged
+
+    @staticmethod
+    def _compute_iou(
+        a: list[int], b: list[int],
+    ) -> float:
+        """Intersection over Union for two axis-aligned bboxes."""
+        x_left = max(a[0], b[0])
+        y_top = max(a[1], b[1])
+        x_right = min(a[2], b[2])
+        y_bottom = min(a[3], b[3])
+        if x_right <= x_left or y_bottom <= y_top:
+            return 0.0
+
+        inter = (x_right - x_left) * (y_bottom - y_top)
+        area_a = max(1, (a[2] - a[0]) * (a[3] - a[1]))
+        area_b = max(1, (b[2] - b[0]) * (b[3] - b[1]))
+        return inter / (area_a + area_b - inter)
 
     def _find_containing_bbox(
         self,
