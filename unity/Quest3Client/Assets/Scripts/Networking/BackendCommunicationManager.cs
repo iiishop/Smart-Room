@@ -18,6 +18,7 @@ namespace SmartRoom.Networking
         [SerializeField] private string rgbPath = "/ws/rgb";
         [SerializeField] private string depthPath = "/ws/depth";
         [SerializeField] private string visionPath = "/ws/vision";
+        [SerializeField] private bool enableVisionConnection = false;  // disabled: using new TrackingManager instead
         [SerializeField] private float reconnectDelaySeconds = 2f;
 
         private ClientWebSocket _controlSocket;
@@ -92,7 +93,7 @@ namespace SmartRoom.Networking
                 _ = EnsureDepthConnectedAsync();
             }
 
-            if (!IsVisionConnected && Time.time >= _nextVisionReconnectAt)
+            if (enableVisionConnection && !IsVisionConnected && Time.time >= _nextVisionReconnectAt)
             {
                 _nextVisionReconnectAt = Time.time + reconnectDelaySeconds;
                 _ = EnsureVisionConnectedAsync();

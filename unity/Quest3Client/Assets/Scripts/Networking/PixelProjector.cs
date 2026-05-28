@@ -14,8 +14,10 @@ namespace SmartRoom.Networking
     {
         [Header("References")]
         [SerializeField] private PassthroughCameraAccess passthroughCameraAccess;
+        [SerializeField] private RgbStreamModule rgbStreamModule;
 
-        [Header("Image Dimensions")]
+        [Header("Image Dimensions (auto-synced from RgbStreamModule)")]
+        [SerializeField] private bool autoSyncDimensions = true;
         [SerializeField] private int imageWidth = 640;
         [SerializeField] private int imageHeight = 480;
 
@@ -43,6 +45,17 @@ namespace SmartRoom.Networking
         {
             if (passthroughCameraAccess == null)
                 passthroughCameraAccess = FindFirstObjectByType<PassthroughCameraAccess>();
+            if (rgbStreamModule == null)
+                rgbStreamModule = FindFirstObjectByType<RgbStreamModule>();
+
+            if (autoSyncDimensions && rgbStreamModule != null)
+            {
+                imageWidth = rgbStreamModule.LatestFrameWidth;
+                imageHeight = rgbStreamModule.LatestFrameHeight;
+                // If stream hasn't started yet, LatestFrameWidth/Height may be 0
+                if (imageWidth <= 0) imageWidth = 640;
+                if (imageHeight <= 0) imageHeight = 360;
+            }
 
             Initialize();
         }

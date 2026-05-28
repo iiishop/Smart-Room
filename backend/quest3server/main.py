@@ -1,18 +1,19 @@
 from __future__ import annotations
 
-import base64
 import asyncio
+import base64
 import json
 import struct
 from datetime import datetime, timezone
 from threading import Lock
 from typing import Any
 
+import cv2
+import numpy as np
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 
 from .log_manager import add_log, add_python_log, list_logs
-from .vision import Quest3VisionRuntime, build_default_pipeline
-from .vision.pipeline import VisionPipelineError
+from .tracking import TrackingEngine, TrackState
 
 
 app = FastAPI(title="Smart Room Receiver Backend")
@@ -30,6 +31,7 @@ _state = {
     "last_depth_size": None,
 }
 _latest_rgb_jpeg: bytes | None = None
+_latest_rgb_bgr: Any = None  # decoded BGR numpy array for tracking engine
 _latest_depth_packet: bytes | None = None
 _latest_rgb_packet: bytes | None = None
 _rgb_preview_clients: set[WebSocket] = set()
@@ -40,18 +42,30 @@ _next_raycast_query_id = 1
 _latest_raycast_result: dict = {}
 _camera_intrinsics: dict = {}
 
+_tracking_engine: TrackingEngine | None = None
+_tracking_clients: set[WebSocket] = set()
+_models_ready = False
 
-def _build_vision_runtime() -> Quest3VisionRuntime:
+
+@app.on_event("startup")
+async def _warm_models() -> None:
+    """Pre-load SAM2 + Florence-2 at startup so first /api/track/start doesn't timeout."""
+    global _tracking_engine, _models_ready
     try:
-        return Quest3VisionRuntime(build_default_pipeline())
-    except VisionPipelineError as exc:
-        add_python_log("warning", f"Quest3 vision disabled: {exc}")
+        _tracking_engine = TrackingEngine()
+        _tracking_engine._ensure_models()  # force model download + load
+        _models_ready = True
+        add_python_log("info", "Tracking engine models loaded (SAM2 + Florence-2)")
     except Exception as exc:
-        add_python_log("error", f"Quest3 vision initialization failed: {exc}")
-    return Quest3VisionRuntime(None)
+        add_python_log("error", f"Tracking engine model warm-up failed: {exc}")
+        _models_ready = False
 
 
-_vision_runtime = _build_vision_runtime()
+def _get_tracking_engine() -> TrackingEngine:
+    global _tracking_engine
+    if _tracking_engine is None:
+        _tracking_engine = TrackingEngine()
+    return _tracking_engine
 
 
 def _utc_now_iso() -> str:
@@ -68,10 +82,11 @@ async def status() -> dict:
     with _lock:
         snapshot = dict(_state)
         snapshot["camera_intrinsics"] = dict(_camera_intrinsics)
-    vision_snapshot = _vision_runtime.snapshot()
-    snapshot["vision"] = vision_snapshot
-    snapshot["vision_metrics"] = vision_snapshot["metrics"]
-    snapshot["vision_latest"] = vision_snapshot["latest"]
+    snapshot["tracking"] = {
+        "active": _tracking_engine is not None and _tracking_engine.state != TrackState.IDLE,
+        "state": _tracking_engine.state.value if _tracking_engine else "idle",
+        "label": _tracking_engine.label if _tracking_engine else "",
+    }
     return snapshot
 
 
@@ -89,29 +104,6 @@ async def latest_rgb():
 async def logs(since_id: int = Query(0), limit: int = Query(200)) -> dict:
     items = list_logs(since_id=since_id, limit=limit)
     return {"count": len(items), "logs": items}
-
-
-@app.get("/api/vision")
-async def vision_status() -> dict[str, Any]:
-    result = _vision_runtime.snapshot()
-    with _lock:
-        result["camera_intrinsics"] = dict(_camera_intrinsics)
-    return result
-
-
-@app.post("/api/vision/session")
-async def start_vision_session(body: dict) -> dict[str, Any]:
-    prompt = str(body.get("prompt", ""))
-    try:
-        return _vision_runtime.start_session(prompt)
-    except VisionPipelineError as exc:
-        status_code = 503 if not _vision_runtime.is_available else 400
-        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
-
-
-@app.delete("/api/vision/session")
-async def stop_vision_session() -> dict[str, Any]:
-    return _vision_runtime.stop_session()
 
 
 @app.get("/api/raycast-result")
@@ -144,6 +136,8 @@ async def raycast_query(body: dict) -> dict:
     sent = await _broadcast_heartbeat_control(payload)
     return {"ok": True, "query_id": query_id, "dispatched": sent}
 
+
+# ═══════════════════════ WebSocket: RGB stream ═══════════════════════
 
 @app.websocket("/ws/rgb")
 async def rgb_socket(websocket: WebSocket) -> None:
@@ -179,12 +173,13 @@ async def rgb_socket(websocket: WebSocket) -> None:
         add_python_log("error", f"RGB websocket processing failed: {ex}")
 
 
+# ═══════════════════ WebSocket: Dashboard previews ══════════════════
+
 @app.websocket("/ws/rgb-preview")
 async def rgb_preview_socket(websocket: WebSocket) -> None:
     await websocket.accept()
     _rgb_preview_clients.add(websocket)
     add_python_log("info", "Dashboard preview client connected on /ws/rgb-preview")
-
     try:
         while True:
             await websocket.receive_text()
@@ -192,7 +187,6 @@ async def rgb_preview_socket(websocket: WebSocket) -> None:
         pass
     finally:
         _rgb_preview_clients.discard(websocket)
-        add_python_log("warning", "Dashboard preview client disconnected")
 
 
 @app.websocket("/ws/rgb-preview-raw")
@@ -200,7 +194,6 @@ async def rgb_preview_raw_socket(websocket: WebSocket) -> None:
     await websocket.accept()
     _rgb_raw_preview_clients.add(websocket)
     add_python_log("info", "Raw preview client connected on /ws/rgb-preview-raw")
-
     try:
         while True:
             await websocket.receive_text()
@@ -208,23 +201,9 @@ async def rgb_preview_raw_socket(websocket: WebSocket) -> None:
         pass
     finally:
         _rgb_raw_preview_clients.discard(websocket)
-        add_python_log("warning", "Raw preview client disconnected")
 
 
-@app.websocket("/ws/vision")
-async def vision_socket(websocket: WebSocket) -> None:
-    await _vision_runtime.connect(websocket)
-    add_python_log("info", "Vision websocket client connected on /ws/vision")
-
-    try:
-        while True:
-            await websocket.receive_text()
-    except WebSocketDisconnect:
-        pass
-    finally:
-        _vision_runtime.disconnect(websocket)
-        add_python_log("warning", "Vision websocket client disconnected")
-
+# ═══════════════════ WebSocket: Depth stream ════════════════════════
 
 @app.websocket("/ws/depth")
 async def depth_socket(websocket: WebSocket) -> None:
@@ -268,7 +247,6 @@ async def depth_preview_socket(websocket: WebSocket) -> None:
     await websocket.accept()
     _depth_preview_clients.add(websocket)
     add_python_log("info", "Dashboard preview client connected on /ws/depth-preview")
-
     try:
         while True:
             await websocket.receive_text()
@@ -276,8 +254,9 @@ async def depth_preview_socket(websocket: WebSocket) -> None:
         pass
     finally:
         _depth_preview_clients.discard(websocket)
-        add_python_log("warning", "Dashboard preview depth client disconnected")
 
+
+# ═══════════════════ WebSocket: Heartbeat / control ═════════════════
 
 @app.websocket("/ws/heartbeat")
 async def heartbeat_socket(websocket: WebSocket) -> None:
@@ -328,9 +307,6 @@ async def heartbeat_socket(websocket: WebSocket) -> None:
                         width = int(payload.get("width", 0))
                         height = int(payload.get("height", 0))
                     else:
-                        add_python_log(
-                            "warning", "Received rgb_frame without payload_b64"
-                        )
                         jpeg = None
 
                 elif payload_type == "camera_intrinsics":
@@ -389,26 +365,23 @@ async def heartbeat_socket(websocket: WebSocket) -> None:
             _state["connected"] = _state["active_connections"] > 0
 
 
+# ═══════════════════════ Packet parsers ═════════════════════════════
+
 def _parse_rgb_packet(data: bytes):
     if len(data) < 28:
         return None
-
     try:
         magic, frame_id, timestamp_ms, width, height, payload_len = struct.unpack_from(
             "<4sI q I I I", data, 0
         )
     except struct.error:
         return None
-
     if magic != b"RGB1":
         return None
-
     if payload_len <= 0:
         return None
-
     if len(data) < 28 + payload_len:
         return None
-
     payload = data[28 : 28 + payload_len]
     return frame_id, timestamp_ms, width, height, payload
 
@@ -416,7 +389,6 @@ def _parse_rgb_packet(data: bytes):
 def _parse_depth_packet(data: bytes):
     if len(data) < 36:
         return None
-
     try:
         (
             magic,
@@ -430,34 +402,75 @@ def _parse_depth_packet(data: bytes):
         ) = struct.unpack_from("<4sI q I I I I I", data, 0)
     except struct.error:
         return None
-
     if magic != b"DEP1":
         return None
-
     if payload_len <= 0:
         return None
-
     if len(data) < 36 + payload_len:
         return None
-
     payload = data[36 : 36 + payload_len]
     return frame_id, timestamp_ms, width, height, row_stride, pixel_stride, payload
 
 
+# ═══════════════════════ Broadcasting helpers ════════════════════════
+
 async def _broadcast_rgb_preview(jpeg_bytes: bytes) -> None:
     if not _rgb_preview_clients:
         return
-
     stale: list[WebSocket] = []
     for client in list(_rgb_preview_clients):
         try:
             await asyncio.wait_for(client.send_bytes(jpeg_bytes), timeout=0.02)
         except Exception:
             stale.append(client)
-
     for client in stale:
         _rgb_preview_clients.discard(client)
 
+
+async def _broadcast_rgb_raw_preview(packet_bytes: bytes) -> None:
+    if not _rgb_raw_preview_clients:
+        return
+    stale: list[WebSocket] = []
+    for client in list(_rgb_raw_preview_clients):
+        try:
+            await asyncio.wait_for(client.send_bytes(packet_bytes), timeout=0.02)
+        except Exception:
+            stale.append(client)
+    for client in stale:
+        _rgb_raw_preview_clients.discard(client)
+
+
+async def _broadcast_depth_preview(packet_bytes: bytes) -> None:
+    if not _depth_preview_clients:
+        return
+    stale: list[WebSocket] = []
+    for client in list(_depth_preview_clients):
+        try:
+            await asyncio.wait_for(client.send_bytes(packet_bytes), timeout=0.02)
+        except Exception:
+            stale.append(client)
+    for client in stale:
+        _depth_preview_clients.discard(client)
+
+
+async def _broadcast_heartbeat_control(payload: dict) -> int:
+    if not _heartbeat_clients:
+        return 0
+    data = json.dumps(payload)
+    stale: list[WebSocket] = []
+    sent = 0
+    for client in list(_heartbeat_clients):
+        try:
+            await asyncio.wait_for(client.send_text(data), timeout=0.02)
+            sent += 1
+        except Exception:
+            stale.append(client)
+    for client in stale:
+        _heartbeat_clients.discard(client)
+    return sent
+
+
+# ═══════════════════════ RGB frame ingestion ═════════════════════════
 
 async def _ingest_rgb_frame(
     *,
@@ -471,6 +484,7 @@ async def _ingest_rgb_frame(
     with _lock:
         global _latest_rgb_jpeg
         global _latest_rgb_packet
+        global _latest_rgb_bgr
         _latest_rgb_jpeg = jpeg
         if raw_packet is not None:
             _latest_rgb_packet = raw_packet
@@ -478,75 +492,86 @@ async def _ingest_rgb_frame(
         _state["last_rgb_size"] = f"{width}x{height}"
         _state["last_seen_utc"] = _utc_now_iso()
 
+    # Decode BGR for tracking engine (lightweight, ~3ms)
+    decoded = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if decoded is not None:
+        _latest_rgb_bgr = decoded
+
     await _broadcast_rgb_preview(jpeg)
     if raw_packet is not None:
         await _broadcast_rgb_raw_preview(raw_packet)
-    await _vision_runtime.process_rgb_frame(
-        frame_id=frame_id,
-        timestamp_ms=timestamp_ms,
-        jpeg_bytes=jpeg,
-    )
 
 
-async def _broadcast_rgb_raw_preview(packet_bytes: bytes) -> None:
-    if not _rgb_raw_preview_clients:
+# ═══════════════════════ Tracking API ════════════════════════════════
+
+@app.post("/api/track/start")
+async def track_start(body: dict) -> dict[str, Any]:
+    pixel_x = float(body.get("pixel_x", -1))
+    pixel_y = float(body.get("pixel_y", -1))
+    if pixel_x < 0 or pixel_y < 0:
+        raise HTTPException(status_code=400, detail="pixel_x and pixel_y required")
+    if _latest_rgb_bgr is None:
+        raise HTTPException(status_code=503, detail="No RGB frame available yet")
+    if not _models_ready:
+        raise HTTPException(status_code=503, detail="Tracking models not ready yet (still loading)")
+
+    engine = _get_tracking_engine()
+    engine.stop()
+    h, w = _latest_rgb_bgr.shape[:2]
+    px = int(pixel_x * w) if pixel_x <= 1.0 else int(pixel_x)
+    py = int(pixel_y * h) if pixel_y <= 1.0 else int(pixel_y)
+    result = engine.detect(px, py, _latest_rgb_bgr.copy())
+    add_python_log("info", f"Tracking detect at ({px},{py}) -> {result.label}")
+    return {"ok": True, "result": result.to_payload()}
+
+
+@app.post("/api/track/stop")
+async def track_stop() -> dict[str, Any]:
+    if _tracking_engine is not None:
+        _tracking_engine.stop()
+    return {"ok": True}
+
+
+@app.get("/api/track/status")
+async def track_status() -> dict[str, Any]:
+    if _tracking_engine is None:
+        return {"active": False, "state": "idle"}
+    return {
+        "active": _tracking_engine.state != TrackState.IDLE,
+        "state": _tracking_engine.state.value,
+        "label": _tracking_engine.label,
+    }
+
+
+@app.websocket("/ws/tracking")
+async def tracking_socket(websocket: WebSocket) -> None:
+    await websocket.accept()
+    _tracking_clients.add(websocket)
+    add_python_log("info", "Tracking WS connected")
+    try:
+        while True:
+            await asyncio.sleep(0.5)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        _tracking_clients.discard(websocket)
+
+
+async def _broadcast_tracking(result_payload: dict) -> None:
+    if not _tracking_clients:
         return
-
+    data = json.dumps(result_payload)
     stale: list[WebSocket] = []
-    for client in list(_rgb_raw_preview_clients):
+    for client in list(_tracking_clients):
         try:
-            await asyncio.wait_for(client.send_bytes(packet_bytes), timeout=0.02)
+            await asyncio.wait_for(client.send_text(data), timeout=0.05)
         except Exception:
             stale.append(client)
-
     for client in stale:
-        _rgb_raw_preview_clients.discard(client)
-
-
-async def _broadcast_depth_preview(packet_bytes: bytes) -> None:
-    if not _depth_preview_clients:
-        return
-
-    stale: list[WebSocket] = []
-    for client in list(_depth_preview_clients):
-        try:
-            await asyncio.wait_for(client.send_bytes(packet_bytes), timeout=0.02)
-        except Exception:
-            stale.append(client)
-
-    for client in stale:
-        _depth_preview_clients.discard(client)
-
-
-async def _broadcast_heartbeat_control(payload: dict) -> int:
-    if not _heartbeat_clients:
-        return 0
-
-    data = json.dumps(payload)
-    stale: list[WebSocket] = []
-    sent = 0
-    for client in list(_heartbeat_clients):
-        try:
-            await asyncio.wait_for(client.send_text(data), timeout=0.02)
-            sent += 1
-        except Exception:
-            stale.append(client)
-
-    for client in stale:
-        _heartbeat_clients.discard(client)
-    return sent
-
-
-def get_vision_runtime() -> Quest3VisionRuntime:
-    return _vision_runtime
-
-
-def set_vision_runtime_for_testing(runtime: Quest3VisionRuntime) -> None:
-    global _vision_runtime
-    _vision_runtime = runtime
+        _tracking_clients.discard(client)
 
 
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("quest3server.main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("quest3server.main:app", host="0.0.0.0", port=8500, reload=True)

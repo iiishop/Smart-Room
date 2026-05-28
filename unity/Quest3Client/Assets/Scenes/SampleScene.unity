@@ -938,14 +938,19 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::SmartRoom.Interaction.TriggerDepthProbe
   depthCursor: {fileID: 1375737369}
-  xrCamera: {fileID: 779372815}
-  raycastManager: {fileID: 207147541}
+  xrCamera: {fileID: 0}
+  raycastManager: {fileID: 0}
   sphereRadius: 0.2
   maxDistance: 10
   rayGrid: 20
-  minDotForColor: 0.1
+  minGrid: 10
+  targetSpacing: 0.015
   pointSize: 0.005
   maxPoints: 4096
+  showBoundaryRing: 1
+  ringColor: {r: 0.3, g: 1, b: 0.3, a: 0.6}
+  ringSegments: 64
+  ringWidth: 0.002
 --- !u!4 &888868698
 Transform:
   m_ObjectHideFlags: 0
@@ -1638,11 +1643,11 @@ MonoBehaviour:
   mode: 1
   wiredEndpoint:
     host: 127.0.0.1
-    port: 8000
+    port: 8500
     protocol: ws
   wirelessEndpoint:
     host: 127.0.0.1
-    port: 8000
+    port: 8500
     protocol: ws
   logResolvedEndpoint: 1
 --- !u!4 &1313628472
@@ -1854,6 +1859,9 @@ MonoBehaviour:
   hitColor: {r: 0, g: 1, b: 0, a: 1}
   missColor: {r: 1, g: 0, b: 0, a: 1}
   maxDistance: 10
+  positionSmoothSpeed: 20
+  missToleranceFrames: 5
+  colorSmoothSpeed: 8
 --- !u!4 &1375737370
 Transform:
   m_ObjectHideFlags: 0
@@ -2036,6 +2044,60 @@ Transform:
   m_ConstrainProportionsScale: 0
   m_Children: []
   m_Father: {fileID: 545444342}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!1 &1711561613
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 1711561615}
+  - component: {fileID: 1711561614}
+  m_Layer: 0
+  m_Name: TrackingManager
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!114 &1711561614
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1711561613}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: a4e1d38f7475cc245a3da1f4c1966d91, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::SmartRoom.Tracking.TrackingManager
+  depthCursor: {fileID: 1375737369}
+  pixelProjector: {fileID: 1313628479}
+  backendManager: {fileID: 1313628475}
+  xrCamera: {fileID: 1000850322}
+  backendBaseUrl: http://localhost:8500
+  bboxLineMaterial: {fileID: 0}
+  bboxLineWidth: 0.005
+  bboxColor: {r: 0, g: 1, b: 0.5, a: 1}
+  lostDisplayDuration: 2
+  lostTextPrefab: {fileID: 0}
+--- !u!4 &1711561615
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1711561613}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: -0.02568, y: 0.21586, z: -0.24558}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1 &1751828752
 GameObject:
@@ -2759,3 +2821,4 @@ SceneRoots:
   - {fileID: 411012395}
   - {fileID: 1964602103}
   - {fileID: 888868698}
+  - {fileID: 1711561615}

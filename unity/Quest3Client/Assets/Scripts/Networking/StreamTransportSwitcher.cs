@@ -31,7 +31,7 @@ namespace SmartRoom.Networking
         [SerializeField] private TransportEndpoint wiredEndpoint = new TransportEndpoint
         {
             host = "127.0.0.1",
-            port = 8000,
+            port = 8500,
             protocol = "ws"
         };
 
@@ -39,7 +39,7 @@ namespace SmartRoom.Networking
         [SerializeField] private TransportEndpoint wirelessEndpoint = new TransportEndpoint
         {
             host = "192.168.1.100",
-            port = 8000,
+            port = 8500,
             protocol = "ws"
         };
 
