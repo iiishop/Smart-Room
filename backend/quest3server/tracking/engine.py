@@ -324,8 +324,8 @@ class TrackingEngine:
                 text=[label], return_tensors="pt", padding=True,
             ).to("cuda")
 
-            image_features = self._clip_model.get_image_features(**inputs)
-            text_features = self._clip_model.get_text_features(**text_inputs)
+            image_features = self._clip_model.get_image_features(**inputs).pooler_output
+            text_features = self._clip_model.get_text_features(**text_inputs).pooler_output
 
         # Cosine similarity
         image_features = image_features / image_features.norm(dim=-1, keepdim=True)
