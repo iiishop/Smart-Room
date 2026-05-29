@@ -211,28 +211,16 @@ class DashboardWindow(QMainWindow):
         w = QWidget()
         layout = QVBoxLayout()
 
-        # Hover info
-        self._lbl_rgb_hover = QLabel("RGB hover: click to trigger tracking")
-        self._lbl_depth_hover = QLabel("Depth: -")
-        layout.addWidget(self._lbl_rgb_hover)
-        layout.addWidget(self._lbl_depth_hover)
+        # Hover info bar
+        self._lbl_preview_hover = QLabel("Hover over image for pixel coords and depth")
+        layout.addWidget(self._lbl_preview_hover)
 
-        # Images side by side
-        row = QWidget()
-        row_layout = QHBoxLayout()
-
-        self._rgb_label = QLabel("RGB Frame: waiting...")
-        self._rgb_label.setMinimumSize(480, 360)
-        self._rgb_label.setMouseTracking(True)
-        self._rgb_label.installEventFilter(self)
-
-        self._depth_label = QLabel("Depth Frame: waiting...")
-        self._depth_label.setMinimumSize(480, 360)
-
-        row_layout.addWidget(self._rgb_label)
-        row_layout.addWidget(self._depth_label)
-        row.setLayout(row_layout)
-        layout.addWidget(row)
+        # Single combined RGB + depth overlay image
+        self._preview_label = QLabel("RGB + Depth: waiting...")
+        self._preview_label.setMinimumSize(640, 360)
+        self._preview_label.setMouseTracking(True)
+        self._preview_label.installEventFilter(self)
+        layout.addWidget(self._preview_label)
 
         w.setLayout(layout)
         return w
@@ -287,6 +275,32 @@ class DashboardWindow(QMainWindow):
         result_layout.addWidget(self._lbl_result_time)
         result_group.setLayout(result_layout)
         layout.addWidget(result_group)
+
+        # Original frame with cursor marker
+        orig_group = QGroupBox("Original Frame (with cursor)")
+        orig_layout = QVBoxLayout()
+        self._lbl_original_frame = QLabel("No trigger yet")
+        self._lbl_original_frame.setMinimumSize(320, 180)
+        self._lbl_original_frame.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._lbl_original_frame.setStyleSheet(
+            "background-color: #1a1a1a; border-radius: 4px;"
+        )
+        orig_layout.addWidget(self._lbl_original_frame)
+        orig_group.setLayout(orig_layout)
+        layout.addWidget(orig_group)
+
+        # Depth top-down (bird's-eye) view
+        td_group = QGroupBox("Depth Top-Down (bird's-eye, red cross = cursor)")
+        td_layout = QVBoxLayout()
+        self._lbl_topdown = QLabel("No depth data yet")
+        self._lbl_topdown.setMinimumSize(320, 240)
+        self._lbl_topdown.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._lbl_topdown.setStyleSheet(
+            "background-color: #1a1a1a; border-radius: 4px;"
+        )
+        td_layout.addWidget(self._lbl_topdown)
+        td_group.setLayout(td_layout)
+        layout.addWidget(td_group)
 
         # Crop preview
         crop_group = QGroupBox("Detection Crop")
@@ -362,12 +376,14 @@ class DashboardWindow(QMainWindow):
             parts = []
             parts.append(f"SAM2: {'✓' if ms.get('sam2') else '✗'}")
             parts.append(f"Florence-2: {'✓' if ms.get('florence2') else '✗'}")
-            parts.append(f"CLIP: {'✓' if ms.get('clip') else '✗'}")
+            parts.append(f"SigLIP2: {'✓' if ms.get('clip') else '✗'}")
             self._lbl_track_models.setText("Models: " + "  |  ".join(parts))
 
             # Crop refresh
             if active and state == "tracking":
                 self._refresh_crop()
+                self._refresh_original_frame()
+                self._refresh_topdown()
         except Exception:
             self._lbl_track_models.setText("Models: -")
 
@@ -391,87 +407,115 @@ class DashboardWindow(QMainWindow):
         except Exception:
             pass
 
-    def _refresh_previews(self) -> None:
-        self._refresh_rgb()
-        self._refresh_depth()
+    def _refresh_original_frame(self) -> None:
+        """Fetch the original frame with cursor crosshair."""
+        try:
+            req = urllib.request.Request(
+                f"{API_BASE}/api/track/last-original", method="GET",
+            )
+            with urllib.request.urlopen(req, timeout=1.0) as res:
+                data = res.read()
+            pixmap = QPixmap()
+            if pixmap.loadFromData(data):
+                scaled = pixmap.scaled(
+                    self._lbl_original_frame.width(),
+                    self._lbl_original_frame.height(),
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                self._lbl_original_frame.setPixmap(scaled)
+                self._lbl_original_frame.setText("")
+        except urllib.error.HTTPError:
+            pass
+        except Exception:
+            pass
 
-    def _refresh_rgb(self) -> None:
+    def _refresh_topdown(self) -> None:
+        """Fetch the depth top-down (bird's-eye) view."""
+        try:
+            req = urllib.request.Request(
+                f"{API_BASE}/api/depth/topdown", method="GET",
+            )
+            with urllib.request.urlopen(req, timeout=1.0) as res:
+                data = res.read()
+            pixmap = QPixmap()
+            if pixmap.loadFromData(data):
+                scaled = pixmap.scaled(
+                    self._lbl_topdown.width(),
+                    self._lbl_topdown.height(),
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                self._lbl_topdown.setPixmap(scaled)
+                self._lbl_topdown.setText("")
+        except urllib.error.HTTPError:
+            pass
+        except Exception:
+            pass
+
+    def _refresh_previews(self) -> None:
+        self._refresh_combined_preview()
+
+    def _refresh_combined_preview(self) -> None:
+        """Draw RGB image with depth heatmap overlaid."""
         if self._latest_rgb_bytes is None:
             return
-        pixmap = QPixmap()
-        if not pixmap.loadFromData(self._latest_rgb_bytes):
+
+        rgb_pix = QPixmap()
+        if not rgb_pix.loadFromData(self._latest_rgb_bytes):
             return
 
-        self._latest_rgb_width = pixmap.width()
-        self._latest_rgb_height = pixmap.height()
+        self._latest_rgb_width = rgb_pix.width()
+        self._latest_rgb_height = rgb_pix.height()
 
-        # Draw tracking bbox on RGB if we have one
-        if self._track_bbox_pixel is not None:
-            pixmap = self._draw_bbox_on_pixmap(pixmap)
-
-        scaled = pixmap.scaled(
-            self._rgb_label.width(), self._rgb_label.height(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        self._rgb_label.setPixmap(scaled)
-
-        x = max(0, (self._rgb_label.width() - scaled.width()) // 2)
-        y = max(0, (self._rgb_label.height() - scaled.height()) // 2)
-        self._rgb_draw_rect = (x, y, scaled.width(), scaled.height())
-
-    def _draw_bbox_on_pixmap(self, src: QPixmap) -> QPixmap:
-        """Draw tracked object bbox overlay on the RGB pixmap."""
-        if self._track_bbox_pixel is None:
-            return src
-
-        x0, y0, x1, y1 = self._track_bbox_pixel
-        canvas = QPixmap(src.size())
+        # Start with the RGB image as base canvas
+        canvas = QPixmap(rgb_pix.size())
         canvas.fill(Qt.GlobalColor.transparent)
         painter = QPainter(canvas)
         try:
-            painter.drawPixmap(0, 0, src)
+            painter.drawPixmap(0, 0, rgb_pix)
 
-            # Draw bbox
-            pen = QPen(QColor(0, 255, 128, 255), 3)
-            painter.setPen(pen)
-            painter.drawRect(x0, y0, max(1, x1 - x0), max(1, y1 - y0))
+            # Draw tracking bbox if we have one
+            if self._track_bbox_pixel is not None:
+                x0, y0, x1, y1 = self._track_bbox_pixel
+                pen = QPen(QColor(0, 255, 128, 255), 3)
+                painter.setPen(pen)
+                painter.drawRect(x0, y0, max(1, x1 - x0), max(1, y1 - y0))
+                if self._track_label:
+                    painter.setPen(QPen(QColor(0, 0, 0, 200)))
+                    font = painter.font()
+                    font.setPointSize(12)
+                    font.setBold(True)
+                    painter.setFont(font)
+                    painter.drawText(x0, max(0, y0 - 6), self._track_label)
 
-            # Draw label
-            if self._track_label:
-                painter.setPen(QPen(QColor(0, 0, 0, 200)))
-                font = painter.font()
-                font.setPointSize(14)
-                font.setBold(True)
-                painter.setFont(font)
-                # Background rect for text
-                text = self._track_label
-                fm = painter.fontMetrics()
-                tw = fm.horizontalAdvance(text) + 8
-                th = fm.height() + 4
-                label_x = x0
-                label_y = max(0, y0 - th - 4)
-                painter.fillRect(label_x, label_y, tw, th, QColor(0, 255, 128, 180))
-                painter.setPen(QPen(QColor(0, 0, 0)))
-                painter.drawText(label_x + 4, label_y + fm.ascent() + 2, text)
+            # Overlay depth heatmap at 40% opacity
+            if self._depth_preview_pixmap is not None:
+                depth_scaled = self._depth_preview_pixmap.scaled(
+                    rgb_pix.size(),
+                    Qt.AspectRatioMode.IgnoreAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                painter.setOpacity(0.4)
+                painter.drawPixmap(0, 0, depth_scaled)
+                painter.setOpacity(1.0)
         finally:
             painter.end()
-        return canvas
 
-    def _refresh_depth(self) -> None:
-        pixmap = self._depth_preview_pixmap
-        if pixmap is None:
-            return
-        scaled = pixmap.scaled(
-            self._depth_label.width(), self._depth_label.height(),
+        # Scale to fit the label
+        scaled = canvas.scaled(
+            self._preview_label.width(), self._preview_label.height(),
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
-        self._depth_label.setPixmap(scaled)
+        self._preview_label.setPixmap(scaled)
 
-        x = max(0, (self._depth_label.width() - scaled.width()) // 2)
-        y = max(0, (self._depth_label.height() - scaled.height()) // 2)
-        self._depth_draw_rect = (x, y, scaled.width(), scaled.height())
+        # Cache draw rect for hover coordinate mapping
+        rx = max(0, (self._preview_label.width() - scaled.width()) // 2)
+        ry = max(0, (self._preview_label.height() - scaled.height()) // 2)
+        self._preview_draw_rect = (rx, ry, scaled.width(), scaled.height())
+
+    # ── old _refresh_rgb and _refresh_depth removed; replaced above ──
 
     def _refresh_logs(self) -> None:
         try:
@@ -581,6 +625,10 @@ class DashboardWindow(QMainWindow):
             self._crop_pixmap = None
             self._lbl_crop.setText("No detection yet")
             self._lbl_crop.setPixmap(QPixmap())
+            self._lbl_original_frame.setText("No trigger yet")
+            self._lbl_original_frame.setPixmap(QPixmap())
+            self._lbl_topdown.setText("No depth data yet")
+            self._lbl_topdown.setPixmap(QPixmap())
             self._lbl_result_label.setText("Label: -")
             self._lbl_result_score.setText("Score: -")
             self._lbl_result_bbox.setText("Bbox: -")
@@ -590,22 +638,24 @@ class DashboardWindow(QMainWindow):
     # ═══════════════════════ RGB click-to-detect ═════════════════════
 
     def eventFilter(self, watched, event) -> bool:
-        if watched is self._rgb_label:
+        if watched is self._preview_label:
             etype = event.type()
             if etype == QEvent.Type.MouseMove:
                 pos = event.position().toPoint()
-                self._update_rgb_hover(pos.x(), pos.y())
+                self._update_preview_hover(pos.x(), pos.y())
             elif etype == QEvent.Type.MouseButtonPress:
                 pos = event.position().toPoint()
                 self._on_rgb_click(pos.x(), pos.y())
             elif etype == QEvent.Type.Leave:
-                self._lbl_rgb_hover.setText("RGB hover: click to trigger tracking")
+                self._lbl_preview_hover.setText(
+                    "Hover over image for pixel coords and depth"
+                )
         return super().eventFilter(watched, event)
 
-    def _update_rgb_hover(self, mx: int, my: int) -> None:
-        if self._rgb_draw_rect is None:
+    def _update_preview_hover(self, mx: int, my: int) -> None:
+        if not hasattr(self, '_preview_draw_rect') or self._preview_draw_rect is None:
             return
-        dx, dy, dw, dh = self._rgb_draw_rect
+        dx, dy, dw, dh = self._preview_draw_rect
         if dw <= 0 or dh <= 0:
             return
         if mx < dx or my < dy or mx >= dx + dw or my >= dy + dh:
@@ -615,32 +665,32 @@ class DashboardWindow(QMainWindow):
         v = (my - dy) / dh
         px = int(u * self._latest_rgb_width)
         py = int(v * self._latest_rgb_height)
-        self._rgb_hover_pixel = (px, py)
 
-        # Also show corresponding depth
+        # Query depth from aligned depth API (may return None)
         depth_str = "-"
-        if self._latest_depth_values and self._lut_loaded:
-            # Approximate
-            depth_str = "(no LUT match)"
-        elif self._latest_depth_values:
-            # Rough mapping: assume similar FOV
-            du = int(u * self._latest_depth_width)
-            dv = int(v * self._latest_depth_height)
-            idx = dv * self._latest_depth_width + du
-            if 0 <= idx < len(self._latest_depth_values):
-                d = self._latest_depth_values[idx]
-                if d > 0 and math.isfinite(d):
-                    depth_str = f"{d:.3f}m"
+        try:
+            req = urllib.request.Request(
+                f"{API_BASE}/api/depth/at?px={px}&py={py}", method="GET",
+            )
+            with urllib.request.urlopen(req, timeout=0.3) as res:
+                d = json.loads(res.read().decode("utf-8"))
+            dm = d.get("depth_m")
+            if dm is not None:
+                depth_str = f"{dm:.3f}m"
+            else:
+                depth_str = "(no depth)"
+        except Exception:
+            depth_str = "(query failed)"
 
-        self._lbl_rgb_hover.setText(
-            f"RGB: ({px}, {py})  uv=({u:.3f}, {v:.3f})  Depth: {depth_str}"
+        self._lbl_preview_hover.setText(
+            f"Pixel: ({px}, {py})  |  Depth: {depth_str}"
         )
 
     def _on_rgb_click(self, mx: int, my: int) -> None:
         """Click on RGB preview → trigger tracking at that point."""
-        if self._rgb_draw_rect is None:
+        if not hasattr(self, '_preview_draw_rect') or self._preview_draw_rect is None:
             return
-        dx, dy, dw, dh = self._rgb_draw_rect
+        dx, dy, dw, dh = self._preview_draw_rect
         if dw <= 0 or dh <= 0:
             return
         if mx < dx or my < dy or mx >= dx + dw or my >= dy + dh:

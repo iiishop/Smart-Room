@@ -26,6 +26,7 @@ namespace SmartRoom.Tracking
     {
         [Header("References")]
         [SerializeField] private Interaction.DepthCursor depthCursor;
+        [SerializeField] private Interaction.ControllerRaycaster controllerRaycaster;
         [SerializeField] private Networking.PixelProjector pixelProjector;
         [SerializeField] private Camera xrCamera;
 
@@ -59,6 +60,7 @@ namespace SmartRoom.Tracking
         private void Awake()
         {
             depthCursor ??= FindFirstObjectByType<Interaction.DepthCursor>();
+            controllerRaycaster ??= FindFirstObjectByType<Interaction.ControllerRaycaster>();
             pixelProjector ??= FindFirstObjectByType<Networking.PixelProjector>();
             xrCamera ??= Camera.main;
         }
@@ -113,16 +115,32 @@ namespace SmartRoom.Tracking
             // Stop previous tracking
             StopTracking();
 
-            // Get world hit point from depth cursor
+            // Get world hit point from depth cursor (used for 3D bbox anchoring)
             Vector3 hitPoint = depthCursor.HitPoint;
-
-            // World position for 3D anchoring
             _anchoredWorldPos = hitPoint;
 
-            // Get pixel coordinates for the backend
+            // ── Compute PCA pixel using Meta's WorldToViewportPoint ──
+            // This is the official API that handles PCA intrinsics + sensor
+            // calibration internally, avoiding manual coordinate chain errors.
             Vector2 pixel;
-            if (pixelProjector != null && pixelProjector.IsReady)
+            if (pixelProjector != null && pixelProjector.IsReady
+                && pixelProjector.CameraAccess != null
+                && pixelProjector.CameraAccess.IsPlaying)
             {
+                var pca = pixelProjector.CameraAccess;
+                Vector2 viewport = pca.WorldToViewportPoint(hitPoint);
+                // Meta viewport: (0,0)=bottom-left, (1,1)=top-right.
+                // Our stream JPEG: Y=0 at top.  Flip Y.
+                float streamPx = viewport.x * pixelProjector.ImageWidth;
+                float streamPy = (1f - viewport.y) * pixelProjector.ImageHeight;
+                pixel = new Vector2(
+                    Mathf.Clamp(streamPx, 0, pixelProjector.ImageWidth - 1),
+                    Mathf.Clamp(streamPy, 0, pixelProjector.ImageHeight - 1)
+                );
+            }
+            else if (pixelProjector != null && pixelProjector.IsReady)
+            {
+                // Fallback: manual PCA intrinsics projection
                 var projPixel = pixelProjector.WorldToPixel(hitPoint);
                 pixel = projPixel ?? WorldToScreenPoint(hitPoint);
             }
@@ -147,6 +165,36 @@ namespace SmartRoom.Tracking
 
         // ── Backend communication ──
 
+        private float[] BuildRgbIntrinsics()
+        {
+            // Standard 3×3 intrinsic matrix, row-major:
+            // [fx,  0, cx]
+            // [ 0, fy, cy]
+            // [ 0,  0,  1]
+            if (pixelProjector == null || !pixelProjector.IsReady)
+                return null;
+
+            return new float[] {
+                pixelProjector.FocalPixels.x, 0f, pixelProjector.PrincipalPoint.x,
+                0f, pixelProjector.FocalPixels.y, pixelProjector.PrincipalPoint.y,
+                0f, 0f, 1f,
+            };
+        }
+
+        private float[] GetDepthReprojMatrix()
+        {
+            // _EnvironmentDepthReprojectionMatrices is a global shader
+            // array set by the Meta Depth API.  Index 0 = left eye.
+            var mat = Shader.GetGlobalMatrix("_EnvironmentDepthReprojectionMatrices");
+            // Unity Matrix4x4 is column-major; flatten to row-major for Python.
+            return new float[] {
+                mat.m00, mat.m01, mat.m02, mat.m03,
+                mat.m10, mat.m11, mat.m12, mat.m13,
+                mat.m20, mat.m21, mat.m22, mat.m23,
+                mat.m30, mat.m31, mat.m32, mat.m33,
+            };
+        }
+
         private async Task DetectAsync(Vector2 pixel)
         {
             try
@@ -155,6 +203,8 @@ namespace SmartRoom.Tracking
                 {
                     pixel_x = pixel.x,
                     pixel_y = pixel.y,
+                    rgb_intrinsics = BuildRgbIntrinsics(),
+                    depth_reproj = GetDepthReprojMatrix(),
                 });
 
                 using var http = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(15) };

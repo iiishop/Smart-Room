@@ -416,7 +416,7 @@ class TrackingEngine:
 
         # Remap all detections to full-image coordinates
         remapped = [
-            ([cx0 + b[0], cy0 + b[1], cx0 + b[2], cy0 + b[3]], label, score)
+            ([cx0 + bbox[0], cy0 + bbox[1], cx0 + bbox[2], cy0 + bbox[3]], label, score)
             for bbox, label, score in detections
         ]
         logger.info(

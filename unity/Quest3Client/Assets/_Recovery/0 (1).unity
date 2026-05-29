@@ -2078,7 +2078,6 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::SmartRoom.Tracking.TrackingManager
   depthCursor: {fileID: 1375737369}
-  controllerRaycaster: {fileID: 736496067}
   pixelProjector: {fileID: 1313628479}
   xrCamera: {fileID: 1000850322}
   backendBaseUrl: http://localhost:8500

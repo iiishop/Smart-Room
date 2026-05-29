@@ -27,6 +27,7 @@ namespace SmartRoom.Networking
         public int ImageWidth => imageWidth;
         public int ImageHeight => imageHeight;
         public bool IsReady => _initialized;
+        public PassthroughCameraAccess CameraAccess => passthroughCameraAccess;
 
         private bool _initialized;
 
