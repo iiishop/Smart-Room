@@ -41,16 +41,20 @@ _LOC_PATTERN = re.compile(r"<loc_\d+>", re.IGNORECASE)
 class TrackingEngine:
     """Object detection + segmentation + label verification engine.
 
+    Stage 0 ― SAM2 point-prompt at cursor → mask (guaranteed spatial accuracy).
     Stage 1 ― Florence-2 multi-task ensemble detects all objects → bboxes + labels.
-    Stage 2 ― Find cursor-containing bbox (or multi-scale crop cascade for small objects).
+    Stage 2 ― IoU-match cursor mask against all detection bboxes → pick best.
     Stage 3 ― SigLIP 2 label verification → calibrated confidence score.
-    Stage 4 ― SAM2 box + multi-point prompt → tight mask → clean bbox.
+    Stage 4 ― SAM2 box + multi-point refinement → tight mask → clean bbox.
+
+    If no bbox matches the cursor mask (IoU < 0.3), the cursor object was
+    missed by detection — fall back to captioning the mask region directly.
 
     References
     ----------
     - Florence-2 <OD> task:
       https://huggingface.co/florence-community/Florence-2-base
-    - SAM2 box prompt:
+    - SAM2 point + box prompt:
       https://huggingface.co/docs/transformers/model_doc/sam2
     - SigLIP 2:
       https://huggingface.co/google/siglip2-base-patch16-224
@@ -83,18 +87,21 @@ class TrackingEngine:
     def label(self) -> str:
         return self._label
 
+    _CROP_MASK_IOU_THRESHOLD = 0.3  # min IoU for bbox→mask match
+
     def detect(self, pixel_x: float, pixel_y: float, rgb_bgr: np.ndarray) -> TrackingResult:
         """Detect and describe the object at (pixel_x, pixel_y) in rgb_bgr.
 
         Pipeline:
-        1. Florence-2 multi-task ensemble on full image → bbox at cursor.
-        2. If full-image bbox scores poorly on SigLIP 2, or no bbox found,
-           run multi-scale crop cascade (256→384→512) around cursor.
-           Pick the bbox with the best SigLIP 2 score.
-        3. SigLIP 2 final label verification; fall back to region description
+        0. SAM2 point-prompt at cursor → mask (ground truth for "what's here").
+        1. Florence-2 multi-task ensemble on full image → detection bboxes.
+        2. IoU-match cursor mask against all bboxes → select the bbox that
+           actually overlaps the object at cursor.
+        3. If no good match: multi-scale crop cascade → IoU match again.
+        4. SigLIP 2 label verification; fall back to region description
            if the label still doesn't match.
-        4. SAM2 box + multi-point refinement → tight mask → clean bbox.
-        5. Fallback: SAM2 point-prompt if all detection tiers fail.
+        5. If a bbox matched: SAM2 box + multi-point refinement → tight bbox.
+        6. If no bbox matched: caption the cursor mask region directly.
         """
         self._ensure_models()
 
@@ -103,102 +110,102 @@ class TrackingEngine:
         py = int(np.clip(pixel_y, 0, h - 1))
         rgb_rgb = cv2.cvtColor(rgb_bgr, cv2.COLOR_BGR2RGB)
 
+        # ══════ Stage 0: SAM2 point prompt → cursor mask ══════
+        # This mask is the ground truth for "what's at the cursor" —
+        # SAM2 guarantees the mask covers the prompt point.
+        cursor_mask = self._segment_at_point(rgb_rgb, px, py)
+        if cursor_mask is None or not cursor_mask.any():
+            logger.warning("SAM2 point prompt produced empty mask")
+            self._state = TrackState.IDLE
+            return TrackingResult(object_id=0, state=TrackState.IDLE,
+                                  label="", score=0.0, box_xyxy=(0, 0, 0, 0))
+
         # ══════ Stage 1: Florence-2 full-image detection ══════
-        detections = self._run_detection(rgb_rgb, w, h)
+        detections_full = self._run_detection(rgb_rgb, w, h)
 
-        target_bbox: list[int] | None = None
-        target_label = ""
-        from_crop = False
-
-        if detections:
-            target_bbox, target_label, _ = self._find_containing_bbox(detections, px, py)
-
-        # ══════ Stage 2: SigLIP 2 pre-check + crop cascade ══════
-        # Full-image bbox found — but is it really the object at cursor?
-        if target_bbox is not None:
-            _, quick_score = self._verify_label_with_clip(
-                rgb_rgb, target_bbox, target_label,
-            )
-            if quick_score < self._CLIP_SIM_THRESHOLD:
-                # Bbox looks wrong (often: large object like "chair" containing
-                # a small object like "cup").  Try crop cascade.
-                logger.info(
-                    "Full-image '%s' SigLIP2=%.3f < %.2f — trying crop cascade",
-                    target_label, quick_score, self._CLIP_SIM_THRESHOLD,
-                )
-                crop_result = self._try_crop_detection(rgb_rgb, px, py, w, h)
-                if crop_result is not None:
-                    crop_bbox, crop_label = crop_result
-                    _, crop_score = self._verify_label_with_clip(
-                        rgb_rgb, crop_bbox, crop_label,
-                    )
-                    if crop_score > quick_score:
-                        target_bbox, target_label = crop_bbox, crop_label
-                        from_crop = True
-                        logger.info(
-                            "Crop cascade better: '%s' (%.3f > %.3f)",
-                            crop_label, crop_score, quick_score,
-                        )
-                    # else: keep the original full-image bbox — even
-                    # a low-score bbox is better than nothing.
-        else:
-            # No bbox at cursor in full image — crop cascade is mandatory
-            logger.info(
-                "No bbox at (%d,%d) in full image, trying crop cascade", px, py,
-            )
-            crop_result = self._try_crop_detection(rgb_rgb, px, py, w, h)
-            if crop_result is not None:
-                target_bbox, target_label = crop_result[0], crop_result[1]
-                from_crop = True
-
-        if target_bbox is None:
-            return self._fallback_point_prompt(rgb_rgb, px, py)
-
-        # ══════ SigLIP 2 label verification ══════
-        verified_label, clip_score = self._verify_label_with_clip(
-            rgb_rgb, target_bbox, target_label,
+        # ══════ Stage 2: IoU-match cursor mask against full-image bboxes ══════
+        best_bbox, best_label, best_iou = self._match_bboxes_by_mask_iou(
+            detections_full, cursor_mask,
         )
-        # Last resort: if the label still doesn't match, ask Florence-2
-        # to describe the region directly.
-        if clip_score < self._CLIP_SIM_THRESHOLD:
-            logger.warning(
-                "SigLIP2 verification low (%.3f) for '%s', trying region description",
-                clip_score, verified_label,
-            )
-            alt_label = self._describe_region(rgb_rgb, *target_bbox)
-            if alt_label != verified_label and alt_label != "object":
-                _, alt_score = self._verify_label_with_clip(
-                    rgb_rgb, target_bbox, alt_label,
-                )
-                if alt_score > clip_score:
-                    verified_label = alt_label
-                    clip_score = alt_score
-
-        # ══════ Stage 3: SAM2 box-prompt refinement ══════
-        refined_bbox = self._refine_with_sam2_box(rgb_rgb, target_bbox)
-
-        label = _clean_label(verified_label)
-
-        self._label = label
-        self._score = clip_score
-        self._box_xyxy = refined_bbox
-        self._state = TrackState.TRACKING
-
         logger.info(
-            "Detected: %s (SigLIP2=%.3f, bbox=%s)", label, clip_score, refined_bbox,
+            "Full-image IoU best: '%s' (%.3f)", best_label or "(none)", best_iou,
         )
 
-        return TrackingResult(
-            object_id=1,
-            state=TrackState.TRACKING,
-            label=label,
-            score=clip_score,
-            box_xyxy=refined_bbox,
-            center_pixel=(
-                (refined_bbox[0] + refined_bbox[2]) / 2.0,
-                (refined_bbox[1] + refined_bbox[3]) / 2.0,
-            ),
-        )
+        # ══════ Stage 3: Crop cascade if full-image didn't find the cursor object ══════
+        if best_iou < self._CROP_MASK_IOU_THRESHOLD:
+            logger.info("Full-image IoU %.3f < %.2f — trying crop cascade",
+                        best_iou, self._CROP_MASK_IOU_THRESHOLD)
+            crop_dets = self._try_crop_detection_all(rgb_rgb, px, py, w, h)
+            if crop_dets:
+                c_bbox, c_label, c_iou = self._match_bboxes_by_mask_iou(
+                    crop_dets, cursor_mask,
+                )
+                logger.info(
+                    "Crop cascade IoU best: '%s' (%.3f)", c_label or "(none)", c_iou,
+                )
+                if c_iou > best_iou:
+                    best_bbox, best_label, best_iou = c_bbox, c_label, c_iou
+
+        # ══════ Stage 4 & 5: Verify + refine, or caption mask ══════
+        if best_iou >= self._CROP_MASK_IOU_THRESHOLD and best_bbox is not None:
+            # ── Bbox matched the cursor mask: verify label + refine ──
+            verified_label, clip_score = self._verify_label_with_clip(
+                rgb_rgb, best_bbox, best_label,
+            )
+            if clip_score < self._CLIP_SIM_THRESHOLD:
+                logger.warning(
+                    "SigLIP2 verification low (%.3f) for '%s', trying region description",
+                    clip_score, verified_label,
+                )
+                alt_label = self._describe_region(rgb_rgb, *best_bbox)
+                if alt_label != verified_label and alt_label != "object":
+                    _, alt_score = self._verify_label_with_clip(
+                        rgb_rgb, best_bbox, alt_label,
+                    )
+                    if alt_score > clip_score:
+                        verified_label = alt_label
+                        clip_score = alt_score
+
+            # SAM2 box refine — image already set from Stage 0
+            refined_bbox = self._refine_with_sam2_box_preserve(rgb_rgb, best_bbox)
+
+            label = _clean_label(verified_label)
+            self._label = label
+            self._score = clip_score
+            self._box_xyxy = refined_bbox
+            self._state = TrackState.TRACKING
+
+            logger.info(
+                "Detected: %s (SigLIP2=%.3f, bbox=%s)", label, clip_score, refined_bbox,
+            )
+
+            return TrackingResult(
+                object_id=1, state=TrackState.TRACKING,
+                label=label, score=clip_score, box_xyxy=refined_bbox,
+                center_pixel=(
+                    (refined_bbox[0] + refined_bbox[2]) / 2.0,
+                    (refined_bbox[1] + refined_bbox[3]) / 2.0,
+                ),
+            )
+        else:
+            # ── No bbox matched the cursor mask — caption the mask region ──
+            mask_bbox = self._bbox_from_mask(cursor_mask)
+            label = self._caption_crop(rgb_rgb, *mask_bbox)
+            logger.info("No matching bbox — captioning mask: '%s'", label)
+
+            self._label = label
+            self._score = 0.5
+            self._box_xyxy = mask_bbox
+            self._state = TrackState.TRACKING
+
+            return TrackingResult(
+                object_id=1, state=TrackState.TRACKING,
+                label=label, score=0.5, box_xyxy=mask_bbox,
+                center_pixel=(
+                    (mask_bbox[0] + mask_bbox[2]) / 2.0,
+                    (mask_bbox[1] + mask_bbox[3]) / 2.0,
+                ),
+            )
 
     def stop(self) -> None:
         self._state = TrackState.IDLE
@@ -355,42 +362,37 @@ class TrackingEngine:
     # ══════ Small-object multi-scale crop re-detection ══════
 
     _CROP_SIZES = [256, 384, 512]
-    # Ascending: start tight so small objects fill more of the frame.
-    # Each crop tries <OD> first; if that returns nothing it retries with
-    # <DENSE_REGION_CAPTION> on the same crop.  512 runs full ensemble.
 
-    def _try_crop_detection(
+    def _try_crop_detection_all(
         self, rgb: np.ndarray, px: int, py: int, img_w: int, img_h: int,
-    ) -> tuple[list[int], str] | None:
-        """Multi-scale crop cascade around the cursor point.
+    ) -> list[tuple[list[int], str, float]]:
+        """Run multi-scale crop cascade, return ALL detections from all crops.
 
-        Crop 256 → <OD> only  (very small objects: cups, cables, phones).
-        Crop 384 → <OD> only  (medium objects partially visible at 256).
-        Crop 512 → full ensemble (OD + DRC, last resort before fallback).
-
-        Each tier returns on first hit — no wasted inference on larger
-        crops once the object is found.
+        Each crop produces a list of (bbox_in_full_coords, label, score).
+        The caller (detect) uses mask-IoU matching to pick the right bbox.
         """
+        all_dets: list[tuple[list[int], str, float]] = []
         for size in self._CROP_SIZES:
-            result = self._try_crop_at_size(rgb, px, py, img_w, img_h, size)
-            if result is not None:
-                return result
-        return None
+            crop_dets = self._try_crop_at_size(rgb, px, py, img_w, img_h, size)
+            all_dets.extend(crop_dets)
+            if crop_dets:
+                # If this crop found something, stop — avoid redundant
+                # larger crops once the object is already in the pool.
+                break
+        return all_dets
 
     def _try_crop_at_size(
         self, rgb: np.ndarray, px: int, py: int,
         img_w: int, img_h: int, size: int,
-    ) -> tuple[list[int], str] | None:
-        """Run detection on a single size×size crop and pick the best bbox.
+    ) -> list[tuple[list[int], str, float]]:
+        """Run detection on a single size×size crop.
 
-        For crops < 512, starts with <OD> (fast).  If <OD> returns nothing,
-        retries with <DENSE_REGION_CAPTION> on the same crop — DRC often
-        catches non-COCO objects (boba cups, cables, gadgets) that OD misses.
-        Size == 512 runs the full ensemble directly.
+        Returns all detections remapped to full-image coordinates.
+        Returns empty list if the crop is too small or nothing detected.
         """
         crop, cx0, cy0 = self._make_crop(rgb, px, py, img_w, img_h, size)
         if crop is None:
-            return None
+            return []
 
         crop_h, crop_w = crop.shape[:2]
 
@@ -400,7 +402,6 @@ class TrackingEngine:
             )
             task_name = "<OD>"
             if not detections:
-                # <OD> missed — try DRC on same crop before giving up
                 detections = self._run_single_task(
                     crop, crop_w, crop_h, "<DENSE_REGION_CAPTION>", max_tokens=512,
                 )
@@ -411,18 +412,17 @@ class TrackingEngine:
 
         if not detections:
             logger.debug("Crop %d×%d %s: no detections", size, size, task_name)
-            return None
+            return []
 
-        result = self._pick_bbox_from_crop(
-            detections, px - cx0, py - cy0, cx0, cy0,
+        # Remap all detections to full-image coordinates
+        remapped = [
+            ([cx0 + b[0], cy0 + b[1], cx0 + b[2], cy0 + b[3]], label, score)
+            for bbox, label, score in detections
+        ]
+        logger.info(
+            "Crop %d×%d %s: %d detections", size, size, task_name, len(remapped),
         )
-        if result is not None:
-            bbox, label = result
-            logger.info(
-                "Crop %d×%d %s: '%s' at %s",
-                size, size, task_name, label, bbox,
-            )
-        return result
+        return remapped
 
     @staticmethod
     def _make_crop(
@@ -450,58 +450,60 @@ class TrackingEngine:
             return None, 0, 0
         return crop, x0, y0
 
-    def _pick_bbox_from_crop(
+    # ══════ Mask ←→ bbox IoU matching ══════
+
+    @staticmethod
+    def _compute_mask_bbox_iou(mask: np.ndarray, bbox: list[int]) -> float:
+        """IoU between a binary mask and an axis-aligned bbox [x0, y0, x1, y1].
+
+        The bbox is treated as a solid rectangular mask.  IoU = intersection
+        area / union area.  Returns 0.0 if either region is empty.
+        """
+        x0, y0, x1, y1 = bbox
+        h, w = mask.shape
+        # Clip bbox to image bounds
+        x0_c = max(0, x0)
+        y0_c = max(0, y0)
+        x1_c = min(w, x1)
+        y1_c = min(h, y1)
+        if x1_c <= x0_c or y1_c <= y0_c:
+            return 0.0
+
+        bbox_area = (x1_c - x0_c) * (y1_c - y0_c)
+        mask_area = int(mask.sum())
+        if bbox_area == 0 or mask_area == 0:
+            return 0.0
+
+        # Intersection: mask pixels inside the bbox
+        inter = int(mask[y0_c:y1_c, x0_c:x1_c].sum())
+        union = mask_area + bbox_area - inter
+        return inter / max(union, 1)
+
+    def _match_bboxes_by_mask_iou(
         self,
         detections: list[tuple[list[int], str, float]],
-        crop_px: int, crop_py: int,
-        crop_x0: int, crop_y0: int,
-    ) -> tuple[list[int], str] | None:
-        """Pick the best detection bbox for a cursor point in crop coords.
+        mask: np.ndarray,
+    ) -> tuple[list[int] | None, str, float]:
+        """Return the (bbox, label, iou) with the highest IoU against mask.
 
-        Priority: smallest bbox that contains (crop_px, crop_py).
-        Fallback: closest bbox by centre distance (cursor missed all bboxes
-        but the object is likely the nearest one).
-        Returns (bbox_in_full_coords, label) or None.
+        Returns (None, "", 0.0) if detections is empty.
         """
-        # Exact containment — smallest bbox containing the cursor
-        best_bbox, best_label, _ = self._find_containing_bbox(
-            detections, crop_px, crop_py,
-        )
-        if best_label and best_bbox is not None:
-            return (
-                [
-                    crop_x0 + best_bbox[0], crop_y0 + best_bbox[1],
-                    crop_x0 + best_bbox[2], crop_y0 + best_bbox[3],
-                ],
-                best_label,
-            )
-
-        # Cursor not inside any bbox — pick closest by centre distance
-        if not detections:
-            return None
-
-        best_dist = float("inf")
-        best_bbox_crop: list[int] = []
-        best_label_crop = ""
+        best_bbox: list[int] | None = None
+        best_label = ""
+        best_iou = 0.0
         for bbox, label, _ in detections:
-            cx = (bbox[0] + bbox[2]) / 2.0
-            cy = (bbox[1] + bbox[3]) / 2.0
-            dist = (cx - crop_px) ** 2 + (cy - crop_py) ** 2
-            if dist < best_dist:
-                best_dist = dist
-                best_label_crop = label
-                best_bbox_crop = bbox
+            iou = self._compute_mask_bbox_iou(mask, bbox)
+            if iou > best_iou:
+                best_iou = iou
+                best_bbox = bbox
+                best_label = label
+        return best_bbox, best_label, best_iou
 
-        if not best_label_crop:
-            return None
-
-        return (
-            [
-                crop_x0 + best_bbox_crop[0], crop_y0 + best_bbox_crop[1],
-                crop_x0 + best_bbox_crop[2], crop_y0 + best_bbox_crop[3],
-            ],
-            best_label_crop,
-        )
+    @staticmethod
+    def _bbox_from_mask(mask: np.ndarray) -> tuple[int, int, int, int]:
+        """Tight axis-aligned bbox from a binary mask."""
+        ys, xs = np.where(mask)
+        return (int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max()))
 
     # ══════ SigLIP 2 label verification ══════
 
@@ -541,7 +543,32 @@ class TrackingEngine:
 
         return label, similarity
 
-    # ══════ Stage 3: SAM2 multi-point + box refinement ══════
+    # ══════ Stage 0: SAM2 point prompt (cursor → mask) ══════
+
+    def _segment_at_point(
+        self, rgb: np.ndarray, px: int, py: int,
+    ) -> np.ndarray | None:
+        """Run SAM2 point prompt at (px, py) → binary mask.
+
+        Sets the image on the SAM2 predictor so subsequent refine calls
+        can reuse the embeddings without re-encoding.
+        Returns None if SAM2 fails.
+        """
+        point = np.array([[px, py]], dtype=np.float32)
+        try:
+            with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
+                self._sam2_image.set_image(rgb)
+                masks, _, _ = self._sam2_image.predict(
+                    point_coords=point,
+                    point_labels=np.array([1]),
+                    multimask_output=False,
+                )
+            return np.asarray(masks[0], dtype=bool)
+        except Exception as exc:
+            logger.warning("SAM2 point prompt failed: %s", exc)
+            return None
+
+    # ══════ Stage 4: SAM2 multi-point + box refinement ══════
 
     _SAM2_GRID_SIZE = 4  # N×N grid of positive points inside the detection bbox
 
@@ -609,6 +636,57 @@ class TrackingEngine:
 
         return (x0, y0, x1, y1)
 
+    def _refine_with_sam2_box_preserve(
+        self, rgb: np.ndarray, rough_bbox: list[int],
+    ) -> tuple[int, int, int, int]:
+        """Like _refine_with_sam2_box, but assumes image is already set on predictor.
+
+        Call after _segment_at_point() to avoid re-encoding the image.
+        """
+        x0, y0, x1, y1 = rough_bbox
+        input_box = np.array([[x0, y0, x1, y1]], dtype=np.float32)
+
+        pos_points = self._sample_grid_points(x0, y0, x1, y1, grid=self._SAM2_GRID_SIZE)
+        pos_labels = np.ones(len(pos_points), dtype=np.int32)
+        neg_points = self._sample_boundary_points(x0, y0, x1, y1)
+        neg_labels = np.zeros(len(neg_points), dtype=np.int32) if len(neg_points) > 0 else np.array([], dtype=np.int32)
+        all_points = np.concatenate([pos_points, neg_points], axis=0)
+        all_labels = np.concatenate([pos_labels, neg_labels], axis=0)
+
+        try:
+            with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
+                masks, scores, _ = self._sam2_image.predict(
+                    point_coords=all_points,
+                    point_labels=all_labels,
+                    box=input_box,
+                    multimask_output=False,
+                )
+            mask = np.asarray(masks[0], dtype=bool)
+            if mask.any():
+                bbox_y, bbox_x = np.where(mask)
+                return (
+                    int(bbox_x.min()), int(bbox_y.min()),
+                    int(bbox_x.max()), int(bbox_y.max()),
+                )
+        except Exception as exc:
+            logger.warning("SAM2 multi-point (preserve) failed, trying box-only: %s", exc)
+            try:
+                with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
+                    masks, scores, _ = self._sam2_image.predict(
+                        box=input_box, multimask_output=False,
+                    )
+                mask = np.asarray(masks[0], dtype=bool)
+                if mask.any():
+                    bbox_y, bbox_x = np.where(mask)
+                    return (
+                        int(bbox_x.min()), int(bbox_y.min()),
+                        int(bbox_x.max()), int(bbox_y.max()),
+                    )
+            except Exception as exc2:
+                logger.warning("SAM2 box-only (preserve) also failed: %s", exc2)
+
+        return (x0, y0, x1, y1)
+
     @staticmethod
     def _sample_grid_points(
         x0: int, y0: int, x1: int, y1: int, grid: int = 4,
@@ -650,58 +728,6 @@ class TrackingEngine:
             [(x0 + x1) / 2.0, y0 - margin_y],  # top
             [(x0 + x1) / 2.0, y1 + margin_y],  # bottom
         ], dtype=np.float32)
-
-    # ══════ Fallback: SAM2 point prompt ══════
-
-    def _fallback_point_prompt(self, rgb: np.ndarray, px: int, py: int) -> TrackingResult:
-        """Fallback when detection fails: use SAM2 point prompt directly.
-
-        For label generation, crops the SAM2 mask region + padding and runs
-        Florence-2 <DETAILED_CAPTION> on the isolated object image, avoiding
-        background interference that causes mislabeling (e.g., 'a laptop'
-        when the cursor is on a cup next to a laptop).
-        """
-        point = np.array([[px, py]], dtype=np.float32)
-        try:
-            with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
-                self._sam2_image.set_image(rgb)
-                masks, scores, _ = self._sam2_image.predict(
-                    point_coords=point,
-                    point_labels=np.array([1]),
-                    multimask_output=False,
-                )
-            mask = np.asarray(masks[0], dtype=bool)
-            if not mask.any():
-                self._state = TrackState.IDLE
-                return TrackingResult(
-                    object_id=0, state=TrackState.IDLE, label="", score=0.0,
-                    box_xyxy=(0, 0, 0, 0),
-                )
-            bbox_y, bbox_x = np.where(mask)
-            bbox = (int(bbox_x.min()), int(bbox_y.min()), int(bbox_x.max()), int(bbox_y.max()))
-        except Exception:
-            self._state = TrackState.IDLE
-            return TrackingResult(
-                object_id=0, state=TrackState.IDLE, label="", score=0.0,
-                box_xyxy=(0, 0, 0, 0),
-            )
-
-        # Crop the mask region + padding, caption the isolated object
-        label = self._caption_crop(rgb, *bbox)
-
-        self._label = label
-        self._score = float(scores[0])
-        self._box_xyxy = bbox
-        self._state = TrackState.TRACKING
-
-        return TrackingResult(
-            object_id=1,
-            state=TrackState.TRACKING,
-            label=label,
-            score=float(scores[0]),
-            box_xyxy=bbox,
-            center_pixel=((bbox[0] + bbox[2]) / 2.0, (bbox[1] + bbox[3]) / 2.0),
-        )
 
     # ══════ Florence-2 helpers ══════
 
