@@ -154,17 +154,35 @@ class TrackingEngine:
             )
             if clip_score < self._CLIP_SIM_THRESHOLD:
                 logger.warning(
-                    "SigLIP2 verification low (%.3f) for '%s', trying region description",
+                    "SigLIP2 verification low (%.3f) for '%s', trying caption→phrase grounding",
                     clip_score, verified_label,
                 )
-                alt_label = self._describe_region(rgb_rgb, *best_bbox)
-                if alt_label != verified_label and alt_label != "object":
-                    _, alt_score = self._verify_label_with_clip(
-                        rgb_rgb, best_bbox, alt_label,
+                # Grounded-SAM-2 style cascade: caption the crop → extract
+                # noun phrases with bboxes → verify each against SigLIP 2.
+                phrases = self._caption_to_phrases(rgb_rgb, *best_bbox)
+                for phrase, phrase_bbox in phrases:
+                    if phrase == verified_label or phrase == "object":
+                        continue
+                    _, phrase_score = self._verify_label_with_clip(
+                        rgb_rgb, phrase_bbox, phrase,
                     )
-                    if alt_score > clip_score:
-                        verified_label = alt_label
-                        clip_score = alt_score
+                    if phrase_score > clip_score:
+                        verified_label = phrase
+                        clip_score = phrase_score
+                        logger.info(
+                            "Caption→phrase: '%s' (%.3f) beats original",
+                            phrase, phrase_score,
+                        )
+                # If phrase grounding didn't help, fall back to region description
+                if clip_score < self._CLIP_SIM_THRESHOLD:
+                    alt_label = self._describe_region(rgb_rgb, *best_bbox)
+                    if alt_label != verified_label and alt_label != "object":
+                        _, alt_score = self._verify_label_with_clip(
+                            rgb_rgb, best_bbox, alt_label,
+                        )
+                        if alt_score > clip_score:
+                            verified_label = alt_label
+                            clip_score = alt_score
 
             # SAM2 box refine — image already set from Stage 0
             refined_bbox = self._refine_with_sam2_box_preserve(rgb_rgb, best_bbox)
@@ -810,6 +828,69 @@ class TrackingEngine:
                 logger.warning("Florence-2 %s on crop failed: %s", task, exc)
 
         return "object"
+
+    def _caption_to_phrases(
+        self, rgb: np.ndarray, x0: int, y0: int, x1: int, y1: int,
+    ) -> list[tuple[str, list[int]]]:
+        """Grounded-SAM-2 style cascade: caption crop → extract noun phrases.
+
+        1. Crop + pad the bbox region, run <DETAILED_CAPTION>.
+        2. Feed caption to <CAPTION_TO_PHRASE_GROUNDING> → bboxes + labels.
+        3. Remap phrase bboxes to full-image coords.
+        Returns list of (phrase_text, bbox_in_full_coords), or empty list.
+        """
+        h, w = rgb.shape[:2]
+        bw, bh = max(4, x1 - x0), max(4, y1 - y0)
+        pad_x = max(8, int(bw * 0.15))
+        pad_y = max(8, int(bh * 0.15))
+        cx0 = max(0, x0 - pad_x)
+        cy0 = max(0, y0 - pad_y)
+        cx1 = min(w, x1 + pad_x)
+        cy1 = min(h, y1 + pad_y)
+        crop = rgb[cy0:cy1, cx0:cx1]
+        if crop.size == 0:
+            return []
+
+        # Step 1: caption the isolated object region
+        caption = ""
+        for task in ("<DETAILED_CAPTION>", "<CAPTION>"):
+            try:
+                raw = self._florence2_infer(crop, task, max_tokens=128)
+                parsed = self._florence2_proc.post_process_generation(
+                    raw, task=task, image_size=(crop.shape[1], crop.shape[0]),
+                )
+                caption = parsed.get(task, "").strip()
+                if caption and len(caption) > 3:
+                    break
+            except Exception as exc:
+                logger.warning("Florence-2 %s for phrases failed: %s", task, exc)
+        if not caption:
+            return []
+
+        # Step 2: <CAPTION_TO_PHRASE_GROUNDING> on the full image
+        try:
+            task = "<CAPTION_TO_PHRASE_GROUNDING>"
+            text_input = f"{task}{caption}"
+            raw = self._florence2_infer(rgb, text_input, max_tokens=256)
+            parsed = self._florence2_proc.post_process_generation(
+                raw, task=task, image_size=(w, h),
+            )
+            regions = parsed.get(task, {})
+            bboxes = regions.get("bboxes", [])
+            labels = regions.get("labels", [])
+        except Exception as exc:
+            logger.warning("Florence-2 %s failed: %s", task, exc)
+            return []
+
+        # Step 3: remap bboxes + pair with phrases
+        phrases: list[tuple[str, list[int]]] = []
+        for box, label in zip(bboxes, labels):
+            phrase = _clean_label(str(label))
+            if not phrase or phrase == "object":
+                continue
+            px0, py0, px1, py1 = [int(v) for v in box]
+            phrases.append((phrase, [px0, py0, px1, py1]))
+        return phrases
 
     # ══════ Model loading ══════
 

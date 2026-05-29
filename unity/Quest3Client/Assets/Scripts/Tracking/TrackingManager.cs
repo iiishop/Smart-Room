@@ -128,7 +128,13 @@ namespace SmartRoom.Tracking
                 && pixelProjector.CameraAccess.IsPlaying)
             {
                 var pca = pixelProjector.CameraAccess;
-                Vector2 viewport = pca.WorldToViewportPoint(hitPoint);
+                // Cache camera pose at trigger instant so the projection uses
+                // the exact pose when the user pulled the trigger, not the pose
+                // at callback time (they could differ by a frame).
+                // Reference: Meta PCA WorldToViewportPoint(Vector3, Pose?)
+                //   https://developers.meta.com/horizon/reference/mruk/v85/
+                var triggerPose = pca.GetCameraPose();
+                Vector2 viewport = pca.WorldToViewportPoint(hitPoint, triggerPose);
                 // Meta viewport: (0,0)=bottom-left, (1,1)=top-right.
                 // Our stream JPEG: Y=0 at top.  Flip Y.
                 float streamPx = viewport.x * pixelProjector.ImageWidth;
