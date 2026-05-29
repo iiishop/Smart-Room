@@ -793,7 +793,9 @@ class TrackingEngine:
         from sam2.sam2_image_predictor import SAM2ImagePredictor
         from transformers import AutoModel, AutoProcessor, Florence2ForConditionalGeneration
 
-        self._sam2_image = SAM2ImagePredictor.from_pretrained(self._IMAGE_PREDICTOR_MODEL)
+        self._sam2_image = SAM2ImagePredictor.from_pretrained(
+            self._IMAGE_PREDICTOR_MODEL, device="cuda",
+        )
         self._florence2 = Florence2ForConditionalGeneration.from_pretrained(
             self._FLORENCE2_MODEL,
             torch_dtype=torch.bfloat16,
