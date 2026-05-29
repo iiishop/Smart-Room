@@ -173,9 +173,9 @@ class TrackingEngine:
                             "Caption→phrase: '%s' (%.3f) beats original",
                             phrase, phrase_score,
                         )
-                # If phrase grounding didn't help, fall back to region description
+                # If phrase grounding didn't help, caption the isolated crop
                 if clip_score < self._CLIP_SIM_THRESHOLD:
-                    alt_label = self._describe_region(rgb_rgb, *best_bbox)
+                    alt_label = self._caption_crop(rgb_rgb, *best_bbox)
                     if alt_label != verified_label and alt_label != "object":
                         _, alt_score = self._verify_label_with_clip(
                             rgb_rgb, best_bbox, alt_label,
@@ -311,7 +311,7 @@ class TrackingEngine:
         if not drc:
             return od
         if not od:
-            return [(bbox, label, 0.65) for bbox, label, _ in drc]
+            return [(bbox, _shorten_label(label), 0.65) for bbox, label, _ in drc]
 
         merged = list(od)  # start with OD as base
         drc_matched = [False] * len(drc)
@@ -326,14 +326,14 @@ class TrackingEngine:
                     best_oi = oi
 
             if best_iou >= self._DETECTION_IOU_THRESHOLD and best_oi >= 0:
-                # Replace OD label with richer DRC description
-                merged[best_oi] = (merged[best_oi][0], dr_label, 0.85)
+                # Replace OD label with shorter DRC description
+                merged[best_oi] = (merged[best_oi][0], _shorten_label(dr_label), 0.85)
                 drc_matched[di] = True
 
         # Add unmatched DRC detections (objects <OD> missed)
         for di, (dr_bbox, dr_label, _) in enumerate(drc):
             if not drc_matched[di]:
-                merged.append((dr_bbox, dr_label, 0.65))
+                merged.append((dr_bbox, _shorten_label(dr_label), 0.65))
 
         return merged
 
@@ -785,7 +785,7 @@ class TrackingEngine:
                 raw, task=task, image_size=(w, h),
             )
             result = parsed.get(task, "object")
-            return _clean_label(result)
+            return _shorten_label(_clean_label(result))
         except Exception as exc:
             logger.warning("Florence-2 region description failed: %s", exc)
             return "object"
@@ -823,7 +823,7 @@ class TrackingEngine:
                 )
                 label = parsed.get(task, "").strip()
                 if label and len(label) > 2:
-                    return _clean_label(label)
+                    return _shorten_label(_clean_label(label))
             except Exception as exc:
                 logger.warning("Florence-2 %s on crop failed: %s", task, exc)
 
@@ -930,3 +930,29 @@ def _clean_label(text: str) -> str:
     # Collapse multiple spaces
     cleaned = re.sub(r"\s+", " ", cleaned)
     return cleaned if cleaned else "object"
+
+
+def _shorten_label(text: str, max_words: int = 5) -> str:
+    """Trim Florence-2 caption boilerplate, keep only the key object phrase.
+
+    Strips common preamble patterns like 'The image shows', 'This is a photo of',
+    'In this picture there is', etc.  If the result is still longer than
+    max_words, truncate to the first max_words.
+    """
+    text = text.strip()
+    # Common Florence-2 caption preambles
+    for prefix in [
+        "The image shows ", "The image depicts ", "The picture shows ",
+        "This is a photo of ", "This is an image of ", "This image shows ",
+        "In this image, ", "In this picture, ", "In the image, ",
+        "A photo of ", "An image of ",
+    ]:
+        if text.lower().startswith(prefix.lower()):
+            text = text[len(prefix):]
+            break
+    # Also strip trailing period
+    text = text.rstrip(".")
+    words = text.split()
+    if len(words) > max_words:
+        text = " ".join(words[:max_words])
+    return text.strip() if text.strip() else "object"
