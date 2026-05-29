@@ -867,13 +867,15 @@ class TrackingEngine:
         if not caption:
             return []
 
-        # Step 2: <CAPTION_TO_PHRASE_GROUNDING> on the full image
+        # Step 2: <CAPTION_TO_PHRASE_GROUNDING> on the CROP (not full image).
+        # Running on the full image would ground phrases against all objects
+        # in the scene, not just the isolated crop — easily picks a neighbor.
         try:
             task = "<CAPTION_TO_PHRASE_GROUNDING>"
             text_input = f"{task}{caption}"
-            raw = self._florence2_infer(rgb, text_input, max_tokens=256)
+            raw = self._florence2_infer(crop, text_input, max_tokens=256)
             parsed = self._florence2_proc.post_process_generation(
-                raw, task=task, image_size=(w, h),
+                raw, task=task, image_size=(crop.shape[1], crop.shape[0]),
             )
             regions = parsed.get(task, {})
             bboxes = regions.get("bboxes", [])
@@ -882,14 +884,14 @@ class TrackingEngine:
             logger.warning("Florence-2 %s failed: %s", task, exc)
             return []
 
-        # Step 3: remap bboxes + pair with phrases
+        # Step 3: remap phrase bboxes from crop→full coords
         phrases: list[tuple[str, list[int]]] = []
         for box, label in zip(bboxes, labels):
             phrase = _clean_label(str(label))
             if not phrase or phrase == "object":
                 continue
             px0, py0, px1, py1 = [int(v) for v in box]
-            phrases.append((phrase, [px0, py0, px1, py1]))
+            phrases.append((phrase, [cx0 + px0, cy0 + py0, cx0 + px1, cy0 + py1]))
         return phrases
 
     # ══════ Model loading ══════
