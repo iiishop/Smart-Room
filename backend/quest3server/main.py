@@ -15,6 +15,7 @@ from fastapi.responses import Response
 
 from .log_manager import add_log, add_python_log, list_logs
 from .tracking import TrackingEngine, TrackState
+from .tracking.depth_alignment import align_depth_to_rgb, intrinsics_from_focal_principal
 
 
 app = FastAPI(title="Smart Room Receiver Backend")
@@ -34,6 +35,10 @@ _state = {
 _latest_rgb_jpeg: bytes | None = None
 _latest_rgb_bgr: Any = None  # decoded BGR numpy array for tracking engine
 _latest_depth_packet: bytes | None = None
+_latest_aligned_depth: np.ndarray | None = None  # depth reprojected into RGB frame
+_last_trigger_frame_jpeg: bytes | None = None  # original RGB frame from last trigger
+_last_trigger_pixel: tuple[int, int] | None = None  # (px, py) from last trigger
+_last_rgb_intrinsics: np.ndarray | None = None  # 3×3 K from last trigger
 _latest_rgb_packet: bytes | None = None
 _rgb_preview_clients: set[WebSocket] = set()
 _rgb_raw_preview_clients: set[WebSocket] = set()
@@ -414,6 +419,19 @@ def _parse_depth_packet(data: bytes):
     return frame_id, timestamp_ms, width, height, row_stride, pixel_stride, payload
 
 
+def _depth_packet_to_array(packet: bytes) -> np.ndarray | None:
+    """Parse a binary DEP1 packet into a float32 depth array (metres)."""
+    parsed = _parse_depth_packet(packet)
+    if parsed is None:
+        return None
+    _, _, width, height, _, _, payload = parsed
+    expected = width * height * 4
+    if len(payload) != expected:
+        return None
+    arr = np.frombuffer(payload, dtype=np.float32).reshape((height, width)).copy()
+    return arr
+
+
 # ═══════════════════════ Broadcasting helpers ════════════════════════
 
 async def _broadcast_rgb_preview(jpeg_bytes: bytes) -> None:
@@ -422,7 +440,7 @@ async def _broadcast_rgb_preview(jpeg_bytes: bytes) -> None:
     stale: list[WebSocket] = []
     for client in list(_rgb_preview_clients):
         try:
-            await asyncio.wait_for(client.send_bytes(jpeg_bytes), timeout=0.02)
+            await asyncio.wait_for(client.send_bytes(jpeg_bytes), timeout=1.0)
         except Exception:
             stale.append(client)
     for client in stale:
@@ -435,7 +453,7 @@ async def _broadcast_rgb_raw_preview(packet_bytes: bytes) -> None:
     stale: list[WebSocket] = []
     for client in list(_rgb_raw_preview_clients):
         try:
-            await asyncio.wait_for(client.send_bytes(packet_bytes), timeout=0.02)
+            await asyncio.wait_for(client.send_bytes(packet_bytes), timeout=1.0)
         except Exception:
             stale.append(client)
     for client in stale:
@@ -448,7 +466,7 @@ async def _broadcast_depth_preview(packet_bytes: bytes) -> None:
     stale: list[WebSocket] = []
     for client in list(_depth_preview_clients):
         try:
-            await asyncio.wait_for(client.send_bytes(packet_bytes), timeout=0.02)
+            await asyncio.wait_for(client.send_bytes(packet_bytes), timeout=1.0)
         except Exception:
             stale.append(client)
     for client in stale:
@@ -463,7 +481,7 @@ async def _broadcast_heartbeat_control(payload: dict) -> int:
     sent = 0
     for client in list(_heartbeat_clients):
         try:
-            await asyncio.wait_for(client.send_text(data), timeout=0.02)
+            await asyncio.wait_for(client.send_text(data), timeout=1.0)
             sent += 1
         except Exception:
             stale.append(client)
@@ -517,11 +535,47 @@ async def track_start(body: dict) -> dict[str, Any]:
     if not _models_ready:
         raise HTTPException(status_code=503, detail="Tracking models not ready yet (still loading)")
 
+    # ── optional: align depth to RGB if intrinsics provided ──────────
+    global _latest_aligned_depth
+    _latest_aligned_depth = None
+
+    rgb_intrinsics_flat = body.get("rgb_intrinsics")
+    depth_reproj_flat = body.get("depth_reproj")
+
+    if rgb_intrinsics_flat and depth_reproj_flat and _latest_depth_packet is not None:
+        try:
+            K = np.array(rgb_intrinsics_flat, dtype=np.float32).reshape(3, 3)
+            global _last_rgb_intrinsics
+            _last_rgb_intrinsics = K
+            reproj = np.array(depth_reproj_flat, dtype=np.float32).reshape(4, 4)
+            depth_raw = _depth_packet_to_array(_latest_depth_packet)
+            if depth_raw is not None:
+                h_rgb, w_rgb = _latest_rgb_bgr.shape[:2]
+                aligned = align_depth_to_rgb(
+                    depth_raw, reproj, K, h_rgb, w_rgb,
+                )
+                if aligned is not None:
+                    _latest_aligned_depth = aligned
+                    add_python_log(
+                        "debug",
+                        f"Depth aligned: {aligned.shape[1]}×{aligned.shape[0]}, "
+                        f"range=[{np.nanmin(aligned):.2f}, {np.nanmax(aligned):.2f}]m",
+                    )
+        except Exception as exc:
+            add_python_log("warning", f"Depth alignment failed: {exc}")
+
     engine = _get_tracking_engine()
     engine.stop()
     h, w = _latest_rgb_bgr.shape[:2]
     px = int(pixel_x * w) if pixel_x <= 1.0 else int(pixel_x)
     py = int(pixel_y * h) if pixel_y <= 1.0 else int(pixel_y)
+
+    # Save the original frame + click pixel for dashboard preview
+    global _last_trigger_frame_jpeg, _last_trigger_pixel
+    _last_trigger_pixel = (px, py)
+    if _latest_rgb_jpeg is not None:
+        _last_trigger_frame_jpeg = _latest_rgb_jpeg
+
     result = engine.detect(px, py, _latest_rgb_bgr.copy())
     add_python_log("info", f"Tracking detect at ({px},{py}) -> {result.label}")
 
@@ -575,6 +629,7 @@ async def models_status() -> dict[str, Any]:
         "sam2": engine._sam2_image is not None,
         "florence2": engine._florence2 is not None,
         "clip": engine._clip_model is not None,
+        "aligned_depth": _latest_aligned_depth is not None,
     }
 
 
@@ -584,6 +639,64 @@ async def track_last_crop():
     if _last_detection_crop_jpeg is None:
         raise HTTPException(status_code=404, detail="No detection crop available")
     return Response(content=_last_detection_crop_jpeg, media_type="image/jpeg")
+
+
+@app.get("/api/track/last-original")
+async def track_last_original():
+    """Return the original RGB frame from the last trigger, with a
+    red crosshair drawn at the detection pixel."""
+    if _last_trigger_frame_jpeg is None or _last_trigger_pixel is None:
+        raise HTTPException(status_code=404, detail="No trigger frame available")
+
+    px, py = _last_trigger_pixel
+    # Decode JPEG → draw crosshair → re-encode
+    raw = np.frombuffer(_last_trigger_frame_jpeg, dtype=np.uint8)
+    bgr = cv2.imdecode(raw, cv2.IMREAD_COLOR)
+    if bgr is None:
+        raise HTTPException(status_code=500, detail="Failed to decode frame")
+
+    h, w = bgr.shape[:2]
+    # Crosshair: 20px arms, red, 2px thick
+    arm = 20
+    color = (0, 0, 255)  # BGR red
+    cv2.line(bgr, (max(0, px - arm), py), (min(w - 1, px + arm), py), color, 2)
+    cv2.line(bgr, (px, max(0, py - arm)), (px, min(h - 1, py + arm)), color, 2)
+    # Small circle at exact point
+    cv2.circle(bgr, (px, py), 4, color, 2)
+
+    ok, buf = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 92])
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to encode frame")
+    return Response(content=buf.tobytes(), media_type="image/jpeg")
+
+
+@app.get("/api/depth/at")
+async def depth_at_pixel(px: int = Query(...), py: int = Query(...)):
+    """Return the aligned depth (metres) at a given RGB pixel."""
+    if _latest_aligned_depth is None:
+        return {"depth_m": None, "source": "none"}
+    from .tracking.depth_alignment import query_depth_at_pixel
+
+    d = query_depth_at_pixel(_latest_aligned_depth, px, py)
+    return {"depth_m": d, "source": "aligned"}
+
+
+@app.get("/api/depth/topdown")
+async def depth_topdown():
+    """Return a bird's-eye view JPEG of the depth data, with cursor marked."""
+    if _latest_aligned_depth is None or _last_rgb_intrinsics is None:
+        raise HTTPException(status_code=404, detail="No depth data or intrinsics")
+    from .tracking.depth_alignment import render_topdown
+
+    cx = _last_trigger_pixel[0] if _last_trigger_pixel else None
+    cy = _last_trigger_pixel[1] if _last_trigger_pixel else None
+    img = render_topdown(_latest_aligned_depth, _last_rgb_intrinsics, cx, cy)
+    if img is None:
+        raise HTTPException(status_code=500, detail="Failed to render top-down view")
+    ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to encode")
+    return Response(content=buf.tobytes(), media_type="image/jpeg")
 
 
 @app.websocket("/ws/tracking")
@@ -607,7 +720,7 @@ async def _broadcast_tracking(result_payload: dict) -> None:
     stale: list[WebSocket] = []
     for client in list(_tracking_clients):
         try:
-            await asyncio.wait_for(client.send_text(data), timeout=0.05)
+            await asyncio.wait_for(client.send_text(data), timeout=1.0)
         except Exception:
             stale.append(client)
     for client in stale:
