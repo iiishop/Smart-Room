@@ -181,6 +181,23 @@ namespace SmartRoom.Tracking
             };
         }
 
+        private float[] BuildRgbCameraPose()
+        {
+            // RGB camera world pose from PassthroughCameraAccess.GetCameraPose().
+            // Sends position (x,y,z) + rotation quaternion (x,y,z,w) as 7 floats.
+            // Reference: https://developers.meta.com/horizon/documentation/unity/unity-pca-documentation/
+            if (pixelProjector == null || !pixelProjector.IsReady
+                || pixelProjector.CameraAccess == null
+                || !pixelProjector.CameraAccess.IsPlaying)
+                return null;
+
+            var pose = pixelProjector.CameraAccess.GetCameraPose();
+            return new float[] {
+                pose.position.x, pose.position.y, pose.position.z,
+                pose.rotation.x, pose.rotation.y, pose.rotation.z, pose.rotation.w,
+            };
+        }
+
         private float[] GetDepthReprojMatrix()
         {
             // _EnvironmentDepthReprojectionMatrices is a global shader
@@ -204,6 +221,7 @@ namespace SmartRoom.Tracking
                     pixel_x = pixel.x,
                     pixel_y = pixel.y,
                     rgb_intrinsics = BuildRgbIntrinsics(),
+                    rgb_pose = BuildRgbCameraPose(),
                     depth_reproj = GetDepthReprojMatrix(),
                 });
 

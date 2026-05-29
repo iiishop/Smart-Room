@@ -541,6 +541,7 @@ async def track_start(body: dict) -> dict[str, Any]:
 
     rgb_intrinsics_flat = body.get("rgb_intrinsics")
     depth_reproj_flat = body.get("depth_reproj")
+    rgb_pose_flat = body.get("rgb_pose")
 
     if rgb_intrinsics_flat and depth_reproj_flat and _latest_depth_packet is not None:
         try:
@@ -548,11 +549,12 @@ async def track_start(body: dict) -> dict[str, Any]:
             global _last_rgb_intrinsics
             _last_rgb_intrinsics = K
             reproj = np.array(depth_reproj_flat, dtype=np.float32).reshape(4, 4)
+            rgb_pose = np.array(rgb_pose_flat, dtype=np.float32) if rgb_pose_flat and len(rgb_pose_flat) == 7 else None
             depth_raw = _depth_packet_to_array(_latest_depth_packet)
             if depth_raw is not None:
                 h_rgb, w_rgb = _latest_rgb_bgr.shape[:2]
                 aligned = align_depth_to_rgb(
-                    depth_raw, reproj, K, h_rgb, w_rgb,
+                    depth_raw, reproj, K, h_rgb, w_rgb, rgb_pose=rgb_pose,
                 )
                 if aligned is not None:
                     _latest_aligned_depth = aligned

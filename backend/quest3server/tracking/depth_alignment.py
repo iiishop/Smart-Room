@@ -29,6 +29,7 @@ def align_depth_to_rgb(
     rgb_intrinsics: np.ndarray,     # 3×3  RGB camera intrinsic matrix
     rgb_h: int,
     rgb_w: int,
+    rgb_pose: np.ndarray | None = None,  # 7 floats: px,py,pz, qx,qy,qz,qw
 ) -> np.ndarray | None:
     """Produce a depth map aligned to the RGB camera frame.
 
@@ -47,6 +48,10 @@ def align_depth_to_rgb(
          [ 0,  0,  1]]
     rgb_h, rgb_w : int
         Dimensions of the RGB frame (typically 640×360 or 1280×960).
+    rgb_pose : np.ndarray or None
+        RGB camera world pose from PassthroughCameraAccess.GetCameraPose().
+        7 floats: [px, py, pz, qx, qy, qz, qw].  If None, skips the
+        world→camera transform (assumes depth sensor = camera origin).
 
     Returns
     -------
@@ -91,6 +96,31 @@ def align_depth_to_rgb(
     w = world_homo[:, 3:4]
     w_safe = np.where(np.abs(w) < 1e-10, 1e-10, w)
     world_xyz = world_homo[:, :3] / w_safe  # (N, 3)
+
+    # ── Step 1b: world XYZ → RGB camera-local (if pose provided) ──
+    if rgb_pose is not None and len(rgb_pose) == 7:
+        cam_pos = rgb_pose[:3].astype(np.float32)
+        qx, qy, qz, qw = rgb_pose[3:].astype(np.float32)
+        # Unity quaternion (x,y,z,w) → rotation matrix (camera→world).
+        # World→camera is the inverse: translate then rotate by conjugate.
+        # R = rotation from camera-local to world.
+        # R = [[1-2(qy²+qz²), 2(qxqy-qzqw), 2(qxqz+qyqw)],
+        #      [2(qxqy+qzqw), 1-2(qx²+qz²), 2(qyqz-qxqw)],
+        #      [2(qxqz-qyqw), 2(qyqz+qxqw), 1-2(qx²+qy²)]]
+        # World→camera: delta = world - camPos, then camera_local = R^T @ delta
+        qxx, qyy, qzz = qx * qx, qy * qy, qz * qz
+        qxy, qxz, qyz = qx * qy, qx * qz, qy * qz
+        qxw, qyw, qzw = qx * qw, qy * qw, qz * qw
+
+        R = np.array([
+            [1 - 2 * (qyy + qzz), 2 * (qxy - qzw),     2 * (qxz + qyw)],
+            [2 * (qxy + qzw),     1 - 2 * (qxx + qzz), 2 * (qyz - qxw)],
+            [2 * (qxz - qyw),     2 * (qyz + qxw),     1 - 2 * (qxx + qyy)],
+        ], dtype=np.float32)
+
+        # world_xyz → camera-local: R^T @ (world - cam_pos)
+        delta = world_xyz - cam_pos[None, :]  # (N, 3)
+        world_xyz = delta @ R  # (N, 3) @ (3, 3)  — R^T applied as row vectors
 
     # ── Step 2: world XYZ → RGB pixel coords ───────────────────────
     fx, fy = rgb_intrinsics[0, 0], rgb_intrinsics[1, 1]

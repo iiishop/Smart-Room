@@ -72,10 +72,11 @@ namespace SmartRoom.Networking
             try
             {
                 var intrinsics = passthroughCameraAccess.Intrinsics;
-                // PCA intrinsics are at native passthrough resolution (~1280x1280).
-                // Estimate native dimensions from principal point (cx ≈ nativeW/2, cy ≈ nativeH/2).
-                _nativeWidth = intrinsics.PrincipalPoint.x * 2f;
-                _nativeHeight = intrinsics.PrincipalPoint.y * 2f;
+                // Use SensorResolution for exact native dimensions (MRUK v81+).
+                // PrincipalPoint may have lens offset; cx*2 is an approximation.
+                // Reference: https://developers.meta.com/horizon/documentation/unity/unity-pca-documentation/
+                _nativeWidth = intrinsics.SensorResolution.x;
+                _nativeHeight = intrinsics.SensorResolution.y;
 
                 float scaleX = imageWidth / _nativeWidth;
                 float scaleY = imageHeight / _nativeHeight;
