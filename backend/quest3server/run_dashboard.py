@@ -84,6 +84,7 @@ class DashboardWindow(QMainWindow):
         self._latest_depth_width = 0
         self._latest_depth_height = 0
         self._depth_preview_pixmap: QPixmap | None = None
+        self._aligned_depth_pixmap: QPixmap | None = None  # from /api/depth/aligned-heatmap
         self._depth_draw_rect: tuple[int, int, int, int] | None = None
 
         # Tracking state
@@ -455,6 +456,7 @@ class DashboardWindow(QMainWindow):
 
     def _refresh_previews(self) -> None:
         self._refresh_combined_preview()
+        self._fetch_aligned_depth()
 
     def _refresh_combined_preview(self) -> None:
         """Draw RGB image with depth heatmap overlaid."""
@@ -489,15 +491,11 @@ class DashboardWindow(QMainWindow):
                     painter.setFont(font)
                     painter.drawText(x0, max(0, y0 - 6), self._track_label)
 
-            # Overlay depth heatmap at 40% opacity
-            if self._depth_preview_pixmap is not None:
-                depth_scaled = self._depth_preview_pixmap.scaled(
-                    rgb_pix.size(),
-                    Qt.AspectRatioMode.IgnoreAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
+            # Overlay aligned-depth heatmap at 40% opacity
+            # Uses /api/depth/aligned-heatmap which is pre-aligned to RGB resolution.
+            if self._aligned_depth_pixmap is not None:
                 painter.setOpacity(0.4)
-                painter.drawPixmap(0, 0, depth_scaled)
+                painter.drawPixmap(0, 0, self._aligned_depth_pixmap)
                 painter.setOpacity(1.0)
         finally:
             painter.end()
@@ -683,8 +681,29 @@ class DashboardWindow(QMainWindow):
             depth_str = "(query failed)"
 
         self._lbl_preview_hover.setText(
-            f"Pixel: ({px}, {py})  |  Depth: {depth_str}"
+            f"Pixel: ({px},{py}) | Depth: {depth_str}",
         )
+
+    def _fetch_aligned_depth(self) -> None:
+        """Fetch the aligned-depth heatmap from the backend (one HTTP request per refresh).
+
+        The heatmap is produced by /api/depth/aligned-heatmap, which returns
+        depth data reprojected into RGB coordinates — geometrically aligned.
+        Falls back silently if unavailable (204 = no trigger with intrinsics yet).
+        """
+        try:
+            req = urllib.request.Request(
+                f"{API_BASE}/api/depth/aligned-heatmap", method="GET",
+            )
+            with urllib.request.urlopen(req, timeout=0.3) as res:
+                if res.status == 204:
+                    return
+                data = res.read()
+            pix = QPixmap()
+            if pix.loadFromData(data):
+                self._aligned_depth_pixmap = pix
+        except Exception:
+            pass  # silently skip if endpoint unavailable or no depth yet
 
     def _on_rgb_click(self, mx: int, my: int) -> None:
         """Click on RGB preview → trigger tracking at that point."""

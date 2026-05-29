@@ -699,6 +699,37 @@ async def depth_topdown():
     return Response(content=buf.tobytes(), media_type="image/jpeg")
 
 
+@app.get("/api/depth/aligned-heatmap")
+async def depth_aligned_heatmap():
+    """Return the aligned-depth frame as a JPEG heatmap, same resolution as RGB.
+
+    Uses depth values reprojected into the RGB frame via align_depth_to_rgb().
+    Returns 204 if no aligned depth is available yet (no trigger with intrinsics).
+    """
+    if _latest_aligned_depth is None:
+        return Response(status_code=204)
+
+    # Depth (metres) → colour heatmap (near=red, far=blue)
+    valid = ~np.isnan(_latest_aligned_depth) & (_latest_aligned_depth > 0)
+    d_max = float(np.nanmax(_latest_aligned_depth[valid])) if valid.any() else 5.0
+    d_max = np.clip(d_max, 0.5, 8.0)
+
+    # Normalise 0..1, invert so near=bright
+    d_norm = np.clip(_latest_aligned_depth / max(d_max, 0.01), 0, 1)
+    d_norm = np.where(valid, 1.0 - d_norm, 0.0)
+
+    hue = (d_norm * 120).astype(np.uint8)  # 0° red → 120° green (far)
+    sat = np.full_like(hue, 200, dtype=np.uint8)
+    val = np.where(valid, 220, 0).astype(np.uint8)
+    hsv = np.stack([hue, sat, val], axis=2)
+    bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+
+    ok, buf = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to encode")
+    return Response(content=buf.tobytes(), media_type="image/jpeg")
+
+
 @app.websocket("/ws/tracking")
 async def tracking_socket(websocket: WebSocket) -> None:
     await websocket.accept()
