@@ -27,6 +27,11 @@ logger = logging.getLogger(__name__)
 #
 # Florence-2 region description (fallback):
 #   task_prompt="<REGION_TO_DESCRIPTION>" → natural language description
+#
+# SigLIP 2 label verification:
+#   https://huggingface.co/docs/transformers/model_doc/siglip2
+#   https://huggingface.co/google/siglip2-base-patch16-224
+#   model.get_image_features() / get_text_features() → cosine similarity
 # ═══════════════════════════════════════════════════════════════════════
 
 _LOC_RE = re.compile(r"</?loc_\d+>", re.IGNORECASE)
@@ -34,11 +39,12 @@ _LOC_PATTERN = re.compile(r"<loc_\d+>", re.IGNORECASE)
 
 
 class TrackingEngine:
-    """Two-stage object detection + segmentation engine.
+    """Object detection + segmentation + label verification engine.
 
-    Stage 1 ― Florence-2 <OD> detects all objects → compact detection bboxes + labels.
-    Stage 2 ― Find which bbox contains the cursor point → SAM2 box-prompt segments
-              within that bbox (much more precise than free-form point prompt).
+    Stage 1 ― Florence-2 multi-task ensemble detects all objects → bboxes + labels.
+    Stage 2 ― Find cursor-containing bbox (or multi-scale crop cascade for small objects).
+    Stage 3 ― SigLIP 2 label verification → calibrated confidence score.
+    Stage 4 ― SAM2 box + multi-point prompt → tight mask → clean bbox.
 
     References
     ----------
@@ -46,11 +52,13 @@ class TrackingEngine:
       https://huggingface.co/florence-community/Florence-2-base
     - SAM2 box prompt:
       https://huggingface.co/docs/transformers/model_doc/sam2
+    - SigLIP 2:
+      https://huggingface.co/google/siglip2-base-patch16-224
     """
 
     _IMAGE_PREDICTOR_MODEL = "facebook/sam2.1-hiera-tiny"
     _FLORENCE2_MODEL = "florence-community/Florence-2-base"
-    _CLIP_MODEL = "openai/clip-vit-base-patch32"
+    _SIGLIP_MODEL = "google/siglip2-base-patch16-224"
     _CLIP_SIM_THRESHOLD = 0.18  # below this: try region description as fallback label
 
     def __init__(self) -> None:
@@ -78,10 +86,15 @@ class TrackingEngine:
     def detect(self, pixel_x: float, pixel_y: float, rgb_bgr: np.ndarray) -> TrackingResult:
         """Detect and describe the object at (pixel_x, pixel_y) in rgb_bgr.
 
-        Three-stage pipeline with small-object fallback:
-        1. Florence-2 multi-task ensemble on full image
-        2. If cursor bbox not found → crop around cursor → re-detect on crop
-        3. SAM2 box-prompt refinement → tight mask → clean bbox
+        Pipeline:
+        1. Florence-2 multi-task ensemble on full image → bbox at cursor.
+        2. If full-image bbox scores poorly on SigLIP 2, or no bbox found,
+           run multi-scale crop cascade (256→384→512) around cursor.
+           Pick the bbox with the best SigLIP 2 score.
+        3. SigLIP 2 final label verification; fall back to region description
+           if the label still doesn't match.
+        4. SAM2 box + multi-point refinement → tight mask → clean bbox.
+        5. Fallback: SAM2 point-prompt if all detection tiers fail.
         """
         self._ensure_models()
 
@@ -100,9 +113,39 @@ class TrackingEngine:
         if detections:
             target_bbox, target_label, _ = self._find_containing_bbox(detections, px, py)
 
-        # ══════ Small-object fallback: crop around cursor, re-detect ══════
-        if target_bbox is None:
-            logger.info("No bbox at (%d,%d) in full image, trying crop re-detection", px, py)
+        # ══════ Stage 2: SigLIP 2 pre-check + crop cascade ══════
+        # Full-image bbox found — but is it really the object at cursor?
+        if target_bbox is not None:
+            _, quick_score = self._verify_label_with_clip(
+                rgb_rgb, target_bbox, target_label,
+            )
+            if quick_score < self._CLIP_SIM_THRESHOLD:
+                # Bbox looks wrong (often: large object like "chair" containing
+                # a small object like "cup").  Try crop cascade.
+                logger.info(
+                    "Full-image '%s' SigLIP2=%.3f < %.2f — trying crop cascade",
+                    target_label, quick_score, self._CLIP_SIM_THRESHOLD,
+                )
+                crop_result = self._try_crop_detection(rgb_rgb, px, py, w, h)
+                if crop_result is not None:
+                    crop_bbox, crop_label = crop_result
+                    _, crop_score = self._verify_label_with_clip(
+                        rgb_rgb, crop_bbox, crop_label,
+                    )
+                    if crop_score > quick_score:
+                        target_bbox, target_label = crop_bbox, crop_label
+                        from_crop = True
+                        logger.info(
+                            "Crop cascade better: '%s' (%.3f > %.3f)",
+                            crop_label, crop_score, quick_score,
+                        )
+                    # else: keep the original full-image bbox — even
+                    # a low-score bbox is better than nothing.
+        else:
+            # No bbox at cursor in full image — crop cascade is mandatory
+            logger.info(
+                "No bbox at (%d,%d) in full image, trying crop cascade", px, py,
+            )
             crop_result = self._try_crop_detection(rgb_rgb, px, py, w, h)
             if crop_result is not None:
                 target_bbox, target_label = crop_result[0], crop_result[1]
@@ -111,19 +154,22 @@ class TrackingEngine:
         if target_bbox is None:
             return self._fallback_point_prompt(rgb_rgb, px, py)
 
-        # ══════ CLIP label verification ══════
+        # ══════ SigLIP 2 label verification ══════
         verified_label, clip_score = self._verify_label_with_clip(
             rgb_rgb, target_bbox, target_label,
         )
-        # If CLIP strongly disagrees with the label, try region description
+        # Last resort: if the label still doesn't match, ask Florence-2
+        # to describe the region directly.
         if clip_score < self._CLIP_SIM_THRESHOLD:
             logger.warning(
-                "CLIP verification low (%.3f) for '%s', trying region description",
+                "SigLIP2 verification low (%.3f) for '%s', trying region description",
                 clip_score, verified_label,
             )
             alt_label = self._describe_region(rgb_rgb, *target_bbox)
             if alt_label != verified_label and alt_label != "object":
-                alt_score, _ = self._verify_label_with_clip(rgb_rgb, target_bbox, alt_label)
+                _, alt_score = self._verify_label_with_clip(
+                    rgb_rgb, target_bbox, alt_label,
+                )
                 if alt_score > clip_score:
                     verified_label = alt_label
                     clip_score = alt_score
@@ -139,7 +185,7 @@ class TrackingEngine:
         self._state = TrackState.TRACKING
 
         logger.info(
-            "Detected: %s (CLIP=%.3f, bbox=%s)", label, clip_score, refined_bbox,
+            "Detected: %s (SigLIP2=%.3f, bbox=%s)", label, clip_score, refined_bbox,
         )
 
         return TrackingResult(
@@ -306,96 +352,170 @@ class TrackingEngine:
 
         return best, best_label, best_score
 
-    # ══════ Small-object crop re-detection ══════
+    # ══════ Small-object multi-scale crop re-detection ══════
 
-    _CROP_DETECT_SIZE = 400  # px — crop window around cursor for small-object re-detection
+    _CROP_SIZES = [256, 384, 512]
+    # Ascending: start tight so small objects fill more of the frame.
+    # Each crop tries <OD> first; if that returns nothing it retries with
+    # <DENSE_REGION_CAPTION> on the same crop.  512 runs full ensemble.
 
     def _try_crop_detection(
         self, rgb: np.ndarray, px: int, py: int, img_w: int, img_h: int,
     ) -> tuple[list[int], str] | None:
-        """Crop a window around (px,py) and re-run Florence-2 ensemble.
+        """Multi-scale crop cascade around the cursor point.
 
-        Small objects (cups, phones, cables) occupy too few pixels in a full
-        640×360 frame for Florence-2 <OD> to pick up. By cropping a tight
-        window around the cursor, the object's relative scale increases
-        dramatically and detection recall improves.
+        Crop 256 → <OD> only  (very small objects: cups, cables, phones).
+        Crop 384 → <OD> only  (medium objects partially visible at 256).
+        Crop 512 → full ensemble (OD + DRC, last resort before fallback).
 
-        Returns (bbox_in_full_coords, label) or None if still nothing found.
+        Each tier returns on first hit — no wasted inference on larger
+        crops once the object is found.
         """
-        half = self._CROP_DETECT_SIZE // 2
-        crop_x0 = max(0, px - half)
-        crop_y0 = max(0, py - half)
-        crop_x1 = min(img_w, crop_x0 + self._CROP_DETECT_SIZE)
-        crop_y1 = min(img_h, crop_y0 + self._CROP_DETECT_SIZE)
-        # Re-anchor to keep the crop exactly CROP_DETECT_SIZE when possible
-        if crop_x1 - crop_x0 < self._CROP_DETECT_SIZE and crop_x0 > 0:
-            crop_x0 = max(0, crop_x1 - self._CROP_DETECT_SIZE)
-        if crop_y1 - crop_y0 < self._CROP_DETECT_SIZE and crop_y0 > 0:
-            crop_y0 = max(0, crop_y1 - self._CROP_DETECT_SIZE)
+        for size in self._CROP_SIZES:
+            result = self._try_crop_at_size(rgb, px, py, img_w, img_h, size)
+            if result is not None:
+                return result
+        return None
 
-        crop = rgb[crop_y0:crop_y1, crop_x0:crop_x1]
+    def _try_crop_at_size(
+        self, rgb: np.ndarray, px: int, py: int,
+        img_w: int, img_h: int, size: int,
+    ) -> tuple[list[int], str] | None:
+        """Run detection on a single size×size crop and pick the best bbox.
+
+        For crops < 512, starts with <OD> (fast).  If <OD> returns nothing,
+        retries with <DENSE_REGION_CAPTION> on the same crop — DRC often
+        catches non-COCO objects (boba cups, cables, gadgets) that OD misses.
+        Size == 512 runs the full ensemble directly.
+        """
+        crop, cx0, cy0 = self._make_crop(rgb, px, py, img_w, img_h, size)
+        if crop is None:
+            return None
+
         crop_h, crop_w = crop.shape[:2]
-        if crop_w < 64 or crop_h < 64:
-            return None  # too small to be useful
 
-        detections = self._run_detection(crop, crop_w, crop_h)
+        if size < 512:
+            detections = self._run_single_task(
+                crop, crop_w, crop_h, "<OD>", max_tokens=768,
+            )
+            task_name = "<OD>"
+            if not detections:
+                # <OD> missed — try DRC on same crop before giving up
+                detections = self._run_single_task(
+                    crop, crop_w, crop_h, "<DENSE_REGION_CAPTION>", max_tokens=512,
+                )
+                task_name = "<DRC>"
+        else:
+            detections = self._run_detection(crop, crop_w, crop_h)
+            task_name = "ensemble"
+
+        if not detections:
+            logger.debug("Crop %d×%d %s: no detections", size, size, task_name)
+            return None
+
+        result = self._pick_bbox_from_crop(
+            detections, px - cx0, py - cy0, cx0, cy0,
+        )
+        if result is not None:
+            bbox, label = result
+            logger.info(
+                "Crop %d×%d %s: '%s' at %s",
+                size, size, task_name, label, bbox,
+            )
+        return result
+
+    @staticmethod
+    def _make_crop(
+        rgb: np.ndarray, px: int, py: int,
+        img_w: int, img_h: int, size: int,
+    ) -> tuple[np.ndarray | None, int, int]:
+        """Extract a size×size window centred on (px, py).
+
+        Returns (crop_array, x0, y0) or (None, 0, 0) if the resulting
+        region is too small (< 64 px in either dimension).
+        """
+        half = size // 2
+        x0 = max(0, px - half)
+        y0 = max(0, py - half)
+        x1 = min(img_w, x0 + size)
+        y1 = min(img_h, y0 + size)
+        # Re-anchor to keep the crop exactly `size` when possible
+        if x1 - x0 < size and x0 > 0:
+            x0 = max(0, x1 - size)
+        if y1 - y0 < size and y0 > 0:
+            y0 = max(0, y1 - size)
+
+        crop = rgb[y0:y1, x0:x1]
+        if crop.shape[0] < 64 or crop.shape[1] < 64:
+            return None, 0, 0
+        return crop, x0, y0
+
+    def _pick_bbox_from_crop(
+        self,
+        detections: list[tuple[list[int], str, float]],
+        crop_px: int, crop_py: int,
+        crop_x0: int, crop_y0: int,
+    ) -> tuple[list[int], str] | None:
+        """Pick the best detection bbox for a cursor point in crop coords.
+
+        Priority: smallest bbox that contains (crop_px, crop_py).
+        Fallback: closest bbox by centre distance (cursor missed all bboxes
+        but the object is likely the nearest one).
+        Returns (bbox_in_full_coords, label) or None.
+        """
+        # Exact containment — smallest bbox containing the cursor
+        best_bbox, best_label, _ = self._find_containing_bbox(
+            detections, crop_px, crop_py,
+        )
+        if best_label and best_bbox is not None:
+            return (
+                [
+                    crop_x0 + best_bbox[0], crop_y0 + best_bbox[1],
+                    crop_x0 + best_bbox[2], crop_y0 + best_bbox[3],
+                ],
+                best_label,
+            )
+
+        # Cursor not inside any bbox — pick closest by centre distance
         if not detections:
             return None
 
-        # Remap cursor to crop coordinates
-        crop_px = px - crop_x0
-        crop_py = py - crop_y0
-        _, label, _ = self._find_containing_bbox(detections, crop_px, crop_py)
-        if not label:
-            # Even if the cursor isn't inside a bbox, grab the largest detection
-            # in the crop (it's likely the object the user pointed at)
-            detections.sort(key=lambda d: (d[0][2] - d[0][0]) * (d[0][3] - d[0][1]), reverse=True)
-            best = detections[0]
-            label = best[1]
+        best_dist = float("inf")
+        best_bbox_crop: list[int] = []
+        best_label_crop = ""
+        for bbox, label, _ in detections:
+            cx = (bbox[0] + bbox[2]) / 2.0
+            cy = (bbox[1] + bbox[3]) / 2.0
+            dist = (cx - crop_px) ** 2 + (cy - crop_py) ** 2
+            if dist < best_dist:
+                best_dist = dist
+                best_label_crop = label
+                best_bbox_crop = bbox
 
-            # Pick the bbox closest to the cursor if multiple exist
-            best_dist = float("inf")
-            for bbox, lbl, _ in detections:
-                cx = (bbox[0] + bbox[2]) / 2
-                cy = (bbox[1] + bbox[3]) / 2
-                dist = (cx - crop_px) ** 2 + (cy - crop_py) ** 2
-                if dist < best_dist:
-                    best_dist = dist
-                    label = lbl
-                    # Use this bbox for coordinate remapping
-                    crop_bbox = bbox
-
-            # Remap from crop coords back to full-image coords
-            full_bbox = [
-                crop_x0 + crop_bbox[0], crop_y0 + crop_bbox[1],
-                crop_x0 + crop_bbox[2], crop_y0 + crop_bbox[3],
-            ]
-            logger.info("Crop re-detect: '%s' (not directly under cursor)", label)
-            return (full_bbox, label)
-        else:
-            # Cursor IS inside a bbox — find which one
-            for bbox, lbl, _ in detections:
-                if bbox[0] <= crop_px <= bbox[2] and bbox[1] <= crop_py <= bbox[3]:
-                    full_bbox = [
-                        crop_x0 + bbox[0], crop_y0 + bbox[1],
-                        crop_x0 + bbox[2], crop_y0 + bbox[3],
-                    ]
-                    logger.info("Crop re-detect: '%s' at cursor", lbl)
-                    return (full_bbox, lbl)
-            # Shouldn't reach here if _find_containing_bbox returned a label
+        if not best_label_crop:
             return None
 
-    # ══════ CLIP label verification ══════
+        return (
+            [
+                crop_x0 + best_bbox_crop[0], crop_y0 + best_bbox_crop[1],
+                crop_x0 + best_bbox_crop[2], crop_y0 + best_bbox_crop[3],
+            ],
+            best_label_crop,
+        )
+
+    # ══════ SigLIP 2 label verification ══════
 
     def _verify_label_with_clip(
         self, rgb: np.ndarray, bbox: list[int], label: str,
     ) -> tuple[str, float]:
-        """Verify Florence-2 label by matching cropped region against label text with CLIP.
+        """Verify Florence-2 label by matching cropped region against label text.
 
-        Returns (label, cosine_similarity). The similarity score becomes the
-        calibrated confidence, replacing the hardcoded 0.85.
+        Uses SigLIP 2 (google/siglip2-base-patch16-224) for zero-shot
+        image–text alignment, replacing the original CLIP-ViT-B/32.
+        Returns (label, cosine_similarity). The similarity score becomes
+        the calibrated confidence, replacing the hardcoded 0.85.
 
-        Reference: https://huggingface.co/openai/clip-vit-base-patch32
+        Reference: https://huggingface.co/google/siglip2-base-patch16-224
         """
         x0, y0, x1, y1 = [max(0, int(v)) for v in bbox]
         crop = rgb[y0:y1, x0:x1]
@@ -408,7 +528,7 @@ class TrackingEngine:
                 images=crop_pil, return_tensors="pt",
             ).to("cuda")
             text_inputs = self._clip_proc(
-                text=[label], return_tensors="pt", padding=True,
+                text=[f"This is a photo of {label}."], return_tensors="pt",
             ).to("cuda")
 
             image_features = self._clip_model.get_image_features(**inputs).pooler_output
@@ -671,7 +791,7 @@ class TrackingEngine:
         if self._sam2_image is not None:
             return
         from sam2.sam2_image_predictor import SAM2ImagePredictor
-        from transformers import AutoProcessor, CLIPModel, CLIPProcessor, Florence2ForConditionalGeneration
+        from transformers import AutoModel, AutoProcessor, Florence2ForConditionalGeneration
 
         self._sam2_image = SAM2ImagePredictor.from_pretrained(self._IMAGE_PREDICTOR_MODEL)
         self._florence2 = Florence2ForConditionalGeneration.from_pretrained(
@@ -679,10 +799,13 @@ class TrackingEngine:
             torch_dtype=torch.bfloat16,
         ).to("cuda")
         self._florence2_proc = AutoProcessor.from_pretrained(self._FLORENCE2_MODEL)
-        self._clip_model = CLIPModel.from_pretrained(self._CLIP_MODEL).to("cuda")
-        self._clip_proc = CLIPProcessor.from_pretrained(self._CLIP_MODEL)
+        self._clip_model = AutoModel.from_pretrained(
+            self._SIGLIP_MODEL,
+            torch_dtype=torch.bfloat16,
+        ).to("cuda")
+        self._clip_proc = AutoProcessor.from_pretrained(self._SIGLIP_MODEL)
         logger.info(
-            "TrackingEngine models loaded (SAM2-tiny + Florence-2-base + CLIP-ViT-B/32, %.1f GB VRAM)",
+            "TrackingEngine models loaded (SAM2-tiny + Florence-2-base + SigLIP2-B/16, %.1f GB VRAM)",
             torch.cuda.memory_allocated() / 1024 ** 3,
         )
 
