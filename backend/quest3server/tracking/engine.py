@@ -804,6 +804,7 @@ class TrackingEngine:
         self._clip_model = AutoModel.from_pretrained(
             self._SIGLIP_MODEL,
             torch_dtype=torch.bfloat16,
+            attn_implementation="sdpa",
         ).to("cuda")
         self._clip_proc = AutoProcessor.from_pretrained(self._SIGLIP_MODEL)
         logger.info(
