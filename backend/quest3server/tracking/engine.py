@@ -793,15 +793,12 @@ class TrackingEngine:
     def _caption_crop(
         self, rgb: np.ndarray, x0: int, y0: int, x1: int, y1: int, pad_ratio: float = 0.15,
     ) -> str:
-        """Crop + pad a bbox region, then describe the isolated object.
+        """Crop + pad a bbox region, then label the isolated object.
 
-        Primary: <DETAILED_CAPTION> for rich, specific descriptions
-        (e.g. 'white ceramic coffee cup with a red lid').
-        Output passes through _shorten_label() to strip scene preambles and
-        limit to key noun phrases.
+        Uses <DENSE_REGION_CAPTION> which produces short noun labels natively
+        (e.g. 'white cup', 'laptop bag') — no truncation needed.
 
-        Fallback: <DENSE_REGION_CAPTION> for short labels when detail caption
-        produces nothing useful.
+        Falls back to <OD> for COCO class labels if DRC returns nothing.
         """
         h, w = rgb.shape[:2]
         bw, bh = max(4, x1 - x0), max(4, y1 - y0)
@@ -816,25 +813,21 @@ class TrackingEngine:
         if crop.size == 0:
             return "object"
 
-        # Primary: <DETAILED_CAPTION> for rich object descriptions
-        try:
-            raw = self._florence2_infer(crop, "<DETAILED_CAPTION>", max_tokens=64)
-            parsed = self._florence2_proc.post_process_generation(
-                raw, task="<DETAILED_CAPTION>",
-                image_size=(crop.shape[1], crop.shape[0]),
-            )
-            label = parsed.get("<DETAILED_CAPTION>", "").strip()
-            if label and len(label) > 2:
-                shortened = _shorten_label(label)
-                if shortened != "object":
-                    return shortened
-        except Exception as exc:
-            logger.warning("Florence-2 <DETAILED_CAPTION> on crop failed: %s", exc)
-
-        # Fallback: <DENSE_REGION_CAPTION> for short noun labels
         crop_h, crop_w = crop.shape[:2]
+
+        # Primary: <DENSE_REGION_CAPTION> for short descriptive labels
         detections = self._run_single_task(
             crop, crop_w, crop_h, "<DENSE_REGION_CAPTION>", max_tokens=128,
+        )
+        if detections:
+            best = max(detections, key=lambda d: (d[0][2] - d[0][0]) * (d[0][3] - d[0][1]))
+            label = _clean_label(best[1])
+            if label and label != "object":
+                return label
+
+        # Fallback: <OD> on the crop for a COCO class label
+        detections = self._run_single_task(
+            crop, crop_w, crop_h, "<OD>", max_tokens=128,
         )
         if detections:
             best = max(detections, key=lambda d: (d[0][2] - d[0][0]) * (d[0][3] - d[0][1]))
@@ -952,30 +945,6 @@ class TrackingEngine:
             "TrackingEngine models loaded (SAM2-tiny + Florence-2-base + SigLIP2-B/16, %.1f GB VRAM)",
             torch.cuda.memory_allocated() / 1024 ** 3,
         )
-
-
-def _shorten_label(text: str, max_words: int = 5) -> str:
-    """Trim Florence-2 caption boilerplate, keep only the key object phrase.
-
-    Strips common preamble patterns like 'The image shows', 'This is a photo of',
-    'In this picture there is', etc.  If the result is still longer than
-    max_words, truncate to the first max_words.
-    """
-    text = text.strip()
-    for prefix in [
-        "The image shows ", "The image depicts ", "The picture shows ",
-        "This is a photo of ", "This is an image of ", "This image shows ",
-        "In this image, ", "In this picture, ", "In the image, ",
-        "A photo of ", "An image of ",
-    ]:
-        if text.lower().startswith(prefix.lower()):
-            text = text[len(prefix):]
-            break
-    text = text.rstrip(".")
-    words = text.split()
-    if len(words) > max_words:
-        text = " ".join(words[:max_words])
-    return text.strip() if text.strip() else "object"
 
 
 def _clean_label(text: str) -> str:
