@@ -793,13 +793,15 @@ class TrackingEngine:
     def _caption_crop(
         self, rgb: np.ndarray, x0: int, y0: int, x1: int, y1: int, pad_ratio: float = 0.15,
     ) -> str:
-        """Crop and pad a bbox region, then run DRC on the isolated object.
+        """Crop + pad a bbox region, then describe the isolated object.
 
-        Uses <DENSE_REGION_CAPTION> which produces short descriptive labels
-        (e.g. 'white cup', 'laptop bag'), NOT full captions like
-        '<DETAILED_CAPTION>' which produces scene descriptions.
+        Primary: <DETAILED_CAPTION> for rich, specific descriptions
+        (e.g. 'white ceramic coffee cup with a red lid').
+        Output passes through _shorten_label() to strip scene preambles and
+        limit to key noun phrases.
 
-        Falls back to <OD> if DRC returns nothing.
+        Fallback: <DENSE_REGION_CAPTION> for short labels when detail caption
+        produces nothing useful.
         """
         h, w = rgb.shape[:2]
         bw, bh = max(4, x1 - x0), max(4, y1 - y0)
@@ -814,22 +816,25 @@ class TrackingEngine:
         if crop.size == 0:
             return "object"
 
-        crop_h, crop_w = crop.shape[:2]
+        # Primary: <DETAILED_CAPTION> for rich object descriptions
+        try:
+            raw = self._florence2_infer(crop, "<DETAILED_CAPTION>", max_tokens=64)
+            parsed = self._florence2_proc.post_process_generation(
+                raw, task="<DETAILED_CAPTION>",
+                image_size=(crop.shape[1], crop.shape[0]),
+            )
+            label = parsed.get("<DETAILED_CAPTION>", "").strip()
+            if label and len(label) > 2:
+                shortened = _shorten_label(label)
+                if shortened != "object":
+                    return shortened
+        except Exception as exc:
+            logger.warning("Florence-2 <DETAILED_CAPTION> on crop failed: %s", exc)
 
-        # <DENSE_REGION_CAPTION> gives short descriptive labels on the crop
+        # Fallback: <DENSE_REGION_CAPTION> for short noun labels
+        crop_h, crop_w = crop.shape[:2]
         detections = self._run_single_task(
             crop, crop_w, crop_h, "<DENSE_REGION_CAPTION>", max_tokens=128,
-        )
-        if detections:
-            # Pick the label with the largest bbox (dominant object in the crop)
-            best = max(detections, key=lambda d: (d[0][2] - d[0][0]) * (d[0][3] - d[0][1]))
-            label = _clean_label(best[1])
-            if label and label != "object":
-                return label
-
-        # Fallback: <OD> on the crop for a COCO class label
-        detections = self._run_single_task(
-            crop, crop_w, crop_h, "<OD>", max_tokens=128,
         )
         if detections:
             best = max(detections, key=lambda d: (d[0][2] - d[0][0]) * (d[0][3] - d[0][1]))
@@ -844,9 +849,13 @@ class TrackingEngine:
     ) -> list[tuple[str, list[int]]]:
         """Grounded-SAM-2 style cascade: caption crop → extract noun phrases.
 
-        1. Crop + pad the bbox region, run <DENSE_REGION_CAPTION>.
-        2. Feed DRC label to <CAPTION_TO_PHRASE_GROUNDING> → bboxes + labels.
-        3. Remap phrase bboxes to full-image coords.
+        1. Crop + pad the bbox region, run <DETAILED_CAPTION>.
+           Output is a full description (e.g. 'a white cup with a red lid on a
+           dark desk') — intentionally NOT shortened, because CTPG needs rich
+           text to extract multiple distinct noun phrases.
+        2. Fallback: <DENSE_REGION_CAPTION> if detail caption produces nothing.
+        3. Feed caption to <CAPTION_TO_PHRASE_GROUNDING> → bboxes + labels.
+        4. Remap phrase bboxes to full-image coords.
         Returns list of (phrase_text, bbox_in_full_coords), or empty list.
         """
         h, w = rgb.shape[:2]
@@ -861,15 +870,32 @@ class TrackingEngine:
         if crop.size == 0:
             return []
 
-        # Step 1: describe the isolated object via <DENSE_REGION_CAPTION> on the crop.
-        # DRC produces short labels like 'white cup', not full sentences.
-        detections = self._run_single_task(
-            crop, crop.shape[1], crop.shape[0], "<DENSE_REGION_CAPTION>", max_tokens=128,
-        )
+        # Step 1: rich description via <DETAILED_CAPTION> on the crop.
+        # We do NOT shorten this — CTPG needs full descriptions with multiple
+        # noun phrases (e.g. 'a white cup with a red lid on a dark desk') to
+        # ground distinct candidates.  DRC would only give 'white cup' which
+        # produces at most one phrase.
         caption = ""
-        if detections:
-            best = max(detections, key=lambda d: (d[0][2] - d[0][0]) * (d[0][3] - d[0][1]))
-            caption = _clean_label(best[1])
+        try:
+            raw = self._florence2_infer(crop, "<DETAILED_CAPTION>", max_tokens=128)
+            parsed = self._florence2_proc.post_process_generation(
+                raw, task="<DETAILED_CAPTION>",
+                image_size=(crop.shape[1], crop.shape[0]),
+            )
+            caption = parsed.get("<DETAILED_CAPTION>", "").strip()
+        except Exception as exc:
+            logger.warning("Florence-2 <DETAILED_CAPTION> for phrases failed: %s", exc)
+
+        # Fallback: <DENSE_REGION_CAPTION> for a short noun label
+        if not caption or len(caption) < 4:
+            detections = self._run_single_task(
+                crop, crop.shape[1], crop.shape[0],
+                "<DENSE_REGION_CAPTION>", max_tokens=128,
+            )
+            if detections:
+                best = max(detections, key=lambda d: (d[0][2] - d[0][0]) * (d[0][3] - d[0][1]))
+                caption = _clean_label(best[1])
+
         if not caption or len(caption) < 3:
             return []
 
@@ -926,6 +952,30 @@ class TrackingEngine:
             "TrackingEngine models loaded (SAM2-tiny + Florence-2-base + SigLIP2-B/16, %.1f GB VRAM)",
             torch.cuda.memory_allocated() / 1024 ** 3,
         )
+
+
+def _shorten_label(text: str, max_words: int = 5) -> str:
+    """Trim Florence-2 caption boilerplate, keep only the key object phrase.
+
+    Strips common preamble patterns like 'The image shows', 'This is a photo of',
+    'In this picture there is', etc.  If the result is still longer than
+    max_words, truncate to the first max_words.
+    """
+    text = text.strip()
+    for prefix in [
+        "The image shows ", "The image depicts ", "The picture shows ",
+        "This is a photo of ", "This is an image of ", "This image shows ",
+        "In this image, ", "In this picture, ", "In the image, ",
+        "A photo of ", "An image of ",
+    ]:
+        if text.lower().startswith(prefix.lower()):
+            text = text[len(prefix):]
+            break
+    text = text.rstrip(".")
+    words = text.split()
+    if len(words) > max_words:
+        text = " ".join(words[:max_words])
+    return text.strip() if text.strip() else "object"
 
 
 def _clean_label(text: str) -> str:
