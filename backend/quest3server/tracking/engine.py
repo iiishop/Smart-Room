@@ -259,8 +259,8 @@ class TrackingEngine:
         ]
 
         if not od_detections and not drc_detections:
-            logger.info("Ensemble empty, falling back to <OPEN_VOCABULARY_DETECTION>")
-            return self._run_single_task(rgb, img_w, img_h, "<OPEN_VOCABULARY_DETECTION>", max_tokens=768)
+            logger.info("Ensemble empty — no objects detected in full image")
+            return []
 
         merged = self._merge_od_drc(od_detections, drc_detections)
         logger.info(
