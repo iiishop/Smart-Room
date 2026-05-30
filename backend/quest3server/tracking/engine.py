@@ -844,8 +844,8 @@ class TrackingEngine:
     ) -> list[tuple[str, list[int]]]:
         """Grounded-SAM-2 style cascade: caption crop → extract noun phrases.
 
-        1. Crop + pad the bbox region, run <DETAILED_CAPTION>.
-        2. Feed caption to <CAPTION_TO_PHRASE_GROUNDING> → bboxes + labels.
+        1. Crop + pad the bbox region, run <DENSE_REGION_CAPTION>.
+        2. Feed DRC label to <CAPTION_TO_PHRASE_GROUNDING> → bboxes + labels.
         3. Remap phrase bboxes to full-image coords.
         Returns list of (phrase_text, bbox_in_full_coords), or empty list.
         """
@@ -870,16 +870,6 @@ class TrackingEngine:
         if detections:
             best = max(detections, key=lambda d: (d[0][2] - d[0][0]) * (d[0][3] - d[0][1]))
             caption = _clean_label(best[1])
-        # Fallback: <CAPTION> as last resort (may produce longer text)
-        if not caption:
-            try:
-                raw = self._florence2_infer(crop, "<CAPTION>", max_tokens=64)
-                parsed = self._florence2_proc.post_process_generation(
-                    raw, task="<CAPTION>", image_size=(crop.shape[1], crop.shape[0]),
-                )
-                caption = parsed.get("<CAPTION>", "").strip()
-            except Exception:
-                pass
         if not caption or len(caption) < 3:
             return []
 
