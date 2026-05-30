@@ -247,7 +247,7 @@ class TrackingEngine:
         Merge strategy:
         - Overlapping bboxes → keep OD bbox, replace label with DRC description.
         - Non-overlapping DRC bboxes → added to pool (objects <OD> missed).
-        - Falls back to <OPEN_VOCABULARY_DETECTION> if both tasks return empty.
+        - Returns empty list if both tasks return nothing.
         """
         od_detections = self._run_single_task(rgb, img_w, img_h, "<OD>", max_tokens=768)
         drc_detections = self._run_single_task(rgb, img_w, img_h, "<DENSE_REGION_CAPTION>", max_tokens=512)
