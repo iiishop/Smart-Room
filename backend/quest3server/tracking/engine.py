@@ -311,7 +311,7 @@ class TrackingEngine:
         if not drc:
             return od
         if not od:
-            return [(bbox, _shorten_label(label), 0.65) for bbox, label, _ in drc]
+            return [(bbox, _clean_label(label), 0.65) for bbox, label, _ in drc]
 
         merged = list(od)  # start with OD as base
         drc_matched = [False] * len(drc)
@@ -327,13 +327,13 @@ class TrackingEngine:
 
             if best_iou >= self._DETECTION_IOU_THRESHOLD and best_oi >= 0:
                 # Replace OD label with shorter DRC description
-                merged[best_oi] = (merged[best_oi][0], _shorten_label(dr_label), 0.85)
+                merged[best_oi] = (merged[best_oi][0], _clean_label(dr_label), 0.85)
                 drc_matched[di] = True
 
         # Add unmatched DRC detections (objects <OD> missed)
         for di, (dr_bbox, dr_label, _) in enumerate(drc):
             if not drc_matched[di]:
-                merged.append((dr_bbox, _shorten_label(dr_label), 0.65))
+                merged.append((dr_bbox, _clean_label(dr_label), 0.65))
 
         return merged
 
@@ -785,7 +785,7 @@ class TrackingEngine:
                 raw, task=task, image_size=(w, h),
             )
             result = parsed.get(task, "object")
-            return _shorten_label(_clean_label(result))
+            return _clean_label(result)
         except Exception as exc:
             logger.warning("Florence-2 region description failed: %s", exc)
             return "object"
@@ -793,14 +793,13 @@ class TrackingEngine:
     def _caption_crop(
         self, rgb: np.ndarray, x0: int, y0: int, x1: int, y1: int, pad_ratio: float = 0.15,
     ) -> str:
-        """Crop and pad a bbox region, then run Florence-2 caption on the isolated object.
+        """Crop and pad a bbox region, then run DRC on the isolated object.
 
-        Unlike _describe_region which passes the full image with location tokens,
-        this method crops the object out, pads a border, and runs a clean caption
-        with no background interference. Much better for small objects surrounded
-        by dominant context (e.g., a cup on a laptop desk).
+        Uses <DENSE_REGION_CAPTION> which produces short descriptive labels
+        (e.g. 'white cup', 'laptop bag'), NOT full captions like
+        '<DETAILED_CAPTION>' which produces scene descriptions.
 
-        Tries <DETAILED_CAPTION> first (most descriptive), falls back to <CAPTION>.
+        Falls back to <OD> if DRC returns nothing.
         """
         h, w = rgb.shape[:2]
         bw, bh = max(4, x1 - x0), max(4, y1 - y0)
@@ -815,17 +814,28 @@ class TrackingEngine:
         if crop.size == 0:
             return "object"
 
-        for task in ("<DETAILED_CAPTION>", "<CAPTION>"):
-            try:
-                raw = self._florence2_infer(crop, task, max_tokens=64)
-                parsed = self._florence2_proc.post_process_generation(
-                    raw, task=task, image_size=(crop.shape[1], crop.shape[0]),
-                )
-                label = parsed.get(task, "").strip()
-                if label and len(label) > 2:
-                    return _shorten_label(_clean_label(label))
-            except Exception as exc:
-                logger.warning("Florence-2 %s on crop failed: %s", task, exc)
+        crop_h, crop_w = crop.shape[:2]
+
+        # <DENSE_REGION_CAPTION> gives short descriptive labels on the crop
+        detections = self._run_single_task(
+            crop, crop_w, crop_h, "<DENSE_REGION_CAPTION>", max_tokens=128,
+        )
+        if detections:
+            # Pick the label with the largest bbox (dominant object in the crop)
+            best = max(detections, key=lambda d: (d[0][2] - d[0][0]) * (d[0][3] - d[0][1]))
+            label = _clean_label(best[1])
+            if label and label != "object":
+                return label
+
+        # Fallback: <OD> on the crop for a COCO class label
+        detections = self._run_single_task(
+            crop, crop_w, crop_h, "<OD>", max_tokens=128,
+        )
+        if detections:
+            best = max(detections, key=lambda d: (d[0][2] - d[0][0]) * (d[0][3] - d[0][1]))
+            label = _clean_label(best[1])
+            if label and label != "object":
+                return label
 
         return "object"
 
@@ -851,20 +861,26 @@ class TrackingEngine:
         if crop.size == 0:
             return []
 
-        # Step 1: caption the isolated object region
+        # Step 1: describe the isolated object via <DENSE_REGION_CAPTION> on the crop.
+        # DRC produces short labels like 'white cup', not full sentences.
+        detections = self._run_single_task(
+            crop, crop.shape[1], crop.shape[0], "<DENSE_REGION_CAPTION>", max_tokens=128,
+        )
         caption = ""
-        for task in ("<DETAILED_CAPTION>", "<CAPTION>"):
-            try:
-                raw = self._florence2_infer(crop, task, max_tokens=128)
-                parsed = self._florence2_proc.post_process_generation(
-                    raw, task=task, image_size=(crop.shape[1], crop.shape[0]),
-                )
-                caption = parsed.get(task, "").strip()
-                if caption and len(caption) > 3:
-                    break
-            except Exception as exc:
-                logger.warning("Florence-2 %s for phrases failed: %s", task, exc)
+        if detections:
+            best = max(detections, key=lambda d: (d[0][2] - d[0][0]) * (d[0][3] - d[0][1]))
+            caption = _clean_label(best[1])
+        # Fallback: <CAPTION> as last resort (may produce longer text)
         if not caption:
+            try:
+                raw = self._florence2_infer(crop, "<CAPTION>", max_tokens=64)
+                parsed = self._florence2_proc.post_process_generation(
+                    raw, task="<CAPTION>", image_size=(crop.shape[1], crop.shape[0]),
+                )
+                caption = parsed.get("<CAPTION>", "").strip()
+            except Exception:
+                pass
+        if not caption or len(caption) < 3:
             return []
 
         # Step 2: <CAPTION_TO_PHRASE_GROUNDING> on the CROP (not full image).
@@ -932,29 +948,3 @@ def _clean_label(text: str) -> str:
     # Collapse multiple spaces
     cleaned = re.sub(r"\s+", " ", cleaned)
     return cleaned if cleaned else "object"
-
-
-def _shorten_label(text: str, max_words: int = 5) -> str:
-    """Trim Florence-2 caption boilerplate, keep only the key object phrase.
-
-    Strips common preamble patterns like 'The image shows', 'This is a photo of',
-    'In this picture there is', etc.  If the result is still longer than
-    max_words, truncate to the first max_words.
-    """
-    text = text.strip()
-    # Common Florence-2 caption preambles
-    for prefix in [
-        "The image shows ", "The image depicts ", "The picture shows ",
-        "This is a photo of ", "This is an image of ", "This image shows ",
-        "In this image, ", "In this picture, ", "In the image, ",
-        "A photo of ", "An image of ",
-    ]:
-        if text.lower().startswith(prefix.lower()):
-            text = text[len(prefix):]
-            break
-    # Also strip trailing period
-    text = text.rstrip(".")
-    words = text.split()
-    if len(words) > max_words:
-        text = " ".join(words[:max_words])
-    return text.strip() if text.strip() else "object"
