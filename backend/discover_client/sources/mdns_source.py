@@ -174,7 +174,7 @@ class MdnsSource(Source):
             return
 
         info = AsyncServiceInfo(service_type, name)
-        resolved = await info.async_request(self._zeroconf.zeroconf, 3000)
+        resolved = await info.async_request(self._zeroconf.zeroconf, 8000)
         payload = _service_info_to_payload(service_type, name, info if resolved else None)
         self.emit("discovery", payload)
 
