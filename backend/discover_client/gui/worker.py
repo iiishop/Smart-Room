@@ -13,7 +13,7 @@ from discover_client.config import load_config
 class Worker(QObject):
     """Runs DiscoverClient on a background thread, bridges events to Qt."""
 
-    event_received = Signal(str, str, dict)
+    event_received = Signal(str, str, float, str, dict)
     status_changed = Signal(str, bool)
 
     def __init__(self, parent=None):
@@ -48,7 +48,11 @@ class Worker(QObject):
 
         def on_event(event: SourceEvent) -> None:
             self.event_received.emit(
-                event.source_id, event.event_type, event.payload
+                event.source_id,
+                event.source_type,
+                event.timestamp,
+                event.event_type,
+                event.payload,
             )
             # Track real connection state from status events
             if event.event_type == "status":

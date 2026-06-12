@@ -135,6 +135,45 @@ QMainWindow {
     font-weight: bold;
 }
 
+#evidenceTable {
+    background-color: rgb(40, 44, 52);
+    border: 1px solid rgb(44, 49, 58);
+    border-radius: 4px;
+    gridline-color: rgb(44, 49, 58);
+    font-size: 9pt;
+}
+
+#evidenceTable QHeaderView::section {
+    background-color: rgb(33, 37, 43);
+    color: rgb(189, 147, 249);
+    border: none;
+    border-bottom: 1px solid rgb(44, 49, 58);
+    padding: 4px 8px;
+    font-weight: bold;
+}
+
+QTabWidget::pane {
+    border: 1px solid rgb(44, 49, 58);
+    background-color: rgb(40, 44, 52);
+}
+
+QTabBar::tab {
+    background-color: rgb(33, 37, 43);
+    color: rgb(120, 125, 145);
+    padding: 8px 20px;
+    border: none;
+    border-right: 1px solid rgb(44, 49, 58);
+}
+
+QTabBar::tab:selected {
+    color: rgb(189, 147, 249);
+    border-bottom: 2px solid rgb(189, 147, 249);
+}
+
+QTabBar::tab:hover {
+    color: rgb(221, 221, 221);
+}
+
 /* Buttons */
 QPushButton {
     background-color: rgb(189, 147, 249);

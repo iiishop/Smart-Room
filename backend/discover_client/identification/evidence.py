@@ -22,3 +22,33 @@ class SignalEvidence:
     hostname: str | None = None
     mac_prefix: str | None = None
     timestamp: float = 0.0
+
+    def summarize(self) -> str:
+        parts: list[str] = []
+        if self.ip_address:
+            parts.append(f"ip={self.ip_address}")
+        if self.hostname:
+            parts.append(f"host={self.hostname}")
+        if self.nmap_mac:
+            parts.append(f"mac={self.nmap_mac}")
+        elif self.mac_prefix:
+            parts.append(f"mac={self.mac_prefix}")
+        if self.nmap_vendor:
+            parts.append(f"vendor={self.nmap_vendor}")
+        if self.nmap_os_guess:
+            parts.append(f"os={self.nmap_os_guess}")
+        if self.mqtt_topic:
+            parts.append(f"topic={self.mqtt_topic}")
+        if self.mqtt_payload_keys:
+            keys = ",".join(sorted(self.mqtt_payload_keys))
+            parts.append(f"keys={{{keys}}}")
+        if self.mdns_service_type:
+            parts.append(f"svc={self.mdns_service_type}")
+        if self.mdns_txt_keys:
+            keys = ",".join(sorted(self.mdns_txt_keys))
+            parts.append(f"txt={{{keys}}}")
+        if self.ssdp_usn:
+            parts.append(f"usn={self.ssdp_usn[:60]}")
+        if self.ssdp_server:
+            parts.append(f"srv={self.ssdp_server}")
+        return "  ".join(parts) if parts else "(no clues)"

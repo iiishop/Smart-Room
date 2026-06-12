@@ -22,11 +22,15 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QPushButton,
     QScrollArea,
+    QTabWidget,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
+
+from discover_client.identification import ANNOTATORS
+from discover_client.source import SourceEvent
 
 # ── Source palette (left sidebar) ───────────────────────────────
 
@@ -269,8 +273,6 @@ class MainWindow(QMainWindow):
         toolbar.addStretch()
         toolbar.addWidget(self.btn_start)
         toolbar.addWidget(self.btn_stop)
-        right.addLayout(toolbar)
-
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self._card_container = QWidget()
@@ -280,9 +282,7 @@ class MainWindow(QMainWindow):
         for col in range(4):
             self._card_grid.setColumnStretch(col, 1)
         self.scroll.setWidget(self._card_container)
-        right.addWidget(self.scroll, stretch=1)
 
-        # Global event log table — stretches to fill remaining space
         self._log_table = CopyableTableWidget(0, 3)
         self._log_table.setObjectName("globalLogTable")
         self._log_table.setHorizontalHeaderLabels(["Time", "Source", "Event"])
@@ -292,7 +292,36 @@ class MainWindow(QMainWindow):
         self._log_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._log_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._log_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        right.addWidget(self._log_table, stretch=2)
+
+        self._tabs = QTabWidget()
+        self._tabs.setObjectName("mainTabs")
+
+        discover_tab = QWidget()
+        discover_layout = QVBoxLayout(discover_tab)
+        discover_layout.setContentsMargins(8, 8, 8, 8)
+        discover_layout.addLayout(toolbar)
+        discover_layout.addWidget(self.scroll, stretch=1)
+        discover_layout.addWidget(self._log_table, stretch=2)
+        self._tabs.addTab(discover_tab, "Discover")
+
+        self._evidence_table = CopyableTableWidget(0, 4)
+        self._evidence_table.setObjectName("evidenceTable")
+        self._evidence_table.setHorizontalHeaderLabels(["Time", "Source", "Annotator", "Key Clues"])
+        self._evidence_table.horizontalHeader().setStretchLastSection(True)
+        self._evidence_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self._evidence_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self._evidence_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self._evidence_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._evidence_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._evidence_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+
+        evidence_tab = QWidget()
+        evidence_layout = QVBoxLayout(evidence_tab)
+        evidence_layout.setContentsMargins(8, 8, 8, 8)
+        evidence_layout.addWidget(self._evidence_table)
+        self._tabs.addTab(evidence_tab, "Evidence")
+
+        right.addWidget(self._tabs)
 
         root.addLayout(right, stretch=1)
 
@@ -398,13 +427,20 @@ class MainWindow(QMainWindow):
 
     # ── Events from worker ───────────────────────────────────
 
-    def _on_event(self, source_id: str, event_type: str, payload: dict) -> None:
+    def _on_event(
+        self,
+        source_id: str,
+        source_type: str,
+        timestamp: float,
+        event_type: str,
+        payload: dict,
+    ) -> None:
         # Update source card stats
         if source_id in self._panels:
             self._panels[source_id].increment_msg_count()
 
         # Append to global log table
-        ts = datetime.now().strftime("%H:%M:%S")
+        ts = datetime.fromtimestamp(timestamp).strftime("%H:%M:%S")
         summary = self._summarize_event(event_type, payload)
 
         row = self._log_table.rowCount()
@@ -421,6 +457,33 @@ class MainWindow(QMainWindow):
             item.setForeground(QColor("#50fa7b"))
         self._log_table.setItem(row, 2, item)
         self._log_table.scrollToBottom()
+
+        annotator_cls = ANNOTATORS.get(source_type)
+        if annotator_cls is None:
+            return
+
+        evidence = annotator_cls().annotate(
+            SourceEvent(
+                source_id=source_id,
+                source_type=source_type,
+                timestamp=timestamp,
+                event_type=event_type,
+                payload=payload,
+            )
+        )
+        if evidence is None:
+            return
+
+        evidence_row = self._evidence_table.rowCount()
+        if evidence_row >= 500:
+            self._evidence_table.removeRow(0)
+            evidence_row = 499
+        self._evidence_table.insertRow(evidence_row)
+        self._evidence_table.setItem(evidence_row, 0, QTableWidgetItem(ts))
+        self._evidence_table.setItem(evidence_row, 1, QTableWidgetItem(source_id))
+        self._evidence_table.setItem(evidence_row, 2, QTableWidgetItem(source_type.upper()))
+        self._evidence_table.setItem(evidence_row, 3, QTableWidgetItem(evidence.summarize()))
+        self._evidence_table.scrollToBottom()
 
     def _summarize_event(self, event_type: str, payload: dict) -> str:
         if event_type == "data":

@@ -3,12 +3,13 @@
 
 [[sources]]
 source_id = "1"
-source_type = "mdns"
+source_type = "nmap"
 enabled = true
 
 [sources.settings]
-scan_interval_s = 30
-service_types = []
+scan_flags = "-sn -PR"
+scan_interval_s = 300
+target_subnet = ""
 
 [[sources]]
 source_id = "2"
@@ -20,6 +21,15 @@ scan_interval_s = 60
 
 [[sources]]
 source_id = "3"
+source_type = "mdns"
+enabled = true
+
+[sources.settings]
+scan_interval_s = 30
+service_types = []
+
+[[sources]]
+source_id = "4"
 source_type = "mqtt"
 enabled = true
 
