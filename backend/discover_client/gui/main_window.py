@@ -11,6 +11,8 @@ from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QApplication,
+    QAbstractItemView,
+    QCheckBox,
     QFrame,
     QGridLayout,
     QGroupBox,
@@ -24,7 +26,6 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
-    QAbstractItemView,
 )
 
 
@@ -99,6 +100,8 @@ class SourcePanel(QGroupBox):
     """Compact source card — status dot, name, type, stats, settings preview."""
 
     edit_requested = Signal(str, str, dict)  # source_id, source_type, settings
+    source_toggled = Signal(str, bool)
+    source_delete_requested = Signal(str)
 
     def __init__(self, source_id: str, source_type: str, settings: dict, parent=None):
         super().__init__(parent)
@@ -106,6 +109,7 @@ class SourcePanel(QGroupBox):
         self.source_id = source_id
         self.source_type = source_type
         self._settings = settings
+        self._enabled = True
         self._msg_count = 0
         self._start_time = time.time()
 
@@ -115,6 +119,11 @@ class SourcePanel(QGroupBox):
 
         # Title bar
         title_bar = QHBoxLayout()
+        self._checkbox = QCheckBox()
+        self._checkbox.setChecked(True)
+        self._checkbox.toggled.connect(self._on_toggle)
+        title_bar.addWidget(self._checkbox)
+
         self._dot = QLabel("○")
         self._dot.setObjectName("panelDot")
         title_bar.addWidget(self._dot)
@@ -131,6 +140,12 @@ class SourcePanel(QGroupBox):
         self._stats = QLabel("msgs: 0  rate: 0/s")
         self._stats.setObjectName("panelStats")
         title_bar.addWidget(self._stats)
+
+        self._del_btn = QPushButton("×")
+        self._del_btn.setFixedSize(22, 22)
+        self._del_btn.setObjectName("btnDelete")
+        self._del_btn.clicked.connect(lambda: self.source_delete_requested.emit(self.source_id))
+        title_bar.addWidget(self._del_btn)
         layout.addLayout(title_bar)
 
         # Key settings preview
@@ -147,6 +162,14 @@ class SourcePanel(QGroupBox):
     def mouseDoubleClickEvent(self, event):
         self.edit_requested.emit(self.source_id, self.source_type, self._settings)
         super().mouseDoubleClickEvent(event)
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
+    def _on_toggle(self, checked: bool) -> None:
+        self._enabled = checked
+        self.source_toggled.emit(self.source_id, checked)
 
     def increment_msg_count(self) -> None:
         self._msg_count += 1
@@ -268,6 +291,8 @@ class MainWindow(QMainWindow):
         panel = SourcePanel(source_id, source_type, settings)
         panel.setMinimumHeight(90)
         panel.edit_requested.connect(self._on_edit_source)
+        panel.source_toggled.connect(self._on_toggle_source)
+        panel.source_delete_requested.connect(self._on_delete_source)
         n = len(self._panels)
         row, col = n // 4, n % 4
         self._card_grid.addWidget(panel, row, col)
@@ -279,6 +304,26 @@ class MainWindow(QMainWindow):
         dlg.saved.connect(self._on_source_saved)
         dlg.exec()
 
+    def _on_toggle_source(self, source_id: str, enabled: bool) -> None:
+        if source_id in self._panels:
+            self._save_config()
+
+    def _on_delete_source(self, source_id: str) -> None:
+        panel = self._panels.pop(source_id, None)
+        if panel is None:
+            return
+        self._card_grid.removeWidget(panel)
+        panel.deleteLater()
+        self._reflow_cards()
+        self._save_config()
+
+    def _reflow_cards(self) -> None:
+        panels = list(self._panels.items())
+        for _, panel in panels:
+            self._card_grid.removeWidget(panel)
+        for index, (_, panel) in enumerate(panels):
+            self._card_grid.addWidget(panel, index // 4, index % 4)
+
     # ── Config persistence ───────────────────────────────────
 
     def _save_config(self) -> None:
@@ -287,7 +332,7 @@ class MainWindow(QMainWindow):
             lines.append(f"\n[[sources]]")
             lines.append(f'source_id = "{sid}"')
             lines.append(f'source_type = "{panel.source_type}"')
-            lines.append(f"enabled = true\n")
+            lines.append(f"enabled = {str(panel.enabled).lower()}\n")
             lines.append("[sources.settings]")
             for key, val in sorted(panel._settings.items()):
                 if isinstance(val, list):
