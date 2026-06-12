@@ -457,3 +457,121 @@ backend/discover_client/
 8. 接入 MainWindow — 监听 `device_identified` 信号，显示设备列表
 
 先写数据结构 + annotator 骨架 + MqttAnnotator，Govee H5179 一个指纹能跑通全流程，再扩展其他标注器。
+
+---
+
+## Appendix C — HTTP Poller Source
+
+### 定位
+
+MQTT 覆盖了 lab 里走 broker 的设备。但 ESP32/树莓派自制设备经常同时暴露 HTTP API。nmap 扫到 80/8080 端口、mDNS 扫到 `_http._tcp` 的设备，目前 Discover 只是"发现"，没有持续采集数据和操作能力。
+
+HTTP Poller 是第五个 Source 类型（与 MQTT/mDNS/SSDP/Nmap 并列）。主动轮询 HTTP 端点，提取数据和操作。
+
+### 架构
+
+```
+nmap/mDNS 证据 ──→ 自动发现 HTTP 目标 (IP + port)
+                         │
+HTTP Poller Source ──────┘
+  │
+  ├─→ 端点探测 (已知路径 + 自动嗅探)
+  │     GET /api/status  → 200 {"temp": 22.1}
+  │     GET /state        → 200 {"led": true}
+  │     POST /api/switch  → 200  ← 命令端点
+  │
+  ├─→ 数据管线 (telemetry)
+  │     {"temp": 22.1}  → DataSnapshot.ingest(...)
+  │
+  └─→ 操作管线 (command)
+        发现 POST 端点 → 注册为 OperationCapability
+        POST {"led": "on"} → 触发设备响应
+```
+
+### 端点探测策略
+
+HTTP Poller 启动时，对每个已知 IP + port 组合，尝试一组路径：
+
+**已知路径（内置）**：
+```
+GET  /api/status, /api/state, /api/data, /status, /state,
+     /metrics, /health, /sensors, /readings, /
+```
+
+**自动嗅探**（可选，默认关闭）：
+```
+抓取 / 的 HTML → 解析 <a> 标签 → 收集路径 → 逐个 GET
+```
+
+返回 JSON 的 → 记录为数据端点。返回 200 + JSON 且路径含 `set`/`switch`/`toggle`/`ctrl`/`command` → 标记为候选命令端点。
+
+### 响应解析
+
+与 MQTT 的 `TopicClassifier` 对齐——HTTP 端点也分三类：
+
+| 分类 | 判定方式 | 置信度 |
+|------|---------|--------|
+| `telemetry` | 路径含 `status`/`state`/`data`/`sensors` + JSON 有数值 | 0.70 |
+| `command` | 路径含 `set`/`switch`/`toggle`/`ctrl`/`command` | 0.85 |
+| `unknown` | 纯文本 / HTML，无 JSON | 0.30 |
+
+JSON payload → 自动展平，按 `DataSnapshot` 相同的多策略数值提取器处理。
+
+### 命令端点
+
+对分类为 `command` 的端点，注册为 OperationCapability：
+
+```python
+OperationCapability(
+    action="http:192.168.5.42:80/api/switch",
+    target="light",
+    current_value="off",
+    known_values=["on", "off"],
+)
+```
+
+当 Device Profiles 页面的按钮被点击 → Discover 发出对应的 HTTP POST：
+
+```
+POST /api/switch  {"state": "on"}
+```
+
+可配置的 payload 模板：`{"state": "{value}"}` / `{"on": true}` / `{"led": "{value}"}`。
+
+### 设备去重
+
+HTTP Poller 发现的 endpoint 通过 IP 与已有 Device 关联——Deduplicator 的 IP 匹配规则（50 分）自动搞定。
+
+### 配置
+
+```toml
+[[sources]]
+source_id = "http-1"
+source_type = "http"
+enabled = true
+[sources.settings]
+scan_interval_s = 30       # 端点探测间隔
+poll_interval_s = 5        # 数据轮询间隔
+target_ips = []            # 留空=从 nmap/mDNS 证据自动发现
+target_ports = [80, 8080]  # 探测端口
+auto_sniff = false         # 是否抓取 HTML 嗅探路径
+auth_token = ""            # Bearer token (可选)
+auth_basic_user = ""       # Basic auth (可选)
+auth_basic_pass = ""
+```
+
+### 实现路径
+
+1. `sources/http_poller.py` — HTTP Poller Source（asyncio + aiohttp）
+2. 注册到 `sources/__init__.py`
+3. 接入 `Annotator`（新建 `annotators/http.py`）从 HTTP 响应提取 SignalEvidence
+4. `DataSnapshot` 自然吸收 HTTP telemetry（数值提取器通用）
+5. `OperationsTracker` 处理 HTTP 命令端点
+6. GUI Device Profiles 页面，命令按钮发 HTTP POST
+
+### 约束
+
+- **不允许未加密的 HTTP 在公网传输敏感数据**——lab 局域网内可接受
+- **自动嗅探路径默认关闭**——避免对陌生设备造成意外副作用
+- **不处理 HTTPS 证书验证失败**——自制设备常用自签名证书
+- **不处理 WebSocket/SSE**——只做 HTTP 轮询，复杂度可控
