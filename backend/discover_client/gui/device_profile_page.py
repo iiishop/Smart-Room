@@ -177,15 +177,16 @@ class DeviceProfileCard(QFrame):
             self._operations_layout.removeWidget(row)
             row.deleteLater()
 
+        # Remove placeholder if operations exist — also clean up stale placeholder
+        # before showing a new one in the "no ops" branch
+        _remove_first_placeholder(self._operations_layout)
+
         # Show placeholder only if there are no ops and no existing rows
         if not incoming_ops:
             if not self._operation_rows:
                 placeholder = QLabel("(no operations)")
                 self._operations_layout.addWidget(placeholder)
             return
-
-        # Remove placeholder if operations exist
-        _remove_first_placeholder(self._operations_layout)
 
         for operation in incoming_ops:
             key = _op_key(operation)
