@@ -191,10 +191,10 @@ event = SourceEvent(
 )
 evidence = annotator.annotate(event)
 assert evidence is not None
-assert evidence.mqtt_topic == "govee/abc123/state"
-assert evidence.mqtt_payload_keys == {"temp", "humidity"}
-assert evidence.hostname == "abc123"
-assert evidence.source_type == "mqtt"
+assert evidence.mqtt_topic == 'govee/abc123/state'
+assert evidence.mqtt_payload_keys == {'temp', 'humidity'}
+assert evidence.source_type == 'mqtt'
+assert evidence.hostname is None  # MQTT topic structure is not universal — annotator does not guess
 
 print("All checks passed")
 ```
