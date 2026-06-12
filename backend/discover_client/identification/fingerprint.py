@@ -22,17 +22,6 @@ class DeviceFingerprint:
 
 FINGERPRINTS: list[DeviceFingerprint] = [
     DeviceFingerprint(
-        device_type="Govee H5179",
-        category="temp_sensor",
-        mqtt_topic_patterns=["govee/+/state"],
-        mqtt_payload_keys={"temp", "humidity", "battery"},
-        mdns_service_types=["_matter._tcp.local."],
-        mdns_txt_keys={"SII", "SAI"},
-        nmap_mac_prefixes=["AA:BB:CC"],
-        nmap_os_guesses=["Linux*embedded*"],
-        hostname_pattern="govee-*",
-    ),
-    DeviceFingerprint(
         device_type="Unknown Device",
         category="unknown",
     ),

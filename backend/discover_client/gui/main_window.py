@@ -22,15 +22,15 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QPushButton,
     QScrollArea,
-    QTabWidget,
+    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
-from discover_client.identification import ANNOTATORS
-from discover_client.source import SourceEvent
+from discover_client.gui.evidence_page import EvidencePage
+from discover_client.identification.evidence import SignalEvidence
 
 # ── Source palette (left sidebar) ───────────────────────────────
 
@@ -248,14 +248,35 @@ class MainWindow(QMainWindow):
 
         central = QWidget()
         self.setCentralWidget(central)
-        root = QHBoxLayout(central)
+        root = QVBoxLayout(central)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
+
+        nav = QHBoxLayout()
+        nav.setObjectName("toolbar")
+        self._btn_page1 = QPushButton("Sources & Log")
+        self._btn_page1.setObjectName("navBtn")
+        self._btn_page1.clicked.connect(lambda: self._stack.setCurrentIndex(0))
+        self._btn_page2 = QPushButton("Evidence")
+        self._btn_page2.setObjectName("navBtn")
+        self._btn_page2.clicked.connect(lambda: self._stack.setCurrentIndex(1))
+        nav.addWidget(self._btn_page1)
+        nav.addWidget(self._btn_page2)
+        nav.addStretch()
+        root.addLayout(nav)
+
+        self._stack = QStackedWidget()
+        root.addWidget(self._stack)
+
+        page0 = QWidget()
+        page0_layout = QHBoxLayout(page0)
+        page0_layout.setContentsMargins(0, 0, 0, 0)
+        page0_layout.setSpacing(0)
 
         # Left: source palette
         self.palette = SourcePalette()
         self.palette.add_requested.connect(self._on_add_source)
-        root.addWidget(self.palette)
+        page0_layout.addWidget(self.palette)
 
         # Right: added sources
         right = QVBoxLayout()
@@ -293,43 +314,22 @@ class MainWindow(QMainWindow):
         self._log_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._log_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
 
-        self._tabs = QTabWidget()
-        self._tabs.setObjectName("mainTabs")
+        right.addLayout(toolbar)
+        right.addWidget(self.scroll, stretch=1)
+        right.addWidget(self._log_table, stretch=2)
 
-        discover_tab = QWidget()
-        discover_layout = QVBoxLayout(discover_tab)
-        discover_layout.setContentsMargins(8, 8, 8, 8)
-        discover_layout.addLayout(toolbar)
-        discover_layout.addWidget(self.scroll, stretch=1)
-        discover_layout.addWidget(self._log_table, stretch=2)
-        self._tabs.addTab(discover_tab, "Discover")
+        page0_layout.addLayout(right, stretch=1)
+        self._stack.addWidget(page0)
 
-        self._evidence_table = CopyableTableWidget(0, 4)
-        self._evidence_table.setObjectName("evidenceTable")
-        self._evidence_table.setHorizontalHeaderLabels(["Time", "Source", "Annotator", "Key Clues"])
-        self._evidence_table.horizontalHeader().setStretchLastSection(True)
-        self._evidence_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        self._evidence_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        self._evidence_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        self._evidence_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self._evidence_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self._evidence_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-
-        evidence_tab = QWidget()
-        evidence_layout = QVBoxLayout(evidence_tab)
-        evidence_layout.setContentsMargins(8, 8, 8, 8)
-        evidence_layout.addWidget(self._evidence_table)
-        self._tabs.addTab(evidence_tab, "Evidence")
-
-        right.addWidget(self._tabs)
-
-        root.addLayout(right, stretch=1)
+        self._evidence_page = EvidencePage()
+        self._stack.addWidget(self._evidence_page)
 
         # Worker
         from discover_client.gui.worker import Worker
 
         self.worker = Worker()
         self.worker.event_received.connect(self._on_event)
+        self.worker.evidence_produced.connect(self._on_evidence)
         self.worker.status_changed.connect(self._on_status)
 
         # Right side starts empty — user adds sources via palette
@@ -458,32 +458,8 @@ class MainWindow(QMainWindow):
         self._log_table.setItem(row, 2, item)
         self._log_table.scrollToBottom()
 
-        annotator_cls = ANNOTATORS.get(source_type)
-        if annotator_cls is None:
-            return
-
-        evidence = annotator_cls().annotate(
-            SourceEvent(
-                source_id=source_id,
-                source_type=source_type,
-                timestamp=timestamp,
-                event_type=event_type,
-                payload=payload,
-            )
-        )
-        if evidence is None:
-            return
-
-        evidence_row = self._evidence_table.rowCount()
-        if evidence_row >= 500:
-            self._evidence_table.removeRow(0)
-            evidence_row = 499
-        self._evidence_table.insertRow(evidence_row)
-        self._evidence_table.setItem(evidence_row, 0, QTableWidgetItem(ts))
-        self._evidence_table.setItem(evidence_row, 1, QTableWidgetItem(source_id))
-        self._evidence_table.setItem(evidence_row, 2, QTableWidgetItem(source_type.upper()))
-        self._evidence_table.setItem(evidence_row, 3, QTableWidgetItem(evidence.summarize()))
-        self._evidence_table.scrollToBottom()
+    def _on_evidence(self, evidence: SignalEvidence) -> None:
+        self._evidence_page.add_evidence(evidence)
 
     def _summarize_event(self, event_type: str, payload: dict) -> str:
         if event_type == "data":

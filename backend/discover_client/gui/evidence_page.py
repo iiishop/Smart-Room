@@ -1,0 +1,103 @@
+"""Evidence viewer with one tab per source type."""
+
+from __future__ import annotations
+
+from datetime import datetime
+
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QHeaderView,
+    QTabWidget,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
+
+from discover_client.identification.evidence import SignalEvidence
+
+
+class EvidencePage(QWidget):
+    COLUMNS = {
+        "mqtt": ["Time", "Source", "Topic", "Payload Keys"],
+        "mdns": ["Time", "Source", "Service Type", "Hostname", "IP"],
+        "ssdp": ["Time", "Source", "USN", "Server", "IP"],
+        "nmap": ["Time", "Source", "IP", "Hostname", "MAC", "Vendor", "OS"],
+    }
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._tables: dict[str, QTableWidget] = {}
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+
+        self._tabs = QTabWidget()
+        layout.addWidget(self._tabs)
+
+        for source_type, columns in self.COLUMNS.items():
+            table = self._make_table(columns)
+            self._tables[source_type] = table
+            self._tabs.addTab(table, source_type.upper())
+
+    def _make_table(self, columns: list[str]) -> QTableWidget:
+        table = QTableWidget(0, len(columns))
+        table.setObjectName("evidenceTable")
+        table.setHorizontalHeaderLabels(columns)
+        table.horizontalHeader().setStretchLastSection(True)
+        header = table.horizontalHeader()
+        for index in range(len(columns) - 1):
+            header.setSectionResizeMode(index, QHeaderView.ResizeMode.ResizeToContents)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        return table
+
+    def add_evidence(self, evidence: SignalEvidence) -> None:
+        table = self._tables.get(evidence.source_type)
+        if table is None:
+            return
+
+        ts = datetime.fromtimestamp(evidence.timestamp).strftime("%H:%M:%S")
+        values = self._format_evidence(evidence.source_type, ts, evidence)
+
+        row = table.rowCount()
+        if row >= 500:
+            table.removeRow(0)
+            row = 499
+        table.insertRow(row)
+        for col, value in enumerate(values):
+            table.setItem(row, col, QTableWidgetItem(str(value) if value is not None else ""))
+        table.scrollToBottom()
+
+    def _format_evidence(self, source_type: str, ts: str, evidence: SignalEvidence) -> list[str]:
+        if source_type == "mqtt":
+            keys = sorted(evidence.mqtt_payload_keys or [])
+            return [ts, evidence.source_id, evidence.mqtt_topic or "", ", ".join(keys)]
+        if source_type == "mdns":
+            return [
+                ts,
+                evidence.source_id,
+                evidence.mdns_service_type or "",
+                evidence.hostname or "",
+                evidence.ip_address or "",
+            ]
+        if source_type == "ssdp":
+            return [
+                ts,
+                evidence.source_id,
+                evidence.ssdp_usn or "",
+                evidence.ssdp_server or "",
+                evidence.ip_address or "",
+            ]
+        if source_type == "nmap":
+            return [
+                ts,
+                evidence.source_id,
+                evidence.ip_address or "",
+                evidence.hostname or "",
+                evidence.nmap_mac or "",
+                evidence.nmap_vendor or "",
+                evidence.nmap_os_guess or "",
+            ]
+        return [ts, evidence.source_id, evidence.summarize()]

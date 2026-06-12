@@ -6,6 +6,7 @@ import threading
 from PySide6.QtCore import QObject, Signal
 
 from discover_client.client import DiscoverClient
+from discover_client.identification import ANNOTATORS
 from discover_client.source import SourceEvent
 from discover_client.config import load_config
 
@@ -14,6 +15,7 @@ class Worker(QObject):
     """Runs DiscoverClient on a background thread, bridges events to Qt."""
 
     event_received = Signal(str, str, float, str, dict)
+    evidence_produced = Signal(object)
     status_changed = Signal(str, bool)
 
     def __init__(self, parent=None):
@@ -61,6 +63,14 @@ class Worker(QObject):
                     self.status_changed.emit(event.source_id, True)
                 elif msg == "stopped" or "Disconnected" in str(msg):
                     self.status_changed.emit(event.source_id, False)
+
+            annotator_cls = ANNOTATORS.get(event.source_type)
+            if annotator_cls is None:
+                return
+
+            evidence = annotator_cls().annotate(event)
+            if evidence is not None:
+                self.evidence_produced.emit(evidence)
 
         self._client.subscribe(on_event)
 
