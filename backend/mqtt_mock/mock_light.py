@@ -12,6 +12,8 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QPushButton,
+    QSlider,
     QVBoxLayout,
     QWidget,
 )
@@ -91,15 +93,55 @@ class MockLightWindow(QWidget):
     def __init__(self, broker_host: str, broker_port: int):
         super().__init__()
         self.setWindowTitle(f"MQTT Light — {DEVICE_ID}")
-        self.setFixedSize(320, 420)
+        self.setFixedSize(360, 540)
         self.setStyleSheet("background-color: #1e1e2e; color: #cdd6f4;")
 
         layout = QVBoxLayout(self)
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.setSpacing(12)
 
         # Light bulb widget
         self._bulb = LightBulb()
         layout.addWidget(self._bulb, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        # MQTT client (must exist before controls so they can publish)
+        self._mqtt = mqtt.Client(client_id=f"mock-light-{DEVICE_ID}")
+        self._mqtt.on_connect = self._on_connect
+        self._mqtt.on_message = self._on_message
+        self._mqtt.connect_async(broker_host, broker_port)
+        self._mqtt.loop_start()
+
+        # --- Interactive controls (publish via MQTT) ---
+        controls = QHBoxLayout()
+        controls.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        controls.setSpacing(12)
+
+        self._toggle_btn = QPushButton("Turn ON")
+        self._toggle_btn.setFixedSize(90, 36)
+        self._toggle_btn.clicked.connect(self._on_toggle_clicked)
+        _style_button(self._toggle_btn, on=False)
+        controls.addWidget(self._toggle_btn)
+
+        self._bright_slider = QSlider(Qt.Orientation.Horizontal)
+        self._bright_slider.setRange(0, 100)
+        self._bright_slider.setValue(100)
+        self._bright_slider.setFixedWidth(160)
+        self._bright_slider.valueChanged.connect(self._on_brightness_changed)
+        self._bright_slider.setStyleSheet("""
+            QSlider::groove:horizontal {
+                background: #45475a; height: 6px; border-radius: 3px;
+            }
+            QSlider::handle:horizontal {
+                background: #f9e2af; width: 16px; height: 16px;
+                margin: -5px 0; border-radius: 8px;
+            }
+            QSlider::sub-page:horizontal {
+                background: #f9e2af; border-radius: 3px;
+            }
+        """)
+        controls.addWidget(self._bright_slider)
+
+        layout.addLayout(controls)
 
         # State label
         self._label = QLabel("OFF")
@@ -111,13 +153,6 @@ class MockLightWindow(QWidget):
         self._bright_label = QLabel("Brightness: 100%")
         self._bright_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self._bright_label)
-
-        # MQTT client
-        self._mqtt = mqtt.Client(client_id=f"mock-light-{DEVICE_ID}")
-        self._mqtt.on_connect = self._on_connect
-        self._mqtt.on_message = self._on_message
-        self._mqtt.connect_async(broker_host, broker_port)
-        self._mqtt.loop_start()
 
         # Periodic status heartbeat
         self._heartbeat = QTimer(self)
@@ -164,8 +199,24 @@ class MockLightWindow(QWidget):
         if changed:
             state = self._bulb.current_state()
             client.publish(TOPIC_STATE, json.dumps(state), qos=1, retain=True)
+            self._update_controls()
             ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
             print(f"[{ts}] State changed → {state}")
+
+    def _on_toggle_clicked(self):
+        new_power = "OFF" if self._bulb._power else "ON"
+        self._mqtt.publish(TOPIC_COMMAND, json.dumps({"power": new_power}), qos=1)
+
+    def _on_brightness_changed(self, value: int):
+        self._mqtt.publish(TOPIC_COMMAND, json.dumps({"brightness": value}), qos=1)
+
+    def _update_controls(self):
+        on = self._bulb._power
+        self._toggle_btn.setText("Turn OFF" if on else "Turn ON")
+        _style_button(self._toggle_btn, on=on)
+        self._bright_slider.blockSignals(True)
+        self._bright_slider.setValue(self._bulb._brightness)
+        self._bright_slider.blockSignals(False)
 
     def _publish_status(self):
         state = self._bulb.current_state()
@@ -185,6 +236,7 @@ class MockLightWindow(QWidget):
         self._bright_label.setStyleSheet(
             "color: #a6adc8;" if self._bulb._power else "color: #585b70;"
         )
+        self._update_controls()
 
 
 def main():
@@ -198,6 +250,24 @@ def main():
     window = MockLightWindow(args.broker, args.port)
     window.show()
     app.exec()
+
+
+def _style_button(btn: QPushButton, *, on: bool):
+    if on:
+        bg = "#f9e2af"
+        fg = "#1e1e2e"
+        hover = "#f2cdcd"
+    else:
+        bg = "#45475a"
+        fg = "#cdd6f4"
+        hover = "#585b70"
+    btn.setStyleSheet(f"""
+        QPushButton {{
+            background: {bg}; color: {fg}; border: none;
+            border-radius: 8px; font-weight: bold; font-size: 13px;
+        }}
+        QPushButton:hover {{ background: {hover}; }}
+    """)
 
 
 if __name__ == "__main__":
