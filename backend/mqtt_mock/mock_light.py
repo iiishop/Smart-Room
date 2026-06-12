@@ -142,6 +142,17 @@ class MockLightWindow(QWidget):
             return  # Skip self-announcement
 
         changed = False
+        # Support both explicit keys ("power", "brightness") and generic "value" key
+        value = payload.get("value")
+        if value is not None:
+            val_str = str(value).upper()
+            if val_str in ("ON", "OFF", "TRUE", "FALSE", "0", "1", "TOGGLE"):
+                payload = {**payload, "power": val_str}
+            else:
+                try:
+                    payload = {**payload, "brightness": int(value)}
+                except (ValueError, TypeError):
+                    pass
         if "power" in payload:
             val = str(payload["power"]).upper()
             self._bulb.set_power(val in ("ON", "TRUE", "1", "TOGGLE"))
