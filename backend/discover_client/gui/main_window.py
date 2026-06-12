@@ -263,6 +263,7 @@ class MainWindow(QMainWindow):
         self._card_layout = QVBoxLayout(self._card_container)
         self._card_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self._card_layout.setSpacing(8)
+        self._card_layout.addStretch()
         self.scroll.setWidget(self._card_container)
         right.addWidget(self.scroll)
 
@@ -270,19 +271,12 @@ class MainWindow(QMainWindow):
 
         # Worker
         from discover_client.gui.worker import Worker
-        from discover_client.config import load_config
 
         self.worker = Worker()
         self.worker.event_received.connect(self._on_event)
         self.worker.status_changed.connect(self._on_status)
 
-        # Load existing config
-        try:
-            configs = load_config()
-            for c in configs:
-                self._add_panel(c.source_id, c.source_type, c.settings)
-        except Exception:
-            pass
+        # Right side starts empty — user adds sources via palette
 
     # ── Palette interaction ──────────────────────────────────
 
