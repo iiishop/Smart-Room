@@ -6,7 +6,7 @@ import threading
 from PySide6.QtCore import QObject, Signal
 
 from discover_client.client import DiscoverClient
-from discover_client.identification import ANNOTATORS
+from discover_client.identification import ANNOTATORS, Deduplicator
 from discover_client.source import SourceEvent
 from discover_client.config import load_config
 
@@ -16,6 +16,7 @@ class Worker(QObject):
 
     event_received = Signal(str, str, float, str, dict)
     evidence_produced = Signal(object)
+    dedup_updated = Signal(list)
     status_changed = Signal(str, bool)
 
     def __init__(self, parent=None):
@@ -23,6 +24,7 @@ class Worker(QObject):
         self._client: DiscoverClient | None = None
         self._thread: threading.Thread | None = None
         self._running = False
+        self.deduplicator: Deduplicator | None = None
 
     def start(self) -> None:
         if self._running:
@@ -46,6 +48,7 @@ class Worker(QObject):
 
     async def _async_main(self) -> None:
         self._client = DiscoverClient()
+        self.deduplicator = Deduplicator()
         configs = load_config()
 
         def on_event(event: SourceEvent) -> None:
@@ -71,6 +74,9 @@ class Worker(QObject):
             evidence = annotator_cls().annotate(event)
             if evidence is not None:
                 self.evidence_produced.emit(evidence)
+                if self.deduplicator is not None:
+                    self.deduplicator.ingest(evidence)
+                    self.dedup_updated.emit(self.deduplicator.get_devices())
 
         self._client.subscribe(on_event)
 

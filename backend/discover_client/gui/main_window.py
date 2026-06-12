@@ -29,7 +29,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from discover_client.gui.dedup_page import DedupPage
 from discover_client.gui.evidence_page import EvidencePage
+from discover_client.identification.device import Device
 from discover_client.identification.evidence import SignalEvidence
 
 # ── Source palette (left sidebar) ───────────────────────────────
@@ -260,8 +262,12 @@ class MainWindow(QMainWindow):
         self._btn_page2 = QPushButton("Evidence")
         self._btn_page2.setObjectName("navBtn")
         self._btn_page2.clicked.connect(lambda: self._stack.setCurrentIndex(1))
+        self._btn_page3 = QPushButton("Dedup")
+        self._btn_page3.setObjectName("navBtn")
+        self._btn_page3.clicked.connect(lambda: self._stack.setCurrentIndex(2))
         nav.addWidget(self._btn_page1)
         nav.addWidget(self._btn_page2)
+        nav.addWidget(self._btn_page3)
         nav.addStretch()
         root.addLayout(nav)
 
@@ -324,12 +330,16 @@ class MainWindow(QMainWindow):
         self._evidence_page = EvidencePage()
         self._stack.addWidget(self._evidence_page)
 
+        self._dedup_page = DedupPage()
+        self._stack.addWidget(self._dedup_page)
+
         # Worker
         from discover_client.gui.worker import Worker
 
         self.worker = Worker()
         self.worker.event_received.connect(self._on_event)
         self.worker.evidence_produced.connect(self._on_evidence)
+        self.worker.dedup_updated.connect(self._on_dedup_updated)
         self.worker.status_changed.connect(self._on_status)
 
         # Right side starts empty — user adds sources via palette
@@ -460,6 +470,9 @@ class MainWindow(QMainWindow):
 
     def _on_evidence(self, evidence: SignalEvidence) -> None:
         self._evidence_page.add_evidence(evidence)
+
+    def _on_dedup_updated(self, devices: list[Device]) -> None:
+        self._dedup_page.set_devices(devices)
 
     def _summarize_event(self, event_type: str, payload: dict) -> str:
         if event_type == "data":

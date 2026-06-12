@@ -21,4 +21,10 @@ class Device:
     last_seen: float = 0.0
     ip_addresses: set[str] = field(default_factory=set)
     hostnames: set[str] = field(default_factory=set)
+    mac_addresses: set[str] = field(default_factory=set)
     mac_prefixes: set[str] = field(default_factory=set)
+    vendor: str | None = None
+    os_guess: str | None = None
+    service_types: set[str] = field(default_factory=set)
+    payload_keys: set[str] = field(default_factory=set)
+    source_ids: set[str] = field(default_factory=set)
