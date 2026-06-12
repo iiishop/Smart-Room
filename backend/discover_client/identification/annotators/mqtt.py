@@ -28,6 +28,7 @@ class MqttAnnotator(Annotator):
             source_type="mqtt",
             mqtt_topic=topic,
             mqtt_payload_keys=payload_keys,
+            mqtt_payload=payload_value,
             topic_prefix=topic_prefix,
             timestamp=event.timestamp,
         )

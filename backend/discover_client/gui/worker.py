@@ -7,6 +7,7 @@ from PySide6.QtCore import QObject, Signal
 
 from discover_client.client import DiscoverClient
 from discover_client.identification import ANNOTATORS, DataSnapshot, Deduplicator, FeatureExtractor
+from discover_client.operations import OperationsTracker
 from discover_client.source import SourceEvent
 from discover_client.config import load_config
 
@@ -19,6 +20,7 @@ class Worker(QObject):
     dedup_updated = Signal(list)
     features_updated = Signal(list)
     data_updated = Signal(dict)
+    operations_updated = Signal(list)
     status_changed = Signal(str, bool)
 
     def __init__(self, parent=None):
@@ -29,6 +31,7 @@ class Worker(QObject):
         self.deduplicator: Deduplicator | None = None
         self.feature_extractor: FeatureExtractor | None = None
         self.data_snapshot: DataSnapshot | None = None
+        self._ops_tracker: OperationsTracker | None = None
 
     def start(self) -> None:
         if self._running:
@@ -55,6 +58,7 @@ class Worker(QObject):
         self.deduplicator = Deduplicator()
         self.feature_extractor = FeatureExtractor()
         self.data_snapshot = DataSnapshot()
+        self._ops_tracker = OperationsTracker()
         configs = load_config()
 
         def on_event(event: SourceEvent) -> None:
@@ -81,12 +85,16 @@ class Worker(QObject):
             if evidence is not None:
                 self.evidence_produced.emit(evidence)
                 if self.deduplicator is not None:
-                    self.deduplicator.ingest(evidence)
+                    device = self.deduplicator.ingest(evidence)
                     devices = self.deduplicator.get_devices()
                     self.dedup_updated.emit(devices)
                     if self.feature_extractor is not None:
                         features = [self.feature_extractor.extract(device) for device in devices]
                         self.features_updated.emit(features)
+                    if device is not None and self._ops_tracker is not None:
+                        changed = self._ops_tracker.ingest(device.device_id, evidence)
+                        if changed is not None:
+                            self.operations_updated.emit(self._ops_tracker.get_capabilities(device.device_id))
                     if event.event_type == "data" and self.data_snapshot is not None:
                         data_event = {
                             "topic": event.payload.get("topic", ""),

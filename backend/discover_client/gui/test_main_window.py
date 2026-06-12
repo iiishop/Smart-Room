@@ -28,6 +28,7 @@ class _FakeWorker(QObject):
     dedup_updated = Signal(list)
     features_updated = Signal(list)
     data_updated = Signal(dict)
+    operations_updated = Signal(list)
     status_changed = Signal(str, bool)
 
 
@@ -52,7 +53,7 @@ def test_main_window_routes_worker_evidence_to_evidence_page() -> None:
     window = MainWindow()
     window._add_panel("mqtt-lab", "mqtt", {"host": "broker.local"})
 
-    assert window._stack.count() == 5
+    assert window._stack.count() == 6
     assert window._stack.currentIndex() == 0
 
     window._on_event(
@@ -94,7 +95,7 @@ def test_main_window_routes_dedup_updates_to_dedup_page() -> None:
         service_types={"_matter._tcp.local."},
     )
 
-    assert window._stack.count() == 5
+    assert window._stack.count() == 6
 
     window._on_dedup_updated([device])
 
@@ -158,3 +159,12 @@ def test_main_window_routes_data_updates_to_data_page() -> None:
     assert table.item(0, 1).text() == "temperature"
     assert table.item(0, 2).text() == "23.5"
     assert table.item(0, 3).text() == "C"
+
+
+def test_main_window_starts_with_empty_operations_placeholder() -> None:
+    _get_app()
+    window = MainWindow()
+
+    assert window._operations_page._placeholder.text() == "(no operations discovered)"
+    assert not window._operations_page._table.isVisible()
+    assert not window._operations_page._placeholder.isHidden()

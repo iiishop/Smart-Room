@@ -34,9 +34,11 @@ from discover_client.gui.data_page import DataPage
 from discover_client.gui.dedup_page import DedupPage
 from discover_client.gui.evidence_page import EvidencePage
 from discover_client.gui.features_page import FeaturesPage
+from discover_client.gui.operations_page import OperationsPage
 from discover_client.identification.device import Device
 from discover_client.identification.features import DeviceFeatures
 from discover_client.identification.evidence import SignalEvidence
+from discover_client.operations import OperationCapability
 
 # ── Source palette (left sidebar) ───────────────────────────────
 
@@ -237,20 +239,24 @@ class MainWindow(QMainWindow):
         self._btn_page2 = QPushButton("Evidence")
         self._btn_page2.setObjectName("navBtn")
         self._btn_page2.clicked.connect(lambda: self._stack.setCurrentIndex(1))
-        self._btn_page3 = QPushButton("Dedup")
-        self._btn_page3.setObjectName("navBtn")
-        self._btn_page3.clicked.connect(lambda: self._stack.setCurrentIndex(2))
-        self._btn_page4 = QPushButton("Features")
-        self._btn_page4.setObjectName("navBtn")
-        self._btn_page4.clicked.connect(lambda: self._stack.setCurrentIndex(3))
         self._btn_page5 = QPushButton("Data")
         self._btn_page5.setObjectName("navBtn")
-        self._btn_page5.clicked.connect(lambda: self._stack.setCurrentIndex(4))
+        self._btn_page5.clicked.connect(lambda: self._stack.setCurrentIndex(2))
+        self._btn_page6 = QPushButton("Operations")
+        self._btn_page6.setObjectName("navBtn")
+        self._btn_page6.clicked.connect(lambda: self._stack.setCurrentIndex(3))
+        self._btn_page3 = QPushButton("Dedup")
+        self._btn_page3.setObjectName("navBtn")
+        self._btn_page3.clicked.connect(lambda: self._stack.setCurrentIndex(4))
+        self._btn_page4 = QPushButton("Features")
+        self._btn_page4.setObjectName("navBtn")
+        self._btn_page4.clicked.connect(lambda: self._stack.setCurrentIndex(5))
         nav.addWidget(self._btn_page1)
         nav.addWidget(self._btn_page2)
+        nav.addWidget(self._btn_page5)
+        nav.addWidget(self._btn_page6)
         nav.addWidget(self._btn_page3)
         nav.addWidget(self._btn_page4)
-        nav.addWidget(self._btn_page5)
         nav.addStretch()
         root.addLayout(nav)
 
@@ -313,14 +319,17 @@ class MainWindow(QMainWindow):
         self._evidence_page = EvidencePage()
         self._stack.addWidget(self._evidence_page)
 
+        self._data_page = DataPage()
+        self._stack.addWidget(self._data_page)
+
+        self._operations_page = OperationsPage()
+        self._stack.addWidget(self._operations_page)
+
         self._dedup_page = DedupPage()
         self._stack.addWidget(self._dedup_page)
 
         self._features_page = FeaturesPage()
         self._stack.addWidget(self._features_page)
-
-        self._data_page = DataPage()
-        self._stack.addWidget(self._data_page)
 
         # Worker
         from discover_client.gui.worker import Worker
@@ -331,6 +340,7 @@ class MainWindow(QMainWindow):
         self.worker.dedup_updated.connect(self._on_dedup_updated)
         self.worker.features_updated.connect(self._on_features_updated)
         self.worker.data_updated.connect(self._on_data_updated)
+        self.worker.operations_updated.connect(self._on_operations_updated)
         self.worker.status_changed.connect(self._on_status)
 
         # Right side starts empty — user adds sources via palette
@@ -471,6 +481,11 @@ class MainWindow(QMainWindow):
 
     def _on_data_updated(self, snapshot: dict[str, dict[str, list[object]]]) -> None:
         self._data_page.set_snapshot(snapshot)
+
+    def _on_operations_updated(self, capabilities: list[OperationCapability]) -> None:
+        if not capabilities:
+            return
+        self._operations_page.set_capabilities(capabilities[0].device_id, capabilities)
 
     def _summarize_event(self, event_type: str, payload: dict) -> str:
         if event_type == "data":

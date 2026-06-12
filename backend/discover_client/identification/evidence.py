@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass
@@ -11,6 +12,7 @@ class SignalEvidence:
     source_type: str
     mqtt_topic: str | None = None
     mqtt_payload_keys: set[str] | None = None
+    mqtt_payload: Any = None
     topic_prefix: str | None = None    # govee/H5179/a1b2c3d4e5f6 (trim last segment)
     mdns_service_type: str | None = None
     mdns_txt_keys: set[str] | None = None
