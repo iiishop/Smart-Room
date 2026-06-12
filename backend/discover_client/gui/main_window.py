@@ -84,6 +84,7 @@ class SourcePalette(QScrollArea):
             ("mqtt", "MQTT Broker", "Connect to an MQTT broker and subscribe to topics."),
             ("mdns", "mDNS Scanner", "Discover mDNS/Bonjour services on the local network."),
             ("ssdp", "SSDP Scanner", "Discover UPnP devices via SSDP multicast."),
+            ("nmap", "Nmap Scanner", "Periodic network scan for hosts, MACs, and OS detection."),
         ]
         for stype, label, desc in items:
             card = PaletteCard(stype, label, desc)

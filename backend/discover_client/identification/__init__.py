@@ -4,6 +4,7 @@ from discover_client.identification.annotator import ANNOTATORS, Annotator, regi
 from discover_client.identification.device import Device, DeviceHypothesis
 from discover_client.identification.evidence import SignalEvidence
 from discover_client.identification.fingerprint import FINGERPRINTS, DeviceFingerprint
+from discover_client.identification import annotators  # triggers @register_annotator
 
 __all__ = [
     "ANNOTATORS",
