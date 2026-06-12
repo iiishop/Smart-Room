@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from discover_client.gui.main_window import CopyableTableWidget
+from discover_client.gui.copyable_table import CopyableTableWidget
 from discover_client.identification.device import Device
 
 
