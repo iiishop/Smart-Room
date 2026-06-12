@@ -27,4 +27,5 @@ class Device:
     os_guess: str | None = None
     service_types: set[str] = field(default_factory=set)
     payload_keys: set[str] = field(default_factory=set)
+    topic_prefixes: set[str] = field(default_factory=set)
     source_ids: set[str] = field(default_factory=set)

@@ -17,10 +17,17 @@ class MqttAnnotator(Annotator):
         payload_value = event.payload.get("value", {})
         payload_keys = set(payload_value.keys()) if isinstance(payload_value, dict) else set()
 
+        # Extract topic_prefix: govee/H5179/abc/temperature → govee/H5179/abc
+        topic_prefix = None
+        parts = topic.rsplit("/", 1)
+        if len(parts) == 2 and parts[0]:
+            topic_prefix = parts[0]
+
         return SignalEvidence(
             source_id=event.source_id,
             source_type="mqtt",
             mqtt_topic=topic,
             mqtt_payload_keys=payload_keys,
+            topic_prefix=topic_prefix,
             timestamp=event.timestamp,
         )

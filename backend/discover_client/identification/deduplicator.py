@@ -36,6 +36,9 @@ class Deduplicator:
         if evidence.ip_address and evidence.mdns_service_type:
             if evidence.ip_address in device.ip_addresses and evidence.mdns_service_type in device.service_types:
                 return 70
+        # Topic-prefix match: same deviceID publishes to govee/H5179/a1b2c3d4e5f6/{temperature,humidity}
+        if evidence.topic_prefix and evidence.topic_prefix in device.topic_prefixes:
+            return 60
         if evidence.ip_address and evidence.ip_address in device.ip_addresses:
             return 50
         if self._hostname_prefix_subnet_match(device, evidence):
@@ -63,6 +66,8 @@ class Deduplicator:
             device.service_types.add(evidence.mdns_service_type)
         if evidence.mqtt_payload_keys:
             device.payload_keys.update(evidence.mqtt_payload_keys)
+        if evidence.topic_prefix:
+            device.topic_prefixes.add(evidence.topic_prefix)
 
     def _mac_prefix_hostname_ip_match(self, device: Device, evidence: SignalEvidence) -> bool:
         if evidence.ip_address and evidence.hostname:

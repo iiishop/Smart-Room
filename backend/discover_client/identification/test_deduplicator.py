@@ -98,3 +98,33 @@ def test_deduplicator_collects_mqtt_payload_keys_on_same_device() -> None:
 
     assert device.device_id == "device-1"
     assert device.payload_keys == {"humidity", "temp"}
+
+def test_deduplicator_merges_by_topic_prefix() -> None:
+    deduplicator = Deduplicator()
+
+    first = deduplicator.ingest(
+        SignalEvidence(
+            source_id='mqtt-1',
+            source_type='mqtt',
+            mqtt_topic='govee/H5179/abc/temperature',
+            topic_prefix='govee/H5179/abc',
+            mqtt_payload_keys={"unit", "value"},
+            timestamp=1.0,
+        )
+    )
+    assert first.device_id == 'device-1'
+
+    second = deduplicator.ingest(
+        SignalEvidence(
+            source_id='mqtt-1',
+            source_type='mqtt',
+            mqtt_topic='govee/H5179/abc/humidity',
+            topic_prefix='govee/H5179/abc',
+            mqtt_payload_keys={"unit", "value"},
+            timestamp=2.0,
+        )
+    )
+    assert second.device_id == 'device-1'
+    assert second.total_evidence_count == 2
+    assert second.topic_prefixes == {'govee/H5179/abc'}
+    assert second.payload_keys == {'unit', 'value'}

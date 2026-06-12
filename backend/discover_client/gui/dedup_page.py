@@ -24,6 +24,7 @@ class DedupPage(QWidget):
         "MAC Prefixes",
         "Vendor",
         "Service Types",
+        "Topics",
         "Evidence Count",
         "Last Seen",
     ]
@@ -57,6 +58,7 @@ class DedupPage(QWidget):
                 ", ".join(sorted(device.mac_prefixes)),
                 device.vendor or "",
                 ", ".join(sorted(device.service_types)),
+                ", ".join(sorted(device.topic_prefixes)),
                 str(device.total_evidence_count),
                 datetime.fromtimestamp(device.last_seen).strftime("%H:%M:%S") if device.last_seen else "",
             ]
