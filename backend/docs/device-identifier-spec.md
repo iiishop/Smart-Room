@@ -29,6 +29,8 @@ class DeviceFingerprint:
     mdns_txt_keys: set[str]           # {"SII", "SAI"}
     ssdp_usn_patterns: list[str]      # ["uuid:...+::upnp:rootdevice"]
     ssdp_server_patterns: list[str]   # ["Linux/... UPnP/..."]
+    nmap_mac_prefixes: list[str]      # ["AA:BB:CC"] — OUI prefix match
+    nmap_os_guesses: list[str]        # ["Linux*embedded*", "Espressif*"] — wildcard match
     hostname_pattern: str | None      # "govee-h5179-*" — for dedup cross-source
 ```
 
@@ -89,36 +91,182 @@ class Device:
 ## Architecture
 
 ```
-MQTT Event  ──→ MQTTSignalAnnotator ──→ SignalEvidence ──┐
-mDNS Event  ──→ MDNSSignalAnnotator  ──→ SignalEvidence ──┤
-SSDP Event  ──→ SSDPSignalAnnotator  ──→ SignalEvidence ──┤
-                                                          │
-                                                    ┌─────▼──────┐
-                                                    │ Deduplicator│
-                                                    │  (关联同设备) │
-                                                    └─────┬──────┘
-                                                          │
-                                                  ┌───────▼────────┐
-                                                  │ BayesUpdater   │
-                                                  │  (更新置信度)    │
-                                                  └───────┬────────┘
-                                                          │
-                                                  ┌───────▼────────┐
-                                                  │ Device Registry │
-                                                  │  (维护设备列表)   │
-                                                  └────────────────┘
+MQTT Event  ──→ MqttAnnotator         ──→ SignalEvidence ──┐
+mDNS Event  ──→ MdnsAnnotator         ──→ SignalEvidence ──┤
+SSDP Event  ──→ SsdpAnnotator         ──→ SignalEvidence ──┤
+nmap Event  ──→ NmapAnnotator (未来)   ──→ SignalEvidence ──┤
+                                                           │
+                                                     ┌─────▼──────┐
+                                                     │ Deduplicator│
+                                                     │  (关联同设备) │
+                                                     └─────┬──────┘
+                                                           │
+                                                   ┌───────▼────────┐
+                                                   │ BayesUpdater   │
+                                                   │  (更新置信度)    │
+                                                   └───────┬────────┘
+                                                           │
+                                                   ┌───────▼────────┐
+                                                   │ Device Registry │
+                                                   │  (维护设备列表)   │
+                                                   └────────────────┘
 ```
 
 ### 组件说明
 
 | 组件 | 职责 |
 |------|------|
-| **MQTTSignalAnnotator** | 从 MQTT 事件提取 topic 模式、payload keys |
-| **MDNSSignalAnnotator** | 从 mDNS 事件提取 service_type、TXT keys、hostname、IP |
-| **SSDPSignalAnnotator** | 从 SSDP 事件提取 USN、Server 头 |
+| **Annotator 插件** | 每个 Source 类型对应一个 Annotator 实现，通过注册表发现。负责从该源的原始事件中提取结构化 `SignalEvidence`。新增源时只需添加一个新的 Annotator 类，核心管线不动 |
+| **AnnotatorRegistry** | 维护 `source_type → Annotator` 的映射。`Annotator` 是抽象基类，插件通过 `@register_annotator("source_type")` 注册 |
 | **Deduplicator** | 按 IP/hostname/MAC 关联同一设备的信号 |
-| **BayesUpdater** | 贝叶斯更新：P(类型|新证据) = P(新证据|类型) * P(类型) / P(新证据) |
+| **BayesUpdater** | 贝叶斯更新：P(类型\|新证据) = P(新证据\|类型) × P(类型) / P(新证据) |
 | **DeviceRegistry** | 维护所有已知设备，按置信度排序输出 |
+
+## Annotator 扩展机制
+
+跟 Source 注册表同样的插件模式：
+
+```python
+# 抽象基类
+class Annotator(ABC):
+    source_type: str  # "mqtt", "mdns", "ssdp", "nmap", ...
+
+    @abstractmethod
+    def annotate(self, event: SourceEvent) -> SignalEvidence | None: ...
+
+
+# 注册表
+ANNOTATORS: dict[str, type[Annotator]] = {}
+
+def register_annotator(source_type: str):
+    """Decorator: register an Annotator subclass."""
+    def wrapper(cls):
+        ANNOTATORS[source_type] = cls
+        cls.source_type = source_type
+        return cls
+    return wrapper
+
+
+# 示例：MQTT 标注器
+@register_annotator("mqtt")
+class MqttAnnotator(Annotator):
+    def annotate(self, event: SourceEvent) -> SignalEvidence | None:
+        topic = event.payload.get("topic", "")
+        return SignalEvidence(
+            source_id=event.source_id,
+            source_type="mqtt",
+            mqtt_topic=topic,
+            mqtt_payload_keys=set(event.payload.get("value", {}).keys()),
+            hostname=self._extract_hostname_hint(topic),
+            timestamp=event.timestamp,
+        )
+```
+
+关键约束：
+- 每个 Annotator **只知道自己源的信号格式**，不耦合其他源
+- 新增数据源（如 nmap）→ 只需实现 `NmapAnnotator(Annotator)` + 一行注册，去重器/贝叶斯更新器零改动
+- `SignalEvidence` 是统一中间格式——所有 Annotator 产出同一种证据结构，下游管线完全源无关
+
+---
+
+## Source 扩展：nmap
+
+除现有 MQTT/mDNS/SSDP 三个源外，新增第四个源类型 `nmap`——周期性地对局域网执行主机发现扫描，吐出设备级信息（IP、MAC、hostname、OS guess）。
+
+### 自动安装检测
+
+nmap 是外部依赖（非 Python 包），Source 启动时先检查安装状态：
+
+1. 执行 `nmap --version`（Windows）或 `which nmap`（Unix）
+2. 如果未安装：
+   - **Windows**: `winget install Insecure.Nmap`（为开源安全扫描工具）
+   - **macOS**: `brew install nmap`
+   - **Linux**: `apt-get install -y nmap` / `dnf install -y nmap`
+3. 安装完成后重新检测版本号，确认可用
+4. 如果安装失败（权限不足、网络不通等），Source 标记为 `unavailable`，emit error 事件，不阻塞其他源
+
+### 配置
+
+```toml
+[[sources]]
+source_id = "nmap-1"
+source_type = "nmap"
+enabled = true
+
+[sources.settings]
+scan_interval_s = 300              # 每 5 分钟扫一次
+target_subnet = "192.168.1.0/24"   # 扫描目标（可选，留空则自动检测本机子网）
+scan_flags = "-sn -PR"             # ping scan + ARP，不扫端口（快速发现）
+```
+
+**字段说明**：
+
+| 字段 | 默认值 | 说明 |
+|------|--------|------|
+| `scan_interval_s` | 300 | 扫描间隔，最小 30s（nmap 本身耗时通常 5-15s，太短没意义） |
+| `target_subnet` | `""`（自动检测） | CIDR 格式。留空则通过本机 IP + 子网掩码自动推断 |
+| `scan_flags` | `"-sn -PR"` | nmap 命令行参数。默认 ping scan + ARP（快速、不需要 root/管理员权限、不触发 IDS） |
+
+### 输出事件
+
+nmap Source emit 的事件类型：
+
+| event_type | 触发条件 | payload 内容 |
+|-----------|---------|-------------|
+| `"status"` | 安装检查通过 | `{"msg": "nmap 7.98 ready", "version": "7.98"}` |
+| `"scan_start"` | 每次扫描开始 | `{"subnet": "192.168.1.0/24", "flags": "-sn -PR"}` |
+| `"discovery"` | 每个发现的 host | `{"ip": "192.168.5.2", "mac": "AA:BB:CC:DD:EE:FF", "vendor": "Espressif", "hostnames": ["govee-h5179-abc123.local."], "status": "up", "os_guess": "Linux 4.x (embedded)"}` |
+| `"scan_end"` | 扫描完成 | `{"total_hosts": 12, "up_hosts": 5, "duration_s": 8.3}` |
+| `"error"` | 安装失败/扫描超时 | `{"msg": "nmap not found and winget install failed"}` |
+
+**payload 结构（discovery 事件）**：
+
+```python
+{
+    "ip": "192.168.5.2",                 # str — 必有
+    "mac": "AA:BB:CC:DD:EE:FF" | None,   # str | None — ARP 可能解析不到
+    "vendor": "Espressif" | None,        # str | None — OUI 数据库查到的厂商
+    "hostnames": ["govee-h5179-abc123.local."],
+    "status": "up",                      # "up" | "down"
+    "os_guess": "Linux 4.x (embedded)",  # str | None — nmap 的 OS 猜测
+}
+```
+
+### nmap ↔ 其他源的关联价值
+
+nmap 跟 MQTT/mDNS 的互补性：
+
+- **nmap 提供 MAC** → mDNS 的 hostname 里通常有设备 ID 片段、MQTT topic 里有 `abc123` → MAC OUI 确认厂商。三者交叉验证后置信度大幅提升
+- **nmap 提供全网视角** → mDNS 只能看到广播设备、MQTT 只能看到已连接 broker 的设备 → nmap 扫出所有在线主机，补上"盲区"
+- **nmap 的 OS guess** 是粗信号（"Linux 4.x embedded" → IoT 设备），但跟 MQTT topic 的细信号叠加后能排除假阳性
+
+### Source 实现要点
+
+```python
+@register_source("nmap")
+class NmapSource(Source):
+    async def start(self) -> None:
+        # 1. 检查 nmap 是否安装
+        version = await self._check_nmap()
+        if version is None:
+            installed = await self._install_nmap()
+            if not installed:
+                self.emit("error", {"msg": "nmap installation failed"})
+                return
+        self.emit("status", {"msg": f"nmap {version} ready"})
+
+        # 2. 定期扫描
+        while self._running:
+            await self._scan()
+            await asyncio.sleep(self._scan_interval)
+
+    async def _scan(self) -> None:
+        cmd = ["nmap", *self._flags.split(), "-oX", "-", self._subnet]
+        proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE)
+        stdout, _ = await proc.communicate()
+        for host in self._parse_xml(stdout):
+            self.emit("discovery", host)
+```
 
 ---
 
@@ -177,6 +325,8 @@ FINGERPRINTS = [
         mdns_txt_keys={"SII", "SAI"},
         ssdp_usn_patterns=[],
         ssdp_server_patterns=[],
+        nmap_mac_prefixes=["AA:BB:CC"],
+        nmap_os_guesses=["Linux*embedded*"],
         hostname_pattern="govee-*",
     ),
     DeviceFingerprint(
@@ -188,6 +338,8 @@ FINGERPRINTS = [
         mdns_txt_keys={"CM"},
         ssdp_usn_patterns=["uuid:...+UPnP:TP-LINK..."],
         ssdp_server_patterns=["Linux/... UPnP/..."],
+        nmap_mac_prefixes=[],
+        nmap_os_guesses=["Linux*embedded*"],
         hostname_pattern=None,
     ),
     # 未知设备兜底
@@ -200,6 +352,8 @@ FINGERPRINTS = [
         mdns_txt_keys=set(),
         ssdp_usn_patterns=[],
         ssdp_server_patterns=[],
+        nmap_mac_prefixes=[],
+        nmap_os_guesses=[],
         hostname_pattern=None,
     ),
 ]
@@ -240,27 +394,33 @@ DiscoverClient.subscribe(on_event)
 backend/discover_client/
 ├── identification/
 │   ├── __init__.py
-│   ├── fingerprint.py      # DeviceFingerprint, FINGERPRINTS registry
-│   ├── evidence.py         # SignalEvidence
-│   ├── device.py           # Device, DeviceHypothesis
-│   ├── annotators.py       # MQTTSignalAnnotator, MDNSSignalAnnotator, SSDPSignalAnnotator
-│   ├── deduplicator.py     # Deduplicator
-│   ├── bayes.py            # BayesUpdater
-│   ├── registry.py         # DeviceRegistry
-│   └── identifier.py       # DeviceIdentifier (orchestrator)
+│   ├── fingerprint.py        # DeviceFingerprint, FINGERPRINTS registry
+│   ├── evidence.py           # SignalEvidence
+│   ├── device.py             # Device, DeviceHypothesis
+│   ├── annotator.py          # Annotator ABC + ANNOTATORS registry + register_annotator
+│   ├── annotators/
+│   │   ├── __init__.py       # import all → trigger @register_annotator
+│   │   ├── mqtt.py           # MqttAnnotator
+│   │   ├── mdns.py           # MdnsAnnotator
+│   │   ├── ssdp.py           # SsdpAnnotator
+│   │   └── nmap.py           # NmapAnnotator (未来)
+│   ├── deduplicator.py       # Deduplicator
+│   ├── bayes.py              # BayesUpdater
+│   ├── registry.py           # DeviceRegistry
+│   └── identifier.py         # DeviceIdentifier (orchestrator)
 ```
 
 ---
 
 ## 实现路径
 
-1. `fingerprint.py` + `evidence.py` — 定义数据结构
-2. `annotators.py` — 三个标注器，从 SourceEvent 转 SignalEvidence
-3. `device.py` — Device + DeviceHypothesis
+1. `fingerprint.py` + `evidence.py` + `device.py` — 定义数据结构
+2. `annotator.py` + `annotators/__init__.py` — Annotator ABC + 注册表骨架
+3. `annotators/mqtt.py` + `annotators/mdns.py` + `annotators/ssdp.py` — 三个标注器实现，从 SourceEvent 转 SignalEvidence
 4. `deduplicator.py` — 按 IP/hostname 关联
 5. `bayes.py` — 似然计算 + 贝叶斯更新
 6. `registry.py` — 设备注册表
 7. `identifier.py` — 串联全流程，暴露 `ingest(event)` 接口
 8. 接入 MainWindow — 监听 `device_identified` 信号，显示设备列表
 
-先写数据结构 + 标注器，Govee H5179 一个指纹能跑通全流程，再扩展。
+先写数据结构 + annotator 骨架 + MqttAnnotator，Govee H5179 一个指纹能跑通全流程，再扩展其他标注器。
