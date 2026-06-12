@@ -1,10 +1,10 @@
 """Discover Client - data-source aggregation layer for Smart Room."""
 
-from discover_client.client import DiscoverClient
-from discover_client.source import Source, SourceEvent, SourceConfig
-from discover_client.output import OutputQueue
-from discover_client.config import load_config, SourceTypeSchema, SCHEMAS
-from discover_client.sources import registered_types
+from __future__ import annotations
+
+from importlib import import_module
+
+from discover_client.source import Source, SourceConfig, SourceEvent
 
 __all__ = [
     "DiscoverClient",
@@ -17,3 +17,16 @@ __all__ = [
     "SCHEMAS",
     "registered_types",
 ]
+
+
+def __getattr__(name: str):
+    if name == "DiscoverClient":
+        return import_module("discover_client.client").DiscoverClient
+    if name == "OutputQueue":
+        return import_module("discover_client.output").OutputQueue
+    if name in {"load_config", "SourceTypeSchema", "SCHEMAS"}:
+        module = import_module("discover_client.config")
+        return getattr(module, name)
+    if name == "registered_types":
+        return import_module("discover_client.sources").registered_types
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
