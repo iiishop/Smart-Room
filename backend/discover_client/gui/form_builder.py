@@ -99,12 +99,14 @@ class FormBuilder(QGroupBox):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("Settings", parent)
+        self.setObjectName("formGroup")
         self._form = QFormLayout(self)
         self._widgets: dict[str, QWidget] = {}
         self._source_id = ""
         self._source_type = ""
 
-        self._btn_save = QPushButton("Save")
+        self._btn_save = QPushButton("💾 Save")
+        self._btn_save.setObjectName("btnSave")
         self._btn_save.clicked.connect(self._on_save)
         self._form.addRow(self._btn_save)
 

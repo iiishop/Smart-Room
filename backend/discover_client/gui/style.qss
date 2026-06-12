@@ -1,0 +1,286 @@
+/* Discover Client — Dracula Dark QSS
+   Based on PyDracula color palette by Wanderson M.Pimenta (MIT) */
+
+/* ── Global ─────────────────────────────────────────────────── */
+QWidget {
+    color: rgb(221, 221, 221);
+    font: 10pt "Segoe UI";
+    background-color: rgb(40, 44, 52);
+}
+
+QMainWindow {
+    background-color: rgb(40, 44, 52);
+}
+
+/* ── Toolbar ────────────────────────────────────────────────── */
+#toolbar {
+    background-color: rgb(33, 37, 43);
+    border-bottom: 2px solid rgb(44, 49, 58);
+    padding: 6px;
+}
+
+/* ── Tabs ───────────────────────────────────────────────────── */
+QTabWidget::pane {
+    border: none;
+    background-color: rgb(40, 44, 52);
+}
+
+QTabBar::tab {
+    background-color: rgb(33, 37, 43);
+    color: rgb(113, 126, 149);
+    padding: 10px 24px;
+    border: none;
+    border-bottom: 3px solid transparent;
+    font-size: 11pt;
+    font-weight: bold;
+    margin-right: 2px;
+}
+
+QTabBar::tab:selected {
+    color: rgb(221, 221, 221);
+    border-bottom: 3px solid rgb(189, 147, 249);
+    background-color: rgb(40, 44, 52);
+}
+
+QTabBar::tab:hover:!selected {
+    color: rgb(189, 147, 249);
+    background-color: rgb(44, 49, 58);
+}
+
+/* ── Buttons ────────────────────────────────────────────────── */
+QPushButton {
+    background-color: rgb(189, 147, 249);
+    color: rgb(33, 37, 43);
+    border: none;
+    border-radius: 6px;
+    padding: 8px 20px;
+    font-size: 11pt;
+    font-weight: bold;
+}
+
+QPushButton:hover {
+    background-color: rgb(205, 170, 255);
+}
+
+QPushButton:pressed {
+    background-color: rgb(160, 120, 220);
+}
+
+QPushButton:disabled {
+    background-color: rgb(60, 65, 75);
+    color: rgb(100, 105, 115);
+}
+
+/* ── Start/Stop buttons ─────────────────────────────────────── */
+#btnStart {
+    background-color: rgb(80, 200, 120);  /* green */
+    color: rgb(33, 37, 43);
+}
+
+#btnStart:hover {
+    background-color: rgb(100, 220, 140);
+}
+
+#btnStop {
+    background-color: rgb(255, 90, 90);  /* red */
+    color: rgb(33, 37, 43);
+}
+
+#btnStop:hover {
+    background-color: rgb(255, 120, 120);
+}
+
+/* ── Source Cards ────────────────────────────────────────────── */
+#sourceList {
+    background-color: rgb(33, 37, 43);
+    border-right: 2px solid rgb(44, 49, 58);
+}
+
+#sourceListTitle {
+    color: rgb(189, 147, 249);
+    font-size: 14pt;
+    font-weight: bold;
+    padding: 12px;
+}
+
+#sourceCard {
+    background-color: rgb(44, 49, 58);
+    border: 1px solid rgb(44, 49, 58);
+    border-radius: 8px;
+    margin: 3px 8px;
+    padding: 4px;
+}
+
+#sourceCard:hover {
+    background-color: rgb(55, 60, 70);
+    border: 1px solid rgb(189, 147, 249);
+}
+
+#sourceCard QLabel {
+    background: transparent;
+}
+
+/* ── Source Card Type Label ──────────────────────────────────── */
+#cardTypeLabel {
+    color: rgb(189, 147, 249);
+    font-size: 10pt;
+    font-weight: bold;
+    background: transparent;
+}
+
+/* ── Status Dots ─────────────────────────────────────────────── */
+#statusDot {
+    font-size: 16pt;
+    background: transparent;
+}
+
+/* ── Add Button ──────────────────────────────────────────────── */
+#btnAdd {
+    background-color: transparent;
+    color: rgb(189, 147, 249);
+    border: 2px dashed rgb(100, 110, 130);
+    border-radius: 8px;
+    padding: 10px;
+    margin: 8px;
+    font-size: 11pt;
+}
+
+#btnAdd:hover {
+    border-color: rgb(189, 147, 249);
+    background-color: rgba(189, 147, 249, 0.1);
+}
+
+/* ── Form Builder ────────────────────────────────────────────── */
+#formGroup {
+    background-color: rgb(40, 44, 52);
+    border: 1px solid rgb(44, 49, 58);
+    border-radius: 8px;
+    margin: 8px;
+    padding: 12px;
+}
+
+#formGroup::title {
+    color: rgb(189, 147, 249);
+    font-size: 12pt;
+    font-weight: bold;
+    padding: 8px;
+}
+
+/* ── Form Inputs ─────────────────────────────────────────────── */
+QLineEdit, QSpinBox, QTextEdit {
+    background-color: rgb(33, 37, 43);
+    color: rgb(221, 221, 221);
+    border: 1px solid rgb(52, 59, 72);
+    border-radius: 4px;
+    padding: 6px 10px;
+    font-size: 10pt;
+}
+
+QLineEdit:focus, QSpinBox:focus, QTextEdit:focus {
+    border: 1px solid rgb(189, 147, 249);
+}
+
+QSpinBox::up-button, QSpinBox::down-button {
+    background-color: rgb(44, 49, 58);
+    border: none;
+    width: 20px;
+}
+
+QSpinBox::up-button:hover, QSpinBox::down-button:hover {
+    background-color: rgb(189, 147, 249);
+}
+
+/* ── Save Button ─────────────────────────────────────────────── */
+#btnSave {
+    background-color: rgb(80, 200, 120);
+    color: rgb(33, 37, 43);
+    border-radius: 6px;
+    padding: 8px 24px;
+    font-weight: bold;
+    margin-top: 12px;
+}
+
+#btnSave:hover {
+    background-color: rgb(100, 220, 140);
+}
+
+/* ── Monitor Panels ──────────────────────────────────────────── */
+#monitorPanel {
+    background-color: rgb(33, 37, 43);
+    border: 1px solid rgb(44, 49, 58);
+    border-radius: 8px;
+    margin: 4px 8px;
+    padding: 8px;
+}
+
+#monitorPanel::title {
+    color: rgb(221, 221, 221);
+    font-size: 11pt;
+    font-weight: bold;
+    padding: 6px;
+}
+
+/* ── Monitor Stats Label ─────────────────────────────────────── */
+#statsLabel {
+    color: rgb(140, 145, 160);
+    font-size: 9pt;
+    background: transparent;
+}
+
+/* ── Event Tables ────────────────────────────────────────────── */
+QTableWidget {
+    background-color: rgb(40, 44, 52);
+    border: 1px solid rgb(44, 49, 58);
+    border-radius: 4px;
+    gridline-color: rgb(44, 49, 58);
+    font-size: 9pt;
+}
+
+QTableWidget::item {
+    padding: 4px 8px;
+}
+
+QTableWidget::item:selected {
+    background-color: rgba(189, 147, 249, 0.2);
+}
+
+QHeaderView::section {
+    background-color: rgb(33, 37, 43);
+    color: rgb(189, 147, 249);
+    border: none;
+    border-bottom: 1px solid rgb(44, 49, 58);
+    padding: 6px 10px;
+    font-size: 9pt;
+    font-weight: bold;
+}
+
+/* ── Scroll Area ─────────────────────────────────────────────── */
+QScrollArea {
+    border: none;
+    background-color: transparent;
+}
+
+/* ── Scrollbars ──────────────────────────────────────────────── */
+QScrollBar:vertical {
+    background-color: rgb(33, 37, 43);
+    width: 8px;
+    border-radius: 4px;
+}
+
+QScrollBar::handle:vertical {
+    background-color: rgb(52, 59, 72);
+    border-radius: 4px;
+    min-height: 30px;
+}
+
+QScrollBar::handle:vertical:hover {
+    background-color: rgb(189, 147, 249);
+}
+
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0;
+}
+
+QScrollBar:horizontal {
+    height: 0;
+}

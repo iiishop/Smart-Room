@@ -103,6 +103,7 @@ class SourceMonitorPanel(QGroupBox):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        self.setObjectName("monitorPanel")
         self.source_id = source_id
         self._msg_count = 0
         self._start_time = time.time()
@@ -126,7 +127,7 @@ class SourceMonitorPanel(QGroupBox):
 
         header.addStretch()
         self._stats_label = QLabel("msgs: 0  rate: 0/s")
-        self._stats_label.setStyleSheet("color: #9e9e9e; font-size: 11px;")
+        self._stats_label.setObjectName("statsLabel")
         header.addWidget(self._stats_label)
         layout.addLayout(header)
 
@@ -208,8 +209,11 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(8, 8, 8, 8)
 
         toolbar = QHBoxLayout()
+        toolbar.setObjectName("toolbar")
         self.btn_start = QPushButton("▶ Start")
+        self.btn_start.setObjectName("btnStart")
         self.btn_stop = QPushButton("■ Stop")
+        self.btn_stop.setObjectName("btnStop")
         self.btn_stop.setEnabled(False)
         self.btn_start.clicked.connect(self._on_start)
         self.btn_stop.clicked.connect(self._on_stop)
@@ -257,8 +261,14 @@ class MainWindow(QMainWindow):
 
 
 def main() -> int:
+    from pathlib import Path
     app = QApplication([])
-    qt_material.apply_stylesheet(app, theme="dark_teal.xml")
+
+    # Load PyDracula-style dark QSS
+    qss_path = Path(__file__).resolve().parent / "style.qss"
+    if qss_path.exists():
+        app.setStyleSheet(qss_path.read_text(encoding="utf-8"))
+
     window = MainWindow()
     window.show()
     return app.exec()
