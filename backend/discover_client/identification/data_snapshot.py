@@ -142,14 +142,20 @@ def _extract_numeric_reading(payload: object) -> tuple[float, str, str | None] |
 
 
 def _extract_text_readings(payload: object) -> list[tuple[str, str]] | None:
-    """Extract string-valued keys from a dict payload (e.g. power: 'OFF')."""
+    """Extract string-valued keys from a dict payload (e.g. power: 'OFF').
+
+    Data-driven metadata detection: if the dict has a 'value' key (common
+    IoT payload envelope), sibling keys like 'unit' are describing the
+    measurement, not the device — skip them.  Otherwise treat all string
+    values as potential sensor readings.
+    """
     if not isinstance(payload, dict):
         return None
-    # Exclude keys that are payload metadata, not sensor names
-    _excluded = {"unit", "value", "timestamp", "device", "type", "mac", "_announce", "event"}
+    # If payload uses a 'value' envelope, sibling keys are metadata
+    has_value_key = "value" in payload
     results = []
     for key, val in payload.items():
-        if key.lower() in _excluded:
+        if has_value_key and key.lower() != "value":
             continue
         if isinstance(val, str) and val.strip():
             results.append((str(key), val.strip()))
