@@ -138,7 +138,20 @@ class DeviceProfileCard(QFrame):
         self._details.setVisible(expanded)
         self._toggle_label.setText("Collapse" if expanded else "Expand")
 
+    def update(self, profile: DeviceProfile) -> None:
+        self._profile = profile
+        self._title_label.setText(profile.device_id)
+        self._subtitle_label.setText(profile.vendor or "Unknown device")
+        self._evidence_label.setText(f"{profile.total_evidence_count} evidence")
+        ip_text = ", ".join(sorted(profile.ip_addresses)) or "-"
+        mac_text = ", ".join(sorted(profile.mac_prefixes)) or "-"
+        self._identity_label.setText(f"IP: {ip_text}    MAC: {mac_text}")
+        self._meta_label.setText(f"{profile.category} | Confidence: {profile.confidence:.2f}")
+        self._render_data()
+        self._render_operations()
+
     def _render_data(self) -> None:
+        _clear_layout(self._data_layout)
         if not self._profile.data_sensors:
             self._data_layout.addWidget(QLabel("(no data)"))
             return
@@ -151,6 +164,7 @@ class DeviceProfileCard(QFrame):
             self._data_layout.addWidget(label)
 
     def _render_operations(self) -> None:
+        _clear_layout(self._operations_layout)
         if not self._profile.operations:
             self._operations_layout.addWidget(QLabel("(no operations)"))
             return
@@ -226,18 +240,32 @@ class DeviceProfilePage(QWidget):
         scroll.setWidget(container)
 
     def set_profiles(self, profiles: list[DeviceProfile]) -> None:
-        self._cards.clear()
-        while self._cards_layout.count() > 0:
-            item = self._cards_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
+        incoming_ids = {p.device_id for p in profiles}
+        existing_ids = set(self._cards.keys())
 
+        # Remove cards for devices no longer present
+        for removed_id in existing_ids - incoming_ids:
+            card = self._cards.pop(removed_id)
+            self._cards_layout.removeWidget(card)
+            card.deleteLater()
+
+        # Update existing cards and add new ones
         for profile in profiles:
-            card = DeviceProfileCard(profile)
-            card.publish_requested.connect(self.publish_requested.emit)
-            self._cards[profile.device_id] = card
-            self._cards_layout.addWidget(card)
+            if profile.device_id in self._cards:
+                self._cards[profile.device_id].update(profile)
+            else:
+                card = DeviceProfileCard(profile)
+                card.publish_requested.connect(self.publish_requested.emit)
+                self._cards[profile.device_id] = card
+                self._cards_layout.addWidget(card)
+
+
+def _clear_layout(layout: QVBoxLayout) -> None:
+    while layout.count() > 0:
+        item = layout.takeAt(0)
+        widget = item.widget()
+        if widget is not None:
+            widget.deleteLater()
 
 
 def _payload_for_operation(operation: dict) -> object:
