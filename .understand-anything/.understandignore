@@ -1,0 +1,60 @@
+# .understandignore - patterns for files/dirs to exclude from analysis
+# Syntax: same as .gitignore (globs, # comments, ! negation, trailing / for dirs)
+# Lines below are suggestions - uncomment to activate.
+# Use ! prefix to force-include something excluded by defaults.
+#
+# Built-in defaults (always excluded unless negated):
+#   node_modules/, .git/, dist/, build/, obj/, *.lock, *.min.js, etc.
+#
+# --- From .gitignore (uncomment to exclude) ---
+
+# *.py[cod]
+# *.pyo
+# *.pyd
+# .pytest_cache/
+# .mypy_cache/
+.understand-anything/tmp/
+.understand-anything/intermediate/
+.understand-anything/knowledge-graph.json
+.understand-anything/meta.json
+backend/.venv/
+.ruff_cache/
+# bin/
+# .DS_Store
+# Thumbs.db
+# .vs/
+# *.egg-info/
+# *.whl
+# .eggs/
+# .env
+# *.apk
+# *.aab
+# *.unitypackage
+unity/**/.utmp/
+unity/**/BackUpThisFolder_ButDontShipItWithYourGame/
+unity/**/*BackUpThisFolder_ButDontShipItWithYourGame/
+unity/**/il2cppOutput/
+unity/**/Bee/
+# unity/**/新建文件夹/
+unity/**/Quest3Client.slnx
+unity/**/Assets/TextMesh Pro/Examples & Extras/
+unity/**/Assets/TextMesh Pro/
+unity/**/Assets/TutorialInfo/
+unity/**/Assets/_Recovery/
+tests/vision_parser_runner/bin/
+*.meta
+archive_code/
+backend/calib_capture/
+backend/checkpoints/
+.codegraph/
+
+# --- Detected directories (uncomment to exclude) ---
+
+# tests/
+# docs/
+
+# --- Test file patterns (uncomment to exclude) ---
+
+# *.test.*
+# *.spec.*
+# *.snap

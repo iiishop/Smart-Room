@@ -11,11 +11,29 @@ QuestRealityCapture (t-34400):
   "cast each pixel of the depth map to world coordinates using the depth
    reprojection matrix, and then reproject those points into the color
    camera's coordinate system using the color camera intrinsics/extrinsics."
+
+Formula equivalence — NDC ↔ linear depth
+----------------------------------------
+Meta's GPU-side formula (used in Unity shader):
+    z_ndc = ZBP.x / linear_depth - ZBP.y
+
+t-34400's CPU-side formula (from metaquest-3d-reconstrucion):
+    ndc = raw_buffer * 2.0 - 1.0          # [0,1] → [-1,1]
+    linear_depth = x / (ndc + y)
+    where  x = -2*f*n/(f-n), y = -(f+n)/(f-n)
+
+For the infinite far plane (far = ∞), which Meta uses:
+    x = -2 * near,  y = -1
+    →  linear_depth = -2*near / (ndc - 1)
+
+These are mathematically equivalent: rearrange either to get the other.
+Meta's ZBP.x = -x, ZBP.y = -y (sign conventions differ).
 """
 
 from __future__ import annotations
 
 import logging
+import math
 
 import cv2
 import numpy as np
@@ -23,13 +41,73 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
+# ═══════════════════ t-34400 reference: NDC → linear depth ══════════
+
+
+def ndc_to_linear_params(near: float, far: float) -> tuple[float, float]:
+    """Compute (x, y) for the rational function  x / (ndc + y).
+
+    This is the CPU-side equivalent of Meta's GPU ZBufferParams.
+    From t-34400/metaquest-3d-reconstrucion, scripts/utils/depth_utils.py.
+
+    For infinite far plane (far < near or far == inf):
+        x = -2 * near,  y = -1
+    """
+    if math.isinf(far) or far < near:
+        return -2.0 * near, -1.0
+    x = -2.0 * far * near / (far - near)
+    y = -(far + near) / (far - near)
+    return x, y
+
+
+def ndc_to_linear(buf: np.ndarray, x: float, y: float) -> np.ndarray:
+    """Convert a raw NDC depth buffer [0, 1] to linear metres.
+
+    ndc = buf * 2.0 - 1.0            # [0,1] → [-1,1]
+    linear = x / (ndc + y)           # NDC → metres
+
+    Division-by-zero guarded: outputs 0 where ndc + y == 0.
+    """
+    ndc = buf.astype(np.float32) * 2.0 - 1.0
+    denom = ndc + y
+    return np.divide(
+        np.float32(x), denom,
+        out=np.zeros_like(buf, dtype=np.float32),
+        where=denom != 0,
+    )
+
+
+def zbp_to_near(zbp_x: float, zbp_y: float) -> float:
+    """Extract near-plane distance from Meta's ZBufferParams.
+
+    For the infinite-far case used by Quest:
+        ZBP.x = 2 * near,  ZBP.y ≈ 1
+        →  near = ZBP.x / 2
+    """
+    return zbp_x / 2.0
+
+
+def zbp_to_ndc_params(zbp: np.ndarray) -> tuple[float, float]:
+    """Convert Meta's ZBufferParams to t-34400 (x, y) params.
+
+    ZBP encodes:  z_ndc = zbp[0] / linear - zbp[1]
+    t-34400:       linear = x / (ndc + y)
+
+    Relationship:  x = -zbp[0],  y = zbp[1]
+    (The negatives come from t-34400's convention of
+     putting the sign in x/y rather than z_ndc.)
+    """
+    return -zbp[0], zbp[1]
+
+
 def align_depth_to_rgb(
     depth_meters: np.ndarray,       # H_d × W_d  float32, in metres
-    depth_reproj: np.ndarray,       # 4×4  depth → world  reprojection matrix
+    depth_reproj: np.ndarray,       # 4×4  world→depth-clip View*Projection matrix
     rgb_intrinsics: np.ndarray,     # 3×3  RGB camera intrinsic matrix
     rgb_h: int,
     rgb_w: int,
     rgb_pose: np.ndarray | None = None,  # 7 floats: px,py,pz, qx,qy,qz,qw
+    depth_zbp: np.ndarray | None = None,  # 4 floats: _EnvironmentDepthZBufferParams
 ) -> np.ndarray | None:
     """Produce a depth map aligned to the RGB camera frame.
 
@@ -74,27 +152,33 @@ def align_depth_to_rgb(
         return None
 
     # ── Step 1: depth pixel coords → world XYZ ─────────────────────
-    # Create pixel grid for the depth frame
-    vv, uu = np.mgrid[0:dh, 0:dw]
-    ones = np.ones_like(uu, dtype=np.float32)
+    # Method: NDC unprojection using inverse of _EnvironmentDepthReprojectionMatrices.
+    # The matrix maps World→DepthClip (View*Projection of depth camera).
+    # For inverse: construct NDC from pixel+linear_depth, multiply by inv(matrix).
+    dh, dw = depth_meters.shape
     depth_flat = depth_meters.ravel()
 
-    # Homogeneous depth-frame pixel coords: (u, v, 1, 1/depth)
-    # Use 1/depth because depth_reproj is the *reprojection* matrix
-    # (inverse projection).  Sign convention follows Unity's convention
-    # where the matrix maps from NDC-like coords to world.
-    pix_homo = np.stack([
-        uu.ravel().astype(np.float32),
-        vv.ravel().astype(np.float32),
-        ones.ravel(),
-        ones.ravel() / np.maximum(depth_flat, 1e-6),
-    ], axis=1)  # (N, 4)
+    # Normalise pixel coords to NDC [-1, 1]
+    vv, uu = np.mgrid[0:dh, 0:dw]
+    u_ndc = uu.ravel().astype(np.float32) / max(dw - 1, 1) * 2.0 - 1.0
+    v_ndc = vv.ravel().astype(np.float32) / max(dh - 1, 1) * 2.0 - 1.0
 
-    # world = depth_reproj @ pixel_homo
-    world_homo = pix_homo @ depth_reproj.T  # (N, 4)
+    # z_ndc from linear depth using Meta's ZBufferParams formula:
+    #   linearDepth = (1 / (z_ndc + ZBP.y)) * ZBP.x
+    #   → z_ndc = ZBP.x / linearDepth - ZBP.y
+    zbp = depth_zbp if depth_zbp is not None else np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+    z_ndc = zbp[0] / np.maximum(depth_flat, 1e-6) - zbp[1]
+
+    # Clip-space coordinate
+    ones = np.ones_like(depth_flat, dtype=np.float32)
+    clip = np.stack([u_ndc, v_ndc, z_ndc, ones], axis=1)  # (N, 4)
+
+    # world_h = inv(depth_reproj) @ clip_h
+    depth_to_world = np.linalg.inv(depth_reproj)
+    world_homo = clip @ depth_to_world.T  # (N, 4)
     # Perspective divide
     w = world_homo[:, 3:4]
-    w_safe = np.where(np.abs(w) < 1e-10, 1e-10, w)
+    w_safe = np.where(np.abs(w) < 1e-10, np.float32(1e-10), w)
     world_xyz = world_homo[:, :3] / w_safe  # (N, 3)
 
     # ── Step 1b: world XYZ → RGB camera-local (if pose provided) ──
@@ -293,3 +377,98 @@ def render_topdown(
                 (20, 14), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (180, 180, 180), 1)
 
     return canvas
+
+
+# ═══════════════════ Formula equivalence verification ════════════════
+
+
+def verify_depth_conversion(
+    raw_ndc: np.ndarray,
+    zbp: np.ndarray,
+    *,
+    near: float | None = None,
+    sample_count: int = 10,
+) -> dict:
+    """Cross-validate Meta's ZBP formula against t-34400's NDC→linear.
+
+    Meta GPU:   z_ndc = ZBP.x / linear - ZBP.y
+                → linear = ZBP.x / (z_ndc + ZBP.y)   (solved for linear)
+    t-34400:    linear = x / (z_ndc + y)
+                where x = -ZBP.x, y = ZBP.y
+
+    Both convert the same z_ndc to the same absolute depth.
+    The sign differs: Meta returns positive metres, t-34400 returns
+    negative (OpenGL convention).  This function compares absolute values.
+
+    Returns a dict with keys:
+        zbp_x, zbp_y — the input ZBufferParams
+        near_estimated — near plane inferred from ZBP
+        x, y — t-34400 params derived from ZBP
+        max_abs_error — worst-case absolute depth difference (metres)
+        max_rel_error — worst-case relative error
+        samples — list of (ndc_in, depth_meta_m, depth_t344_m) for inspection
+    """
+    if near is None:
+        near = zbp_to_near(zbp[0], zbp[1])
+    x, y = zbp_to_ndc_params(zbp)
+
+    # Step 1: raw NDC [0,1] → z_ndc [-1,1]
+    z_ndc = raw_ndc.astype(np.float32) * 2.0 - 1.0
+
+    # Step 2: z_ndc → linear depth, two equivalent paths
+    # Meta:   linear = ZBP.x / (z_ndc + ZBP.y)    (positive metres)
+    denom_meta = z_ndc + zbp[1]
+    linear_meta = np.divide(
+        zbp[0], denom_meta,
+        out=np.zeros_like(raw_ndc, dtype=np.float32),
+        where=denom_meta != 0,
+    )
+
+    # t-34400: linear = x / (z_ndc + y)             (negative metres)
+    #          x = -ZBP.x, y = ZBP.y
+    #    →     linear_t344 = -ZBP.x / (z_ndc + ZBP.y) = -linear_meta
+    denom_t344 = z_ndc + y
+    linear_t344 = np.divide(
+        np.float32(x), denom_t344,
+        out=np.zeros_like(raw_ndc, dtype=np.float32),
+        where=denom_t344 != 0,
+    )
+
+    # Compare absolute depths (ignore sign convention)
+    abs_meta = np.abs(linear_meta)
+    abs_t344 = np.abs(linear_t344)
+
+    valid = (raw_ndc > 0) & np.isfinite(raw_ndc) & np.isfinite(linear_meta) & np.isfinite(linear_t344) & (abs_meta > 0)
+    if not valid.any():
+        return {
+            "zbp_x": float(zbp[0]), "zbp_y": float(zbp[1]),
+            "near_estimated": near,
+            "x": x, "y": y,
+            "error": "no valid depth pixels in buffer",
+        }
+
+    abs_err = np.abs(abs_meta[valid] - abs_t344[valid])
+    rel_err = abs_err / np.maximum(abs_meta[valid], 0.01)
+
+    # Sample a few pixels
+    idx = np.flatnonzero(valid)
+    sampled = idx[np.linspace(0, len(idx) - 1, min(sample_count, len(idx)), dtype=int)]
+    samples = [
+        {
+            "ndc_in": float(raw_ndc.flat[i]),
+            "depth_meta_m": float(abs_meta.flat[i]),
+            "depth_t344_m": float(abs_t344.flat[i]),
+        }
+        for i in sampled
+    ]
+
+    return {
+        "zbp_x": float(zbp[0]),
+        "zbp_y": float(zbp[1]),
+        "near_estimated": round(near, 4),
+        "x": round(x, 4),
+        "y": round(y, 4),
+        "max_abs_error_m": round(float(abs_err.max()), 6),
+        "max_rel_error": round(float(rel_err.max()), 6),
+        "samples": samples,
+    }

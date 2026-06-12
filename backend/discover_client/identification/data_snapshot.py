@@ -12,6 +12,7 @@ class SensorReading:
     value: float
     unit: str
     timestamp: float
+    text_value: str | None = None
 
 
 class DataSnapshot:
@@ -25,24 +26,39 @@ class DataSnapshot:
         self._latest_timestamp = 0.0
 
     def ingest(self, device_id: str, event: dict) -> list[SensorReading] | None:
-        topic = str(event.get("topic", "") or "")
-        extraction = _extract_numeric_reading(event.get("value"))
-        if extraction is None:
-            return None
-
-        value, unit, payload_hint = extraction
-        sensor_type = _infer_sensor_type(topic, payload_hint, self._TOPIC_FALLBACK_SEGMENTS)
-        if not sensor_type:
-            return None
-
         timestamp = float(event.get("timestamp", time.time()))
         self._latest_timestamp = max(self._latest_timestamp, timestamp)
-        reading = SensorReading(sensor_type=sensor_type, value=value, unit=unit, timestamp=timestamp)
+        produced: list[SensorReading] = []
+        processed_keys: set[str] = set()
 
-        device_readings = self._readings.setdefault(device_id, {})
-        device_readings.setdefault(sensor_type, []).append(reading)
-        self._prune_device(device_id, now=timestamp)
-        return [reading]
+        # Numeric extraction (e.g. brightness: 100)
+        extraction = _extract_numeric_reading(event.get("value"))
+        if extraction is not None:
+            value, unit, payload_hint = extraction
+            topic = str(event.get("topic", "") or "")
+            sensor_type = _infer_sensor_type(topic, payload_hint, self._TOPIC_FALLBACK_SEGMENTS)
+            if sensor_type:
+                reading = SensorReading(sensor_type=sensor_type, value=value, unit=unit, timestamp=timestamp)
+                device_readings = self._readings.setdefault(device_id, {})
+                device_readings.setdefault(sensor_type, []).append(reading)
+                produced.append(reading)
+                processed_keys.add(sensor_type.lower())
+
+        # Text / enum extraction (e.g. power: "OFF")
+        text_readings = _extract_text_readings(event.get("value"))
+        if text_readings:
+            for sensor_key, text_val in text_readings:
+                if sensor_key.lower() in processed_keys:
+                    continue
+                reading = SensorReading(sensor_type=sensor_key, value=0.0, unit="", timestamp=timestamp, text_value=text_val)
+                device_readings = self._readings.setdefault(device_id, {})
+                device_readings.setdefault(sensor_key, []).append(reading)
+                produced.append(reading)
+
+        if produced:
+            self._prune_device(device_id, now=timestamp)
+            return produced
+        return None
 
     def get_latest(self, device_id: str) -> dict[str, SensorReading]:
         self._prune_all()
@@ -123,6 +139,21 @@ def _extract_numeric_reading(payload: object) -> tuple[float, str, str | None] |
         return float(raw_value), "", key
 
     return None
+
+
+def _extract_text_readings(payload: object) -> list[tuple[str, str]] | None:
+    """Extract string-valued keys from a dict payload (e.g. power: 'OFF')."""
+    if not isinstance(payload, dict):
+        return None
+    # Exclude keys that are payload metadata, not sensor names
+    _excluded = {"unit", "value", "timestamp", "device", "type", "mac", "_announce", "event"}
+    results = []
+    for key, val in payload.items():
+        if key.lower() in _excluded:
+            continue
+        if isinstance(val, str) and val.strip():
+            results.append((str(key), val.strip()))
+    return results if results else None
 
 
 def _first_numeric_leaf(payload: dict) -> tuple[str, float] | None:

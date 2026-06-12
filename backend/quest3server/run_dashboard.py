@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 import json
 import math
 import os
@@ -23,10 +24,12 @@ from PySide6.QtWebSockets import QWebSocket
 from PySide6.QtWidgets import (
     QApplication,
     QGroupBox,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QPushButton,
+    QFrame,
     QTabWidget,
     QTextEdit,
     QVBoxLayout,
@@ -61,6 +64,12 @@ def post_json(path: str, body: dict) -> dict:
         return json.loads(res.read().decode("utf-8"))
 
 
+def _fmt_wh(width, height) -> str:
+    if width in (None, "", 0) or height in (None, "", 0):
+        return "-"
+    return f"{width}x{height}"
+
+
 # ═══════════════════════ Dashboard Window ═════════════════════════════
 
 
@@ -69,13 +78,16 @@ class DashboardWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Smart Room Dashboard")
         self.resize(1100, 750)
+        self._apply_styles()
 
         self._last_log_id = 0
+        self._recent_events: deque[str] = deque(maxlen=10)
 
         # RGB preview state
         self._latest_rgb_bytes: bytes | None = None
         self._latest_rgb_width = 0
         self._latest_rgb_height = 0
+        self._raw_rgb_pixmap: QPixmap | None = None
         self._rgb_draw_rect: tuple[int, int, int, int] | None = None
         self._rgb_hover_pixel: tuple[int, int] | None = None  # (x, y) in source coords
 
@@ -93,6 +105,7 @@ class DashboardWindow(QMainWindow):
         self._track_label: str = ""
         self._model_status: dict = {}
         self._crop_pixmap: QPixmap | None = None
+        self._latest_status_snapshot: dict = {}
 
         # LUT
         self._lut_loaded = False
@@ -127,7 +140,7 @@ class DashboardWindow(QMainWindow):
 
         self._status_timer = QTimer(self)
         self._status_timer.setInterval(300)
-        self._status_timer.timeout.connect(self._refresh_status)
+        self._status_timer.timeout.connect(self._refresh_status_v2)
         self._status_timer.start()
 
         self._preview_timer = QTimer(self)
@@ -153,56 +166,255 @@ class DashboardWindow(QMainWindow):
         self._ensure_sockets()
         self._load_alignment_lut()
 
+    def _apply_styles(self) -> None:
+        self.setStyleSheet(
+            """
+            QMainWindow, QWidget {
+                background-color: #0b1220;
+                color: #dce7f5;
+                font-size: 13px;
+            }
+            QTabWidget::pane {
+                border: 1px solid #1f2b3d;
+                background: #0f1727;
+                border-radius: 10px;
+                top: -1px;
+            }
+            QTabBar::tab {
+                background: #142036;
+                color: #8ea2bd;
+                padding: 10px 16px;
+                margin-right: 6px;
+                border-top-left-radius: 8px;
+                border-top-right-radius: 8px;
+            }
+            QTabBar::tab:selected {
+                background: #1c2c49;
+                color: #f4f8fc;
+            }
+            QGroupBox {
+                border: 1px solid #20314a;
+                border-radius: 12px;
+                margin-top: 10px;
+                padding-top: 14px;
+                background: #101a2b;
+                font-weight: 600;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 12px;
+                padding: 0 6px;
+                color: #f4f8fc;
+            }
+            QLabel[role="hero"] {
+                font-size: 18px;
+                font-weight: 700;
+                color: #f8fbff;
+                padding: 2px 0 10px 0;
+            }
+            QLabel[role="subtle"] {
+                color: #8ea2bd;
+            }
+            QFrame[card="true"] {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #101a2b, stop:1 #0f1a2d);
+                border: 1px solid #20314a;
+                border-radius: 14px;
+            }
+            QLabel[role="cardTitle"] {
+                color: #f8fbff;
+                font-size: 14px;
+                font-weight: 700;
+                padding-bottom: 6px;
+            }
+            QLabel[role="pill"] {
+                border-radius: 14px;
+                padding: 7px 12px;
+                font-weight: 700;
+                color: #f8fbff;
+            }
+            QTextEdit {
+                background: #0a1322;
+                border: 1px solid #20314a;
+                border-radius: 10px;
+                padding: 8px;
+            }
+            QPushButton {
+                background: #1a3156;
+                border: 1px solid #2f4d78;
+                border-radius: 8px;
+                padding: 8px 12px;
+                color: #f4f8fc;
+            }
+            QPushButton:hover {
+                background: #21406f;
+            }
+            """
+        )
+
+    def _make_pill(self, text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setProperty("role", "pill")
+        self._set_pill_state(lbl, "idle")
+        return lbl
+
+    def _make_card(self, title: str) -> tuple[QFrame, QVBoxLayout]:
+        card = QFrame()
+        card.setProperty("card", "true")
+        layout = QVBoxLayout()
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(6)
+        title_lbl = QLabel(title)
+        title_lbl.setProperty("role", "cardTitle")
+        layout.addWidget(title_lbl)
+        card.setLayout(layout)
+        return card, layout
+
+    def _set_pill_state(self, lbl: QLabel, state: str) -> None:
+        palette = {
+            "ok": ("#0f3b2f", "#1fd18a"),
+            "warn": ("#4a3412", "#ffbe55"),
+            "error": ("#4f1d24", "#ff6b81"),
+            "idle": ("#1d2738", "#8ea2bd"),
+        }
+        bg, fg = palette.get(state, palette["idle"])
+        lbl.setStyleSheet(
+            f"background-color: {bg}; color: {fg}; border: 1px solid {fg};"
+        )
+
+    def _update_recent_events_panel(self) -> None:
+        if hasattr(self, "_txt_recent_events"):
+            self._txt_recent_events.setPlainText("\n".join(self._recent_events))
+
     # ═══════════════════════ UI: Status Tab ═══════════════════════════
 
     def _build_status_tab(self) -> QWidget:
         w = QWidget()
         layout = QVBoxLayout()
+        self._lbl_status_hero = QLabel("Status board initializing")
+        self._lbl_status_hero.setProperty("role", "hero")
+        layout.addWidget(self._lbl_status_hero)
 
-        # Connection group
-        conn = QGroupBox("Connection")
-        conn_layout = QVBoxLayout()
-        self._lbl_status = QLabel("Backend: starting...")
+        self._lbl_status_summary = QLabel("Waiting for backend telemetry...")
+        self._lbl_status_summary.setProperty("role", "subtle")
+        layout.addWidget(self._lbl_status_summary)
+
+        health_row = QHBoxLayout()
+        self._pill_backend = self._make_pill("Backend")
+        self._pill_heartbeat = self._make_pill("Heartbeat")
+        self._pill_rgb = self._make_pill("RGB")
+        self._pill_depth = self._make_pill("Depth")
+        self._pill_aligned = self._make_pill("Aligned")
+        self._pill_logs = self._make_pill("Logs")
+        for pill in (
+            self._pill_backend,
+            self._pill_heartbeat,
+            self._pill_rgb,
+            self._pill_depth,
+            self._pill_aligned,
+            self._pill_logs,
+        ):
+            health_row.addWidget(pill)
+        health_row.addStretch()
+        layout.addLayout(health_row)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(14)
+        grid.setVerticalSpacing(14)
+
+        backend_card, backend_layout = self._make_card("Backend")
+        self._lbl_status = QLabel("State: -")
+        self._lbl_status_error = QLabel("Last issue: -")
+        self._lbl_status_error.setProperty("role", "subtle")
         self._lbl_headset = QLabel("Headset: -")
-        self._lbl_device = QLabel("Device: -")
-        self._lbl_tick = QLabel("Tick: 0")
-        self._lbl_version = QLabel("App Version: -")
-        self._lbl_network = QLabel("Connection Mode: -")
-        self._lbl_last_seen = QLabel("Last Seen: -")
-        for lbl in [self._lbl_status, self._lbl_headset, self._lbl_device,
-                     self._lbl_tick, self._lbl_version, self._lbl_network,
-                     self._lbl_last_seen]:
-            conn_layout.addWidget(lbl)
-        conn.setLayout(conn_layout)
-        layout.addWidget(conn)
-
-        # Streams group
-        streams = QGroupBox("Streams")
-        streams_layout = QVBoxLayout()
-        self._lbl_rgb = QLabel("RGB: -")
-        self._lbl_depth = QLabel("Depth: -")
-        self._lbl_intrinsics = QLabel("Intrinsics: -")
-        self._lbl_vram = QLabel("GPU VRAM: -")
-        streams_layout.addWidget(self._lbl_rgb)
-        streams_layout.addWidget(self._lbl_depth)
-        streams_layout.addWidget(self._lbl_intrinsics)
-        streams_layout.addWidget(self._lbl_vram)
-        streams.setLayout(streams_layout)
-        layout.addWidget(streams)
-
-        # Tracking group
-        track = QGroupBox("Tracking Engine")
-        track_layout = QVBoxLayout()
+        self._lbl_last_seen = QLabel("Last seen: -")
         self._lbl_track_models = QLabel("Models: -")
-        self._lbl_track_state = QLabel("State: idle")
-        self._lbl_track_label = QLabel("Label: -")
-        track_layout.addWidget(self._lbl_track_models)
-        track_layout.addWidget(self._lbl_track_state)
-        track_layout.addWidget(self._lbl_track_label)
-        track.setLayout(track_layout)
-        layout.addWidget(track)
+        for lbl in (
+            self._lbl_status,
+            self._lbl_status_error,
+            self._lbl_headset,
+            self._lbl_last_seen,
+            self._lbl_track_models,
+        ):
+            backend_layout.addWidget(lbl)
 
-        layout.addStretch()
+        unity_card, unity_layout = self._make_card("Unity Device")
+        self._lbl_device = QLabel("Device: -")
+        self._lbl_version = QLabel("App: -")
+        self._lbl_unity_version = QLabel("Unity: -")
+        self._lbl_network = QLabel("Connection: -")
+        self._lbl_tick = QLabel("Tick: 0")
+        for lbl in (
+            self._lbl_device,
+            self._lbl_version,
+            self._lbl_unity_version,
+            self._lbl_network,
+            self._lbl_tick,
+        ):
+            unity_layout.addWidget(lbl)
+
+        rgb_card, rgb_layout = self._make_card("RGB Capture")
+        self._lbl_rgb = QLabel("RGB: -")
+        self._lbl_rgb_stream = QLabel("Stream: -")
+        self._lbl_intrinsics = QLabel("Intrinsics: -")
+        self._lbl_rgb_pose = QLabel("Pose/Timestamp: -")
+        self._lbl_rgb_risk = QLabel("Risk: -")
+        self._lbl_rgb_risk.setProperty("role", "subtle")
+        for lbl in (
+            self._lbl_rgb,
+            self._lbl_rgb_stream,
+            self._lbl_intrinsics,
+            self._lbl_rgb_pose,
+            self._lbl_rgb_risk,
+        ):
+            rgb_layout.addWidget(lbl)
+
+        depth_card, depth_layout = self._make_card("Depth Capture")
+        self._lbl_depth = QLabel("Depth: -")
+        self._lbl_depth_stream = QLabel("Source: -")
+        self._lbl_depth_state = QLabel("Availability: -")
+        self._lbl_depth_meta = QLabel("Meta: -")
+        self._lbl_vram = QLabel("Aux: -")
+        for lbl in (
+            self._lbl_depth,
+            self._lbl_depth_stream,
+            self._lbl_depth_state,
+            self._lbl_depth_meta,
+            self._lbl_vram,
+        ):
+            depth_layout.addWidget(lbl)
+
+        trigger_card, trigger_layout = self._make_card("Trigger / Alignment")
+        self._lbl_track_state = QLabel("Tracking: idle")
+        self._lbl_track_label = QLabel("Label: -")
+        self._lbl_trigger_status = QLabel("Trigger: no trigger yet")
+        self._lbl_alignment_status = QLabel("Aligned depth: unavailable")
+        self._lbl_alignment_hint = QLabel("Validation: topdown uses trigger bundle intrinsics when available")
+        self._lbl_alignment_hint.setProperty("role", "subtle")
+        for lbl in (
+            self._lbl_track_state,
+            self._lbl_track_label,
+            self._lbl_trigger_status,
+            self._lbl_alignment_status,
+            self._lbl_alignment_hint,
+        ):
+            trigger_layout.addWidget(lbl)
+
+        events_card, events_layout = self._make_card("Recent Events")
+        self._txt_recent_events = QTextEdit()
+        self._txt_recent_events.setReadOnly(True)
+        self._txt_recent_events.setMaximumHeight(180)
+        self._txt_recent_events.setPlaceholderText("Recent pipeline events will appear here...")
+        events_layout.addWidget(self._txt_recent_events)
+
+        grid.addWidget(backend_card, 0, 0)
+        grid.addWidget(unity_card, 0, 1)
+        grid.addWidget(rgb_card, 1, 0)
+        grid.addWidget(depth_card, 1, 1)
+        grid.addWidget(trigger_card, 2, 0)
+        grid.addWidget(events_card, 2, 1)
+        layout.addLayout(grid)
+
         w.setLayout(layout)
         return w
 
@@ -216,12 +428,47 @@ class DashboardWindow(QMainWindow):
         self._lbl_preview_hover = QLabel("Hover over image for pixel coords and depth")
         layout.addWidget(self._lbl_preview_hover)
 
-        # Single combined RGB + depth overlay image
+        raw_row = QHBoxLayout()
+
+        raw_rgb_group = QGroupBox("Raw RGB")
+        raw_rgb_layout = QVBoxLayout()
+        self._lbl_raw_rgb = QLabel("Waiting for RGB preview...")
+        self._lbl_raw_rgb.setMinimumSize(420, 240)
+        self._lbl_raw_rgb.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._lbl_raw_rgb.setStyleSheet("background-color: #0a1322; border-radius: 8px;")
+        raw_rgb_layout.addWidget(self._lbl_raw_rgb)
+        raw_rgb_group.setLayout(raw_rgb_layout)
+        raw_row.addWidget(raw_rgb_group)
+
+        raw_depth_group = QGroupBox("Raw Depth")
+        raw_depth_layout = QVBoxLayout()
+        self._lbl_raw_depth = QLabel("Waiting for depth preview...")
+        self._lbl_raw_depth.setMinimumSize(420, 240)
+        self._lbl_raw_depth.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._lbl_raw_depth.setStyleSheet("background-color: #0a1322; border-radius: 8px;")
+        raw_depth_layout.addWidget(self._lbl_raw_depth)
+        raw_depth_group.setLayout(raw_depth_layout)
+        raw_row.addWidget(raw_depth_group)
+        layout.addLayout(raw_row)
+
+        meta_group = QGroupBox("Raw Capture Metadata")
+        meta_layout = QVBoxLayout()
+        self._lbl_preview_meta = QLabel("Waiting for runtime metadata...")
+        self._lbl_preview_meta.setWordWrap(True)
+        self._lbl_preview_meta.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        meta_layout.addWidget(self._lbl_preview_meta)
+        meta_group.setLayout(meta_layout)
+        layout.addWidget(meta_group)
+
+        combined_group = QGroupBox("Trigger RGB + Aligned Depth Overlay")
+        combined_layout = QVBoxLayout()
         self._preview_label = QLabel("RGB + Depth: waiting...")
         self._preview_label.setMinimumSize(640, 360)
         self._preview_label.setMouseTracking(True)
         self._preview_label.installEventFilter(self)
-        layout.addWidget(self._preview_label)
+        combined_layout.addWidget(self._preview_label)
+        combined_group.setLayout(combined_layout)
+        layout.addWidget(combined_group)
 
         w.setLayout(layout)
         return w
@@ -358,6 +605,135 @@ class DashboardWindow(QMainWindow):
         except Exception as ex:
             self._lbl_status.setText(f"Backend: error ({ex})")
 
+    def _refresh_status_v2(self) -> None:
+        try:
+            data = fetch_json("/api/status")
+            self._latest_status_snapshot = data
+            p = data.get("last_payload", {})
+            model_status = fetch_json("/api/models/status")
+            self._model_status = model_status
+            ci = data.get("camera_intrinsics", {})
+            depth_meta = data.get("depth_source_meta", {})
+            aligned_meta = data.get("aligned_depth_meta", {})
+            connected = bool(data.get("connected"))
+            rgb_size = data.get("last_rgb_size", "-")
+            depth_size = data.get("last_depth_size", "-")
+            aligned_ok = bool(model_status.get("aligned_depth"))
+            trigger_bundle = data.get("trigger_bundle") or {}
+
+            self._lbl_status_hero.setText(
+                "Backend online" if connected else "Backend online, device waiting"
+            )
+            self._lbl_status_summary.setText(
+                f"RGB {rgb_size} | Depth {depth_size} | Active connections {data.get('active_connections', 0)}"
+            )
+            self._lbl_status.setText("State: running")
+            self._lbl_status_error.setText("Last issue: none visible from status endpoint")
+            self._lbl_headset.setText(
+                f"Headset: {'connected' if connected else 'disconnected'} (active={data.get('active_connections', 0)})"
+            )
+            self._lbl_last_seen.setText(f"Last seen: {data.get('last_seen_utc', '-')}")
+            self._lbl_track_models.setText(
+                "Models: "
+                + " | ".join(
+                    [
+                        f"SAM2={'ready' if model_status.get('sam2') else 'off'}",
+                        f"Florence2={'ready' if model_status.get('florence2') else 'off'}",
+                        f"SigLIP2={'ready' if model_status.get('clip') else 'off'}",
+                    ]
+                )
+            )
+
+            self._lbl_device.setText(f"Device: {p.get('device_model', '-')}")
+            self._lbl_version.setText(f"App: {p.get('app_version', '-')}")
+            self._lbl_unity_version.setText(f"Unity: {p.get('unity_version', '-')}")
+            self._lbl_network.setText(f"Connection: {p.get('connection_mode', '-')}")
+            self._lbl_tick.setText(f"Tick: {data.get('last_tick', 0)}")
+
+            self._lbl_rgb.setText(f"RGB: frame={data.get('last_rgb_frame_id', 0)} size={rgb_size}")
+            self._lbl_rgb_stream.setText(
+                f"Stream: requested={_fmt_wh(ci.get('requested_width'), ci.get('requested_height'))} | "
+                f"current={_fmt_wh(ci.get('current_width'), ci.get('current_height'))} | "
+                f"stream={_fmt_wh(ci.get('stream_width'), ci.get('stream_height'))}"
+            )
+            if ci.get("fx"):
+                self._lbl_intrinsics.setText(
+                    f"Intrinsics: fx={ci['fx']:.1f} fy={ci['fy']:.1f} cx={ci['cx']:.1f} cy={ci['cy']:.1f} | sensor={_fmt_wh(ci.get('sensor_width'), ci.get('sensor_height'))}"
+                )
+            else:
+                self._lbl_intrinsics.setText("Intrinsics: waiting for camera metadata")
+            self._lbl_rgb_pose.setText(
+                f"Pose/Timestamp: latest_rgb_ts={data.get('latest_rgb_timestamp_ms')} | camera_meta_ts={ci.get('timestamp_ms', '-')}"
+            )
+            self._lbl_rgb_risk.setText(
+                f"Risk: preferred={_fmt_wh(ci.get('preferred_width'), ci.get('preferred_height'))} | supported={len(ci.get('supported_resolutions') or [])} entries"
+            )
+
+            self._lbl_depth.setText(f"Depth: frame={data.get('last_depth_frame_id', 0)} size={depth_size}")
+            self._lbl_depth_stream.setText(
+                f"Source: websocket preview {'active' if self._depth_socket.state() == QAbstractSocket.SocketState.ConnectedState else 'idle'}"
+            )
+            self._lbl_depth_state.setText(
+                f"Availability: {'aligned uploaded' if aligned_ok else 'no aligned depth yet'}"
+            )
+            self._lbl_depth_meta.setText(
+                f"Meta: raw={_fmt_wh(depth_meta.get('source_width'), depth_meta.get('source_height'))} | "
+                f"sampled={_fmt_wh(depth_meta.get('sampled_width'), depth_meta.get('sampled_height'))} | "
+                f"stride={depth_meta.get('stride', '-')}"
+            )
+            self._lbl_vram.setText(
+                f"Aux: flip_vertical={depth_meta.get('flip_vertical', '-')} | preprocessed={depth_meta.get('preprocessed', '-')} | "
+                f"LUT={'loaded' if self._lut_loaded else 'missing'} | raw depth cache={'ready' if self._latest_depth_values else 'empty'}"
+            )
+
+            tracking = data.get("tracking", {})
+            self._lbl_track_state.setText(f"Tracking: {tracking.get('state', 'idle')}")
+            self._lbl_track_label.setText(f"Label: {tracking.get('label', '-') or '-'}")
+            self._lbl_trigger_status.setText(
+                f"Trigger: ts={trigger_bundle.get('trigger_timestamp_ms')} px={trigger_bundle.get('pixel_xy')}"
+                if trigger_bundle
+                else "Trigger: no trigger frame yet"
+            )
+            self._lbl_alignment_status.setText(
+                f"Aligned depth: sparse overlay available | depth={trigger_bundle.get('depth_sampled_wh')} | valid={aligned_meta.get('valid_points', '-')}"
+                if aligned_ok or self._aligned_depth_pixmap is not None
+                else "Aligned depth: unavailable"
+            )
+            self._lbl_alignment_hint.setText(
+                "Validation: topdown and pixel query now use strict trigger intrinsics only"
+            )
+
+            self._set_pill_state(self._pill_backend, "ok")
+            self._set_pill_state(self._pill_heartbeat, "ok" if connected else "warn")
+            self._set_pill_state(self._pill_rgb, "ok" if data.get("last_rgb_frame_id", 0) > 0 else "warn")
+            self._set_pill_state(self._pill_depth, "ok" if data.get("last_depth_frame_id", 0) > 0 else "warn")
+            self._set_pill_state(
+                self._pill_aligned,
+                "ok" if aligned_ok else ("warn" if self._latest_rgb_width > 0 else "idle"),
+            )
+            self._set_pill_state(self._pill_logs, "ok" if self._last_log_id > 0 else "warn")
+        except urllib.error.URLError:
+            self._latest_status_snapshot = {}
+            self._lbl_status_hero.setText("Backend unreachable")
+            self._lbl_status_summary.setText("Status API request failed")
+            self._lbl_status.setText("State: disconnected")
+            self._lbl_status_error.setText("Last issue: backend request failed")
+            for pill in (
+                self._pill_backend,
+                self._pill_heartbeat,
+                self._pill_rgb,
+                self._pill_depth,
+                self._pill_aligned,
+            ):
+                self._set_pill_state(pill, "error")
+        except Exception as ex:
+            self._latest_status_snapshot = {}
+            self._lbl_status_hero.setText("Status board degraded")
+            self._lbl_status_summary.setText(str(ex))
+            self._lbl_status.setText("State: error")
+            self._lbl_status_error.setText(f"Last issue: {ex}")
+            self._set_pill_state(self._pill_backend, "error")
+
     def _refresh_tracking_status(self) -> None:
         try:
             data = fetch_json("/api/track/status")
@@ -455,16 +831,80 @@ class DashboardWindow(QMainWindow):
             pass
 
     def _refresh_previews(self) -> None:
-        self._refresh_combined_preview()
         self._fetch_aligned_depth()
+        self._refresh_raw_preview_panel()
+        self._refresh_preview_metadata()
+        self._refresh_combined_preview()
+
+    def _refresh_raw_preview_panel(self) -> None:
+        if self._raw_rgb_pixmap is not None:
+            scaled_rgb = self._raw_rgb_pixmap.scaled(
+                self._lbl_raw_rgb.width(),
+                self._lbl_raw_rgb.height(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            self._lbl_raw_rgb.setPixmap(scaled_rgb)
+            self._lbl_raw_rgb.setText("")
+
+        if self._depth_preview_pixmap is not None:
+            scaled_depth = self._depth_preview_pixmap.scaled(
+                self._lbl_raw_depth.width(),
+                self._lbl_raw_depth.height(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            self._lbl_raw_depth.setPixmap(scaled_depth)
+            self._lbl_raw_depth.setText("")
+
+    def _refresh_preview_metadata(self) -> None:
+        data = self._latest_status_snapshot or {}
+        ci = data.get("camera_intrinsics", {})
+        depth_meta = data.get("depth_source_meta", {})
+        aligned_meta = data.get("aligned_depth_meta", {})
+        supported = ci.get("supported_resolutions") or []
+        supported_text = ", ".join(supported[:8]) if supported else "-"
+        if len(supported) > 8:
+            supported_text += f" ... (+{len(supported) - 8})"
+
+        lines = [
+            f"RGB supported: {supported_text}",
+            f"RGB preferred/requested/current: {_fmt_wh(ci.get('preferred_width'), ci.get('preferred_height'))} / "
+            f"{_fmt_wh(ci.get('requested_width'), ci.get('requested_height'))} / "
+            f"{_fmt_wh(ci.get('current_width'), ci.get('current_height'))}",
+            f"RGB stream/sensor/raw preview: {_fmt_wh(ci.get('stream_width'), ci.get('stream_height'))} / "
+            f"{_fmt_wh(ci.get('sensor_width'), ci.get('sensor_height'))} / "
+            f"{_fmt_wh(self._latest_rgb_width, self._latest_rgb_height)}",
+            f"Depth raw texture/sample/raw preview: {_fmt_wh(depth_meta.get('source_width'), depth_meta.get('source_height'))} / "
+            f"{_fmt_wh(depth_meta.get('sampled_width'), depth_meta.get('sampled_height'))} / "
+            f"{_fmt_wh(self._latest_depth_width, self._latest_depth_height)}",
+            f"Depth stride/preprocessed/flipVertical: {depth_meta.get('stride', '-')} / "
+            f"{depth_meta.get('preprocessed', '-')} / {depth_meta.get('flip_vertical', '-')}",
+            f"Sparse aligned valid/clipped/behind: {aligned_meta.get('valid_points', '-')} / "
+            f"{aligned_meta.get('clipped_points', '-')} / {aligned_meta.get('points_behind_camera', '-')}",
+            f"Sparse aligned rgbZ[min,max,avg]: {aligned_meta.get('min_rgb_camera_z', '-')} / "
+            f"{aligned_meta.get('max_rgb_camera_z', '-')} / {aligned_meta.get('avg_rgb_camera_z', '-')}",
+        ]
+        self._lbl_preview_meta.setText("\n".join(lines))
 
     def _refresh_combined_preview(self) -> None:
-        """Draw RGB image with depth heatmap overlaid."""
-        if self._latest_rgb_bytes is None:
+        """Draw trigger-frame RGB with depth heatmap overlaid (trigger-only mode)."""
+        # Fetch the trigger-saved RGB frame from backend
+        try:
+            req = urllib.request.Request(f"{API_BASE}/api/track/last-original", method="GET")
+            with urllib.request.urlopen(req, timeout=1.0) as res:
+                if res.status == 204:
+                    return  # no trigger yet, blank preview
+                trigger_rgb = res.read()
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return  # no trigger yet
+            raise
+        except Exception:
             return
 
         rgb_pix = QPixmap()
-        if not rgb_pix.loadFromData(self._latest_rgb_bytes):
+        if not rgb_pix.loadFromData(trigger_rgb):
             return
 
         self._latest_rgb_width = rgb_pix.width()
@@ -509,8 +949,9 @@ class DashboardWindow(QMainWindow):
         self._preview_label.setPixmap(scaled)
 
         # Cache draw rect for hover coordinate mapping
-        rx = max(0, (self._preview_label.width() - scaled.width()) // 2)
-        ry = max(0, (self._preview_label.height() - scaled.height()) // 2)
+        contents = self._preview_label.contentsRect()
+        rx = contents.x() + max(0, (contents.width() - scaled.width()) // 2)
+        ry = contents.y() + max(0, (contents.height() - scaled.height()) // 2)
         self._preview_draw_rect = (rx, ry, scaled.width(), scaled.height())
 
     # ── old _refresh_rgb and _refresh_depth removed; replaced above ──
@@ -545,6 +986,11 @@ class DashboardWindow(QMainWindow):
 
     def _on_rgb_binary(self, payload) -> None:
         self._latest_rgb_bytes = bytes(payload)
+        pixmap = QPixmap()
+        if pixmap.loadFromData(self._latest_rgb_bytes):
+            self._raw_rgb_pixmap = pixmap
+            self._latest_rgb_width = pixmap.width()
+            self._latest_rgb_height = pixmap.height()
 
     def _on_depth_binary(self, payload) -> None:
         packet = bytes(payload)
@@ -643,26 +1089,41 @@ class DashboardWindow(QMainWindow):
                 self._update_preview_hover(pos.x(), pos.y())
             elif etype == QEvent.Type.MouseButtonPress:
                 pos = event.position().toPoint()
-                self._on_rgb_click(pos.x(), pos.y())
+                self._on_rgb_click_v2(pos.x(), pos.y())
             elif etype == QEvent.Type.Leave:
                 self._lbl_preview_hover.setText(
                     "Hover over image for pixel coords and depth"
                 )
         return super().eventFilter(watched, event)
 
-    def _update_preview_hover(self, mx: int, my: int) -> None:
-        if not hasattr(self, '_preview_draw_rect') or self._preview_draw_rect is None:
-            return
+    def _map_preview_pos_to_source_pixel(self, mx: int, my: int) -> tuple[int, int] | None:
+        if not hasattr(self, "_preview_draw_rect") or self._preview_draw_rect is None:
+            return None
+        if self._latest_rgb_width <= 0 or self._latest_rgb_height <= 0:
+            return None
+
         dx, dy, dw, dh = self._preview_draw_rect
         if dw <= 0 or dh <= 0:
-            return
-        if mx < dx or my < dy or mx >= dx + dw or my >= dy + dh:
-            return
+            return None
+        if mx < dx or my < dy or mx > dx + dw - 1 or my > dy + dh - 1:
+            return None
 
-        u = (mx - dx) / dw
-        v = (my - dy) / dh
-        px = int(u * self._latest_rgb_width)
-        py = int(v * self._latest_rgb_height)
+        u = (mx - dx) / max(dw - 1, 1)
+        v = (my - dy) / max(dh - 1, 1)
+        px = int(round(u * max(self._latest_rgb_width - 1, 0)))
+        py = int(round(v * max(self._latest_rgb_height - 1, 0)))
+        px = max(0, min(self._latest_rgb_width - 1, px))
+        py = max(0, min(self._latest_rgb_height - 1, py))
+        return px, py
+
+    def _update_preview_hover(self, mx: int, my: int) -> None:
+        mapped = self._map_preview_pos_to_source_pixel(mx, my)
+        if mapped is None:
+            self._lbl_preview_hover.setText(
+                "Hover over image for pixel coords and depth"
+            )
+            return
+        px, py = mapped
 
         # Query depth from aligned depth API (may return None)
         depth_str = "-"
@@ -704,6 +1165,13 @@ class DashboardWindow(QMainWindow):
                 self._aligned_depth_pixmap = pix
         except Exception:
             pass  # silently skip if endpoint unavailable or no depth yet
+
+    def _on_rgb_click_v2(self, mx: int, my: int) -> None:
+        mapped = self._map_preview_pos_to_source_pixel(mx, my)
+        if mapped is None:
+            return
+        px, py = mapped
+        self._do_detect(px, py)
 
     def _on_rgb_click(self, mx: int, my: int) -> None:
         """Click on RGB preview → trigger tracking at that point."""
@@ -816,6 +1284,12 @@ class DashboardWindow(QMainWindow):
         if stack:
             esc = stack.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br>")
             self._log_view.append(f"<div style='color:#757575;margin-left:12px;'>stack: {esc}</div>")
+
+        short_msg = msg if len(msg) <= 120 else msg[:117] + "..."
+        self._recent_events.appendleft(f"[{level}] [{source}] {short_msg}")
+        self._update_recent_events_panel()
+        if hasattr(self, "_pill_logs"):
+            self._set_pill_state(self._pill_logs, "ok" if level != "ERROR" else "warn")
 
     # ═══════════════════════ Cleanup ══════════════════════════════════
 

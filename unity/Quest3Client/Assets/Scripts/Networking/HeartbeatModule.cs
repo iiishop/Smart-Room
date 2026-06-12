@@ -1,5 +1,4 @@
 using System;
-using System.Text.RegularExpressions;
 using TMPro;
 using UnityEngine;
 
@@ -31,9 +30,6 @@ namespace SmartRoom.Networking
 
         private float _nextAt;
         private int _tick;
-        private static readonly Regex StackLineRegex =
-            new Regex(@"\(at\s+(.*):(\d+)\)", RegexOptions.Compiled);
-
         private void Awake()
         {
             if (manager == null)
@@ -45,8 +41,6 @@ namespace SmartRoom.Networking
             {
                 titleText.text = "Hello World";
             }
-
-            Application.logMessageReceived += HandleUnityLog;
         }
 
         private void Start()
@@ -100,45 +94,5 @@ namespace SmartRoom.Networking
             manager.QueueControlJson(JsonUtility.ToJson(payload));
         }
 
-        private void HandleUnityLog(string condition, string stackTrace, LogType type)
-        {
-            if (manager == null)
-            {
-                return;
-            }
-
-            string level = type switch
-            {
-                LogType.Error => "ERROR",
-                LogType.Exception => "ERROR",
-                LogType.Assert => "ERROR",
-                LogType.Warning => "WARNING",
-                _ => "INFO",
-            };
-
-            if (condition != null && condition.Contains("HeartbeatModule"))
-            {
-                return;
-            }
-
-            string script = null;
-            int line = -1;
-            if (!string.IsNullOrEmpty(stackTrace))
-            {
-                var match = StackLineRegex.Match(stackTrace);
-                if (match.Success)
-                {
-                    script = match.Groups[1].Value;
-                    int.TryParse(match.Groups[2].Value, out line);
-                }
-            }
-
-            manager.QueueUnityLog(level, condition, script, line, stackTrace);
-        }
-
-        private void OnDestroy()
-        {
-            Application.logMessageReceived -= HandleUnityLog;
-        }
     }
 }

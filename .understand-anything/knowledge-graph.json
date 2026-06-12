@@ -1,0 +1,2532 @@
+{
+  "version": "1.0.0",
+  "project": {
+    "name": "Smart Room",
+    "languages": [
+      "python",
+      "csharp",
+      "typescript",
+      "markdown",
+      "json",
+      "toml",
+      "unity",
+      "shader",
+      "xml"
+    ],
+    "frameworks": [
+      "FastAPI",
+      "Uvicorn",
+      "PySide6",
+      "Pytest",
+      "Unity",
+      "Meta XR SDK",
+      "OpenXR",
+      "AR Foundation",
+      "URP"
+    ],
+    "description": "Smart Room 是一个面向 Quest 3 MVP 的混合式工作区：Unity 客户端负责采集 RGB、深度与交互数据，Python 后端负责接收流、视觉推理、跟踪与桌面调试面板。当前结构围绕端到端数据流、目标跟踪和可视化验证展开。",
+    "analyzedAt": "2026-05-31T22:48:38.723Z",
+    "gitCommitHash": "66419888da79737c99cacecd50770c7a169ac921"
+  },
+  "nodes": [
+    {
+      "id": "file:.understand-anything/.understandignore",
+      "type": "file",
+      "name": ".understandignore",
+      "filePath": ".understand-anything/.understandignore",
+      "summary": "项目文件，属于 Smart Room 工作区的实现、配置或支持材料。",
+      "tags": [
+        "unknown",
+        "code"
+      ]
+    },
+    {
+      "id": "config:.understand-anything/config.json",
+      "type": "config",
+      "name": "config.json",
+      "filePath": ".understand-anything/config.json",
+      "summary": "配置文件，定义依赖、项目结构或运行参数。",
+      "tags": [
+        "json",
+        "config"
+      ]
+    },
+    {
+      "id": "config:backend/pyproject.toml",
+      "type": "config",
+      "name": "pyproject.toml",
+      "filePath": "backend/pyproject.toml",
+      "summary": "配置文件，定义依赖、项目结构或运行参数。",
+      "tags": [
+        "toml",
+        "config"
+      ]
+    },
+    {
+      "id": "file:backend/quest3server/__init__.py",
+      "type": "file",
+      "name": "__init__.py",
+      "filePath": "backend/quest3server/__init__.py",
+      "summary": "Python 源文件，参与后端服务、推理、跟踪或工具逻辑。",
+      "tags": [
+        "python",
+        "code",
+        "backend"
+      ]
+    },
+    {
+      "id": "file:backend/quest3server/__main__.py",
+      "type": "file",
+      "name": "__main__.py",
+      "filePath": "backend/quest3server/__main__.py",
+      "summary": "Python 源文件，参与后端服务、推理、跟踪或工具逻辑。",
+      "tags": [
+        "python",
+        "code",
+        "backend"
+      ]
+    },
+    {
+      "id": "file:backend/quest3server/log_manager.py",
+      "type": "file",
+      "name": "log_manager.py",
+      "filePath": "backend/quest3server/log_manager.py",
+      "summary": "Python 源文件，参与后端服务、推理、跟踪或工具逻辑。",
+      "tags": [
+        "python",
+        "code",
+        "backend"
+      ]
+    },
+    {
+      "id": "file:backend/quest3server/main.py",
+      "type": "file",
+      "name": "main.py",
+      "filePath": "backend/quest3server/main.py",
+      "summary": "后端主服务入口，暴露状态、预览、射线查询与多路 WebSocket 数据流接口。",
+      "tags": [
+        "python",
+        "code",
+        "backend"
+      ]
+    },
+    {
+      "id": "file:backend/quest3server/run_dashboard.py",
+      "type": "file",
+      "name": "run_dashboard.py",
+      "filePath": "backend/quest3server/run_dashboard.py",
+      "summary": "桌面调试面板入口，启动本地后端并通过 PySide6 可视化 RGB、深度、日志与跟踪结果。",
+      "tags": [
+        "python",
+        "code",
+        "backend"
+      ]
+    },
+    {
+      "id": "file:backend/quest3server/tracking/__init__.py",
+      "type": "file",
+      "name": "__init__.py",
+      "filePath": "backend/quest3server/tracking/__init__.py",
+      "summary": "Python 源文件，参与后端服务、推理、跟踪或工具逻辑。",
+      "tags": [
+        "python",
+        "code",
+        "tracking",
+        "backend"
+      ]
+    },
+    {
+      "id": "file:backend/quest3server/tracking/depth_alignment.py",
+      "type": "file",
+      "name": "depth_alignment.py",
+      "filePath": "backend/quest3server/tracking/depth_alignment.py",
+      "summary": "Python 源文件，参与后端服务、推理、跟踪或工具逻辑。",
+      "tags": [
+        "python",
+        "code",
+        "tracking",
+        "backend"
+      ]
+    },
+    {
+      "id": "file:backend/quest3server/tracking/engine.py",
+      "type": "file",
+      "name": "engine.py",
+      "filePath": "backend/quest3server/tracking/engine.py",
+      "summary": "目标跟踪引擎，整合检测、分割、SAM2/Florence 等模型推理与状态机逻辑。",
+      "tags": [
+        "python",
+        "code",
+        "tracking",
+        "backend"
+      ]
+    },
+    {
+      "id": "file:backend/quest3server/tracking/types.py",
+      "type": "file",
+      "name": "types.py",
+      "filePath": "backend/quest3server/tracking/types.py",
+      "summary": "Python 源文件，参与后端服务、推理、跟踪或工具逻辑。",
+      "tags": [
+        "python",
+        "code",
+        "tracking",
+        "backend"
+      ]
+    },
+    {
+      "id": "file:backend/quest3server/vision/__init__.py",
+      "type": "file",
+      "name": "__init__.py",
+      "filePath": "backend/quest3server/vision/__init__.py",
+      "summary": "Python 源文件，参与后端服务、推理、跟踪或工具逻辑。",
+      "tags": [
+        "python",
+        "code",
+        "vision",
+        "backend"
+      ]
+    },
+    {
+      "id": "file:backend/quest3server/vision/metrics.py",
+      "type": "file",
+      "name": "metrics.py",
+      "filePath": "backend/quest3server/vision/metrics.py",
+      "summary": "Python 源文件，参与后端服务、推理、跟踪或工具逻辑。",
+      "tags": [
+        "python",
+        "code",
+        "vision",
+        "backend"
+      ]
+    },
+    {
+      "id": "file:backend/quest3server/vision/pipeline.py",
+      "type": "file",
+      "name": "pipeline.py",
+      "filePath": "backend/quest3server/vision/pipeline.py",
+      "summary": "视觉流水线抽象层，串联检测、分割、跟踪和性能统计。",
+      "tags": [
+        "python",
+        "code",
+        "vision",
+        "backend"
+      ]
+    },
+    {
+      "id": "file:backend/quest3server/vision/providers.py",
+      "type": "file",
+      "name": "providers.py",
+      "filePath": "backend/quest3server/vision/providers.py",
+      "summary": "Python 源文件，参与后端服务、推理、跟踪或工具逻辑。",
+      "tags": [
+        "python",
+        "code",
+        "vision",
+        "backend"
+      ]
+    },
+    {
+      "id": "file:backend/quest3server/vision/rle.py",
+      "type": "file",
+      "name": "rle.py",
+      "filePath": "backend/quest3server/vision/rle.py",
+      "summary": "Python 源文件，参与后端服务、推理、跟踪或工具逻辑。",
+      "tags": [
+        "python",
+        "code",
+        "vision",
+        "backend"
+      ]
+    },
+    {
+      "id": "file:backend/quest3server/vision/runtime.py",
+      "type": "file",
+      "name": "runtime.py",
+      "filePath": "backend/quest3server/vision/runtime.py",
+      "summary": "视觉运行时协调器，管理推理流水线、WebSocket 客户端广播与最新结果状态。",
+      "tags": [
+        "python",
+        "code",
+        "vision",
+        "backend"
+      ]
+    },
+    {
+      "id": "file:backend/quest3server/vision/types.py",
+      "type": "file",
+      "name": "types.py",
+      "filePath": "backend/quest3server/vision/types.py",
+      "summary": "Python 源文件，参与后端服务、推理、跟踪或工具逻辑。",
+      "tags": [
+        "python",
+        "code",
+        "vision",
+        "backend"
+      ]
+    },
+    {
+      "id": "file:conftest.py",
+      "type": "file",
+      "name": "conftest.py",
+      "filePath": "conftest.py",
+      "summary": "Python 源文件，参与后端服务、推理、跟踪或工具逻辑。",
+      "tags": [
+        "python",
+        "code"
+      ]
+    },
+    {
+      "id": "file:contracts/bbox_wireframe_render.ts",
+      "type": "file",
+      "name": "bbox_wireframe_render.ts",
+      "filePath": "contracts/bbox_wireframe_render.ts",
+      "summary": "跨端消息或渲染相关的契约定义文件。",
+      "tags": [
+        "typescript",
+        "code",
+        "contracts"
+      ]
+    },
+    {
+      "id": "file:contracts/types.ts",
+      "type": "file",
+      "name": "types.ts",
+      "filePath": "contracts/types.ts",
+      "summary": "前后端共享视觉结果与处理后对象的 TypeScript 契约定义。",
+      "tags": [
+        "typescript",
+        "code",
+        "contracts"
+      ]
+    },
+    {
+      "id": "document:docs/01_MVP_SCOPE.md",
+      "type": "document",
+      "name": "01_MVP_SCOPE.md",
+      "filePath": "docs/01_MVP_SCOPE.md",
+      "summary": "项目文档文件，记录范围、计划、SDK 参考、审计和阶段性报告。",
+      "tags": [
+        "markdown",
+        "docs"
+      ]
+    },
+    {
+      "id": "document:docs/02_QUEST3_UNITY_STREAMING_PLAN.md",
+      "type": "document",
+      "name": "02_QUEST3_UNITY_STREAMING_PLAN.md",
+      "filePath": "docs/02_QUEST3_UNITY_STREAMING_PLAN.md",
+      "summary": "项目文档文件，记录范围、计划、SDK 参考、审计和阶段性报告。",
+      "tags": [
+        "markdown",
+        "docs"
+      ]
+    },
+    {
+      "id": "document:docs/03_SDK_REFERENCE.md",
+      "type": "document",
+      "name": "03_SDK_REFERENCE.md",
+      "filePath": "docs/03_SDK_REFERENCE.md",
+      "summary": "项目文档文件，记录范围、计划、SDK 参考、审计和阶段性报告。",
+      "tags": [
+        "markdown",
+        "docs"
+      ]
+    },
+    {
+      "id": "document:docs/04_QUEST3_STREAMING_TECH_REPORT.md",
+      "type": "document",
+      "name": "04_QUEST3_STREAMING_TECH_REPORT.md",
+      "filePath": "docs/04_QUEST3_STREAMING_TECH_REPORT.md",
+      "summary": "项目文档文件，记录范围、计划、SDK 参考、审计和阶段性报告。",
+      "tags": [
+        "markdown",
+        "docs"
+      ]
+    },
+    {
+      "id": "document:docs/archive/IMPLEMENTATION_SUMMARY_legacy.md",
+      "type": "document",
+      "name": "IMPLEMENTATION_SUMMARY_legacy.md",
+      "filePath": "docs/archive/IMPLEMENTATION_SUMMARY_legacy.md",
+      "summary": "项目文档文件，记录范围、计划、SDK 参考、审计和阶段性报告。",
+      "tags": [
+        "markdown",
+        "docs"
+      ]
+    },
+    {
+      "id": "document:docs/archive/MQTT_AUTO_DISCOVERY_DESIGN_legacy.md",
+      "type": "document",
+      "name": "MQTT_AUTO_DISCOVERY_DESIGN_legacy.md",
+      "filePath": "docs/archive/MQTT_AUTO_DISCOVERY_DESIGN_legacy.md",
+      "summary": "项目文档文件，记录范围、计划、SDK 参考、审计和阶段性报告。",
+      "tags": [
+        "markdown",
+        "docs"
+      ]
+    },
+    {
+      "id": "document:docs/archive/README.md",
+      "type": "document",
+      "name": "README.md",
+      "filePath": "docs/archive/README.md",
+      "summary": "项目文档文件，记录范围、计划、SDK 参考、审计和阶段性报告。",
+      "tags": [
+        "markdown",
+        "docs"
+      ]
+    },
+    {
+      "id": "document:docs/archive/SETUP_legacy.md",
+      "type": "document",
+      "name": "SETUP_legacy.md",
+      "filePath": "docs/archive/SETUP_legacy.md",
+      "summary": "项目文档文件，记录范围、计划、SDK 参考、审计和阶段性报告。",
+      "tags": [
+        "markdown",
+        "docs"
+      ]
+    },
+    {
+      "id": "document:docs/archive/SNIFFER_GUIDE_legacy.md",
+      "type": "document",
+      "name": "SNIFFER_GUIDE_legacy.md",
+      "filePath": "docs/archive/SNIFFER_GUIDE_legacy.md",
+      "summary": "项目文档文件，记录范围、计划、SDK 参考、审计和阶段性报告。",
+      "tags": [
+        "markdown",
+        "docs"
+      ]
+    },
+    {
+      "id": "document:docs/archive/SYSTEM_DESIGN_legacy.md",
+      "type": "document",
+      "name": "SYSTEM_DESIGN_legacy.md",
+      "filePath": "docs/archive/SYSTEM_DESIGN_legacy.md",
+      "summary": "项目文档文件，记录范围、计划、SDK 参考、审计和阶段性报告。",
+      "tags": [
+        "markdown",
+        "docs"
+      ]
+    },
+    {
+      "id": "document:docs/archive/UNIVERSAL_SYSTEM_DESIGN_legacy.md",
+      "type": "document",
+      "name": "UNIVERSAL_SYSTEM_DESIGN_legacy.md",
+      "filePath": "docs/archive/UNIVERSAL_SYSTEM_DESIGN_legacy.md",
+      "summary": "项目文档文件，记录范围、计划、SDK 参考、审计和阶段性报告。",
+      "tags": [
+        "markdown",
+        "docs"
+      ]
+    },
+    {
+      "id": "document:docs/audit-2026-05-29.md",
+      "type": "document",
+      "name": "audit-2026-05-29.md",
+      "filePath": "docs/audit-2026-05-29.md",
+      "summary": "项目文档文件，记录范围、计划、SDK 参考、审计和阶段性报告。",
+      "tags": [
+        "markdown",
+        "docs"
+      ]
+    },
+    {
+      "id": "document:docs/CHANGELOG_2026-02-15.md",
+      "type": "document",
+      "name": "CHANGELOG_2026-02-15.md",
+      "filePath": "docs/CHANGELOG_2026-02-15.md",
+      "summary": "项目文档文件，记录范围、计划、SDK 参考、审计和阶段性报告。",
+      "tags": [
+        "markdown",
+        "docs"
+      ]
+    },
+    {
+      "id": "document:docs/DIRECTORY_GUIDE.md",
+      "type": "document",
+      "name": "DIRECTORY_GUIDE.md",
+      "filePath": "docs/DIRECTORY_GUIDE.md",
+      "summary": "项目文档文件，记录范围、计划、SDK 参考、审计和阶段性报告。",
+      "tags": [
+        "markdown",
+        "docs"
+      ]
+    },
+    {
+      "id": "document:docs/project-report-v0.1.md",
+      "type": "document",
+      "name": "project-report-v0.1.md",
+      "filePath": "docs/project-report-v0.1.md",
+      "summary": "项目文档文件，记录范围、计划、SDK 参考、审计和阶段性报告。",
+      "tags": [
+        "markdown",
+        "docs"
+      ]
+    },
+    {
+      "id": "document:README.md",
+      "type": "document",
+      "name": "README.md",
+      "filePath": "README.md",
+      "summary": "项目总览文档，定义 Quest 3 MVP 目标、目录入口和当前工作边界。",
+      "tags": [
+        "markdown",
+        "docs"
+      ]
+    },
+    {
+      "id": "document:requirements.txt",
+      "type": "document",
+      "name": "requirements.txt",
+      "filePath": "requirements.txt",
+      "summary": "文档文件，提供项目背景、结构说明或实现记录。",
+      "tags": [
+        "txt",
+        "docs"
+      ]
+    },
+    {
+      "id": "config:Smart Room.sln",
+      "type": "config",
+      "name": "Smart Room.sln",
+      "filePath": "Smart Room.sln",
+      "summary": "配置文件，定义依赖、项目结构或运行参数。",
+      "tags": [
+        "sln",
+        "config"
+      ]
+    },
+    {
+      "id": "file:tests/test_vision_overlay_shaders.py",
+      "type": "file",
+      "name": "test_vision_overlay_shaders.py",
+      "filePath": "tests/test_vision_overlay_shaders.py",
+      "summary": "仓库级测试文件，用于校验 Unity 视觉脚本、着色器资源或辅助解析逻辑。",
+      "tags": [
+        "python",
+        "code",
+        "tests"
+      ]
+    },
+    {
+      "id": "file:tests/test_vision_renderer_feature_registration.py",
+      "type": "file",
+      "name": "test_vision_renderer_feature_registration.py",
+      "filePath": "tests/test_vision_renderer_feature_registration.py",
+      "summary": "仓库级测试文件，用于校验 Unity 视觉脚本、着色器资源或辅助解析逻辑。",
+      "tags": [
+        "python",
+        "code",
+        "tests"
+      ]
+    },
+    {
+      "id": "file:tests/test_vision_renderer_scripts.py",
+      "type": "file",
+      "name": "test_vision_renderer_scripts.py",
+      "filePath": "tests/test_vision_renderer_scripts.py",
+      "summary": "仓库级测试文件，用于校验 Unity 视觉脚本、着色器资源或辅助解析逻辑。",
+      "tags": [
+        "python",
+        "code",
+        "tests"
+      ]
+    },
+    {
+      "id": "file:tests/test_vision_shader_assets.py",
+      "type": "file",
+      "name": "test_vision_shader_assets.py",
+      "filePath": "tests/test_vision_shader_assets.py",
+      "summary": "仓库级测试文件，用于校验 Unity 视觉脚本、着色器资源或辅助解析逻辑。",
+      "tags": [
+        "python",
+        "code",
+        "tests"
+      ]
+    },
+    {
+      "id": "file:tests/vision_parser_runner/NewtonsoftJsonStubs.cs",
+      "type": "file",
+      "name": "NewtonsoftJsonStubs.cs",
+      "filePath": "tests/vision_parser_runner/NewtonsoftJsonStubs.cs",
+      "summary": "仓库级测试文件，用于校验 Unity 视觉脚本、着色器资源或辅助解析逻辑。",
+      "tags": [
+        "csharp",
+        "code",
+        "tests"
+      ]
+    },
+    {
+      "id": "file:tests/vision_parser_runner/Program.cs",
+      "type": "file",
+      "name": "Program.cs",
+      "filePath": "tests/vision_parser_runner/Program.cs",
+      "summary": "仓库级测试文件，用于校验 Unity 视觉脚本、着色器资源或辅助解析逻辑。",
+      "tags": [
+        "csharp",
+        "code",
+        "tests"
+      ]
+    },
+    {
+      "id": "file:tests/vision_parser_runner/UnityEngineStubs.cs",
+      "type": "file",
+      "name": "UnityEngineStubs.cs",
+      "filePath": "tests/vision_parser_runner/UnityEngineStubs.cs",
+      "summary": "仓库级测试文件，用于校验 Unity 视觉脚本、着色器资源或辅助解析逻辑。",
+      "tags": [
+        "csharp",
+        "code",
+        "tests"
+      ]
+    },
+    {
+      "id": "config:tests/vision_parser_runner/VisionParserRunner.csproj",
+      "type": "config",
+      "name": "VisionParserRunner.csproj",
+      "filePath": "tests/vision_parser_runner/VisionParserRunner.csproj",
+      "summary": "仓库级测试文件，用于校验 Unity 视觉脚本、着色器资源或辅助解析逻辑。",
+      "tags": [
+        "csproj",
+        "config",
+        "tests"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/CompositionLayers/UserSettings/CompositionLayersPreferences.asset",
+      "type": "file",
+      "name": "CompositionLayersPreferences.asset",
+      "filePath": "unity/Quest3Client/Assets/CompositionLayers/UserSettings/CompositionLayersPreferences.asset",
+      "summary": "Unity 资源或设置资产文件，提供运行时或编辑器配置。",
+      "tags": [
+        "asset",
+        "code",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/CompositionLayers/UserSettings/Resources/CompositionLayersRuntimeSettings.asset",
+      "type": "file",
+      "name": "CompositionLayersRuntimeSettings.asset",
+      "filePath": "unity/Quest3Client/Assets/CompositionLayers/UserSettings/Resources/CompositionLayersRuntimeSettings.asset",
+      "summary": "Unity 资源或设置资产文件，提供运行时或编辑器配置。",
+      "tags": [
+        "asset",
+        "code",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/InputSystem_Actions.inputactions",
+      "type": "file",
+      "name": "InputSystem_Actions.inputactions",
+      "filePath": "unity/Quest3Client/Assets/InputSystem_Actions.inputactions",
+      "summary": "项目文件，属于 Smart Room 工作区的实现、配置或支持材料。",
+      "tags": [
+        "inputactions",
+        "code"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Oculus/OculusProjectConfig.asset",
+      "type": "file",
+      "name": "OculusProjectConfig.asset",
+      "filePath": "unity/Quest3Client/Assets/Oculus/OculusProjectConfig.asset",
+      "summary": "Unity 资源或设置资产文件，提供运行时或编辑器配置。",
+      "tags": [
+        "asset",
+        "code",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "config:unity/Quest3Client/Assets/Plugins/Android/AndroidManifest.xml",
+      "type": "config",
+      "name": "AndroidManifest.xml",
+      "filePath": "unity/Quest3Client/Assets/Plugins/Android/AndroidManifest.xml",
+      "summary": "配置文件，定义依赖、项目结构或运行参数。",
+      "tags": [
+        "xml",
+        "config"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Readme.asset",
+      "type": "file",
+      "name": "Readme.asset",
+      "filePath": "unity/Quest3Client/Assets/Readme.asset",
+      "summary": "Unity 资源或设置资产文件，提供运行时或编辑器配置。",
+      "tags": [
+        "asset",
+        "code",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Resources/BboxWireframe.mat",
+      "type": "file",
+      "name": "BboxWireframe.mat",
+      "filePath": "unity/Quest3Client/Assets/Resources/BboxWireframe.mat",
+      "summary": "项目文件，属于 Smart Room 工作区的实现、配置或支持材料。",
+      "tags": [
+        "mat",
+        "code"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Resources/CursorMaterial.mat",
+      "type": "file",
+      "name": "CursorMaterial.mat",
+      "filePath": "unity/Quest3Client/Assets/Resources/CursorMaterial.mat",
+      "summary": "项目文件，属于 Smart Room 工作区的实现、配置或支持材料。",
+      "tags": [
+        "mat",
+        "code"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Resources/ImmersiveDebuggerSettings.asset",
+      "type": "file",
+      "name": "ImmersiveDebuggerSettings.asset",
+      "filePath": "unity/Quest3Client/Assets/Resources/ImmersiveDebuggerSettings.asset",
+      "summary": "Unity 资源或设置资产文件，提供运行时或编辑器配置。",
+      "tags": [
+        "asset",
+        "code",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Resources/InputActions.asset",
+      "type": "file",
+      "name": "InputActions.asset",
+      "filePath": "unity/Quest3Client/Assets/Resources/InputActions.asset",
+      "summary": "Unity 资源或设置资产文件，提供运行时或编辑器配置。",
+      "tags": [
+        "asset",
+        "code",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Resources/MetaXRAcousticMaterialMapping.asset",
+      "type": "file",
+      "name": "MetaXRAcousticMaterialMapping.asset",
+      "filePath": "unity/Quest3Client/Assets/Resources/MetaXRAcousticMaterialMapping.asset",
+      "summary": "Unity 资源或设置资产文件，提供运行时或编辑器配置。",
+      "tags": [
+        "asset",
+        "code",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Resources/MetaXRAcousticSettings.asset",
+      "type": "file",
+      "name": "MetaXRAcousticSettings.asset",
+      "filePath": "unity/Quest3Client/Assets/Resources/MetaXRAcousticSettings.asset",
+      "summary": "Unity 资源或设置资产文件，提供运行时或编辑器配置。",
+      "tags": [
+        "asset",
+        "code",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Resources/MetaXRAudioSettings.asset",
+      "type": "file",
+      "name": "MetaXRAudioSettings.asset",
+      "filePath": "unity/Quest3Client/Assets/Resources/MetaXRAudioSettings.asset",
+      "summary": "Unity 资源或设置资产文件，提供运行时或编辑器配置。",
+      "tags": [
+        "asset",
+        "code",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Resources/OculusRuntimeSettings.asset",
+      "type": "file",
+      "name": "OculusRuntimeSettings.asset",
+      "filePath": "unity/Quest3Client/Assets/Resources/OculusRuntimeSettings.asset",
+      "summary": "Unity 资源或设置资产文件，提供运行时或编辑器配置。",
+      "tags": [
+        "asset",
+        "code",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Resources/OVRBuildConfig.asset",
+      "type": "file",
+      "name": "OVRBuildConfig.asset",
+      "filePath": "unity/Quest3Client/Assets/Resources/OVRBuildConfig.asset",
+      "summary": "Unity 资源或设置资产文件，提供运行时或编辑器配置。",
+      "tags": [
+        "asset",
+        "code",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Resources/OVROverlayCanvasSettings.asset",
+      "type": "file",
+      "name": "OVROverlayCanvasSettings.asset",
+      "filePath": "unity/Quest3Client/Assets/Resources/OVROverlayCanvasSettings.asset",
+      "summary": "Unity 资源或设置资产文件，提供运行时或编辑器配置。",
+      "tags": [
+        "asset",
+        "code",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Resources/OVRPlatformToolSettings.asset",
+      "type": "file",
+      "name": "OVRPlatformToolSettings.asset",
+      "filePath": "unity/Quest3Client/Assets/Resources/OVRPlatformToolSettings.asset",
+      "summary": "Unity 资源或设置资产文件，提供运行时或编辑器配置。",
+      "tags": [
+        "asset",
+        "code",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Resources/SmartRoomDepthArraySliceToFloat.shader",
+      "type": "file",
+      "name": "SmartRoomDepthArraySliceToFloat.shader",
+      "filePath": "unity/Quest3Client/Assets/Resources/SmartRoomDepthArraySliceToFloat.shader",
+      "summary": "着色器文件，用于深度可视化、点云或视觉叠加效果。",
+      "tags": [
+        "shader",
+        "code"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Scenes/SampleScene.unity",
+      "type": "file",
+      "name": "SampleScene.unity",
+      "filePath": "unity/Quest3Client/Assets/Scenes/SampleScene.unity",
+      "summary": "Unity 场景文件，描述运行时对象、组件与场景布局。",
+      "tags": [
+        "unity",
+        "code",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Scenes/VisionOverlayRig.prefab",
+      "type": "file",
+      "name": "VisionOverlayRig.prefab",
+      "filePath": "unity/Quest3Client/Assets/Scenes/VisionOverlayRig.prefab",
+      "summary": "Unity 预制体文件，复用视觉叠加相关对象结构。",
+      "tags": [
+        "prefab",
+        "code",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Scripts/Interaction/ControllerRaycaster.cs",
+      "type": "file",
+      "name": "ControllerRaycaster.cs",
+      "filePath": "unity/Quest3Client/Assets/Scripts/Interaction/ControllerRaycaster.cs",
+      "summary": "Unity 交互层脚本，处理射线、抓取、深度探针与用户输入。",
+      "tags": [
+        "csharp",
+        "code",
+        "unity",
+        "interaction"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Scripts/Interaction/DepthCursor.cs",
+      "type": "file",
+      "name": "DepthCursor.cs",
+      "filePath": "unity/Quest3Client/Assets/Scripts/Interaction/DepthCursor.cs",
+      "summary": "Unity 交互层脚本，处理射线、抓取、深度探针与用户输入。",
+      "tags": [
+        "csharp",
+        "code",
+        "unity",
+        "interaction"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Scripts/Interaction/ObjectGrabber.cs",
+      "type": "file",
+      "name": "ObjectGrabber.cs",
+      "filePath": "unity/Quest3Client/Assets/Scripts/Interaction/ObjectGrabber.cs",
+      "summary": "Unity 交互层脚本，处理射线、抓取、深度探针与用户输入。",
+      "tags": [
+        "csharp",
+        "code",
+        "unity",
+        "interaction"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Scripts/Interaction/TriggerDepthProbe.cs",
+      "type": "file",
+      "name": "TriggerDepthProbe.cs",
+      "filePath": "unity/Quest3Client/Assets/Scripts/Interaction/TriggerDepthProbe.cs",
+      "summary": "Unity 交互层脚本，处理射线、抓取、深度探针与用户输入。",
+      "tags": [
+        "csharp",
+        "code",
+        "unity",
+        "interaction"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Scripts/Networking/BackendCommunicationManager.cs",
+      "type": "file",
+      "name": "BackendCommunicationManager.cs",
+      "filePath": "unity/Quest3Client/Assets/Scripts/Networking/BackendCommunicationManager.cs",
+      "summary": "Unity 侧网络枢纽，负责控制、RGB、深度与视觉通道的 WebSocket 连接与发送队列。",
+      "tags": [
+        "csharp",
+        "code",
+        "unity",
+        "networking"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Scripts/Networking/DepthFrameSampler.cs",
+      "type": "file",
+      "name": "DepthFrameSampler.cs",
+      "filePath": "unity/Quest3Client/Assets/Scripts/Networking/DepthFrameSampler.cs",
+      "summary": "Unity 网络与流处理相关文件，负责采样、编码、传输或消息解析。",
+      "tags": [
+        "csharp",
+        "code",
+        "unity",
+        "networking"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Scripts/Networking/DepthStreamModule.cs",
+      "type": "file",
+      "name": "DepthStreamModule.cs",
+      "filePath": "unity/Quest3Client/Assets/Scripts/Networking/DepthStreamModule.cs",
+      "summary": "Unity 网络与流处理相关文件，负责采样、编码、传输或消息解析。",
+      "tags": [
+        "csharp",
+        "code",
+        "unity",
+        "networking"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Scripts/Networking/DepthViewportRaycast.cs",
+      "type": "file",
+      "name": "DepthViewportRaycast.cs",
+      "filePath": "unity/Quest3Client/Assets/Scripts/Networking/DepthViewportRaycast.cs",
+      "summary": "Unity 网络与流处理相关文件，负责采样、编码、传输或消息解析。",
+      "tags": [
+        "csharp",
+        "code",
+        "unity",
+        "networking"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Scripts/Networking/HeartbeatModule.cs",
+      "type": "file",
+      "name": "HeartbeatModule.cs",
+      "filePath": "unity/Quest3Client/Assets/Scripts/Networking/HeartbeatModule.cs",
+      "summary": "Unity 网络与流处理相关文件，负责采样、编码、传输或消息解析。",
+      "tags": [
+        "csharp",
+        "code",
+        "unity",
+        "networking"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Scripts/Networking/PixelProjector.cs",
+      "type": "file",
+      "name": "PixelProjector.cs",
+      "filePath": "unity/Quest3Client/Assets/Scripts/Networking/PixelProjector.cs",
+      "summary": "Unity 网络与流处理相关文件，负责采样、编码、传输或消息解析。",
+      "tags": [
+        "csharp",
+        "code",
+        "unity",
+        "networking"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Scripts/Networking/RaycastQueryModule.cs",
+      "type": "file",
+      "name": "RaycastQueryModule.cs",
+      "filePath": "unity/Quest3Client/Assets/Scripts/Networking/RaycastQueryModule.cs",
+      "summary": "Unity 网络与流处理相关文件，负责采样、编码、传输或消息解析。",
+      "tags": [
+        "csharp",
+        "code",
+        "unity",
+        "networking"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Scripts/Networking/RgbStreamModule.cs",
+      "type": "file",
+      "name": "RgbStreamModule.cs",
+      "filePath": "unity/Quest3Client/Assets/Scripts/Networking/RgbStreamModule.cs",
+      "summary": "Unity 网络与流处理相关文件，负责采样、编码、传输或消息解析。",
+      "tags": [
+        "csharp",
+        "code",
+        "unity",
+        "networking"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Scripts/Networking/StreamTransportSwitcher.cs",
+      "type": "file",
+      "name": "StreamTransportSwitcher.cs",
+      "filePath": "unity/Quest3Client/Assets/Scripts/Networking/StreamTransportSwitcher.cs",
+      "summary": "Unity 网络与流处理相关文件，负责采样、编码、传输或消息解析。",
+      "tags": [
+        "csharp",
+        "code",
+        "unity",
+        "networking"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Scripts/Networking/VisionContracts.cs",
+      "type": "file",
+      "name": "VisionContracts.cs",
+      "filePath": "unity/Quest3Client/Assets/Scripts/Networking/VisionContracts.cs",
+      "summary": "Unity 网络与流处理相关文件，负责采样、编码、传输或消息解析。",
+      "tags": [
+        "csharp",
+        "code",
+        "unity",
+        "networking"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Scripts/Networking/VisionMaskSampling.cs",
+      "type": "file",
+      "name": "VisionMaskSampling.cs",
+      "filePath": "unity/Quest3Client/Assets/Scripts/Networking/VisionMaskSampling.cs",
+      "summary": "Unity 网络与流处理相关文件，负责采样、编码、传输或消息解析。",
+      "tags": [
+        "csharp",
+        "code",
+        "unity",
+        "networking"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Scripts/Networking/VisionMessageParser.cs",
+      "type": "file",
+      "name": "VisionMessageParser.cs",
+      "filePath": "unity/Quest3Client/Assets/Scripts/Networking/VisionMessageParser.cs",
+      "summary": "Unity 网络与流处理相关文件，负责采样、编码、传输或消息解析。",
+      "tags": [
+        "csharp",
+        "code",
+        "unity",
+        "networking"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Scripts/Networking/VisionMessageParser.Runtime.cs",
+      "type": "file",
+      "name": "VisionMessageParser.Runtime.cs",
+      "filePath": "unity/Quest3Client/Assets/Scripts/Networking/VisionMessageParser.Runtime.cs",
+      "summary": "Unity 网络与流处理相关文件，负责采样、编码、传输或消息解析。",
+      "tags": [
+        "csharp",
+        "code",
+        "unity",
+        "networking"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Scripts/Networking/VisionReceiverModule.cs",
+      "type": "file",
+      "name": "VisionReceiverModule.cs",
+      "filePath": "unity/Quest3Client/Assets/Scripts/Networking/VisionReceiverModule.cs",
+      "summary": "Unity 侧视觉结果接收器，将后端返回的对象结果映射到世界坐标并发布给渲染层。",
+      "tags": [
+        "csharp",
+        "code",
+        "unity",
+        "networking"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Scripts/Networking/VisionSocketOwnership.cs",
+      "type": "file",
+      "name": "VisionSocketOwnership.cs",
+      "filePath": "unity/Quest3Client/Assets/Scripts/Networking/VisionSocketOwnership.cs",
+      "summary": "Unity 网络与流处理相关文件，负责采样、编码、传输或消息解析。",
+      "tags": [
+        "csharp",
+        "code",
+        "unity",
+        "networking"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Scripts/Networking/VisionWorldPositionFactory.cs",
+      "type": "file",
+      "name": "VisionWorldPositionFactory.cs",
+      "filePath": "unity/Quest3Client/Assets/Scripts/Networking/VisionWorldPositionFactory.cs",
+      "summary": "Unity 网络与流处理相关文件，负责采样、编码、传输或消息解析。",
+      "tags": [
+        "csharp",
+        "code",
+        "unity",
+        "networking"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Scripts/Rendering/VisionLineUnlit.shader",
+      "type": "file",
+      "name": "VisionLineUnlit.shader",
+      "filePath": "unity/Quest3Client/Assets/Scripts/Rendering/VisionLineUnlit.shader",
+      "summary": "Unity 渲染配置与数据结构文件，支撑视觉叠加与线框表现。",
+      "tags": [
+        "shader",
+        "code",
+        "unity",
+        "rendering"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Scripts/Rendering/VisionOverlayConfig.cs",
+      "type": "file",
+      "name": "VisionOverlayConfig.cs",
+      "filePath": "unity/Quest3Client/Assets/Scripts/Rendering/VisionOverlayConfig.cs",
+      "summary": "Unity 渲染配置与数据结构文件，支撑视觉叠加与线框表现。",
+      "tags": [
+        "csharp",
+        "code",
+        "unity",
+        "rendering"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Scripts/Rendering/VisionOverlayUnlit.shader",
+      "type": "file",
+      "name": "VisionOverlayUnlit.shader",
+      "filePath": "unity/Quest3Client/Assets/Scripts/Rendering/VisionOverlayUnlit.shader",
+      "summary": "Unity 渲染配置与数据结构文件，支撑视觉叠加与线框表现。",
+      "tags": [
+        "shader",
+        "code",
+        "unity",
+        "rendering"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Scripts/Rendering/VisionRenderData.cs",
+      "type": "file",
+      "name": "VisionRenderData.cs",
+      "filePath": "unity/Quest3Client/Assets/Scripts/Rendering/VisionRenderData.cs",
+      "summary": "Unity 渲染配置与数据结构文件，支撑视觉叠加与线框表现。",
+      "tags": [
+        "csharp",
+        "code",
+        "unity",
+        "rendering"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Scripts/Scanning/DepthPointCloudRenderer.cs",
+      "type": "file",
+      "name": "DepthPointCloudRenderer.cs",
+      "filePath": "unity/Quest3Client/Assets/Scripts/Scanning/DepthPointCloudRenderer.cs",
+      "summary": "C# 源文件，参与 Unity 客户端的网络、交互、渲染或测试逻辑。",
+      "tags": [
+        "csharp",
+        "code"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Scripts/Tracking/TrackingManager.cs",
+      "type": "file",
+      "name": "TrackingManager.cs",
+      "filePath": "unity/Quest3Client/Assets/Scripts/Tracking/TrackingManager.cs",
+      "summary": "Unity 侧交互追踪管理器，负责触发请求、读取深度/像素信息并与后端追踪 API 协同。",
+      "tags": [
+        "csharp",
+        "code",
+        "unity",
+        "tracking"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Scripts/UI/HeadLockedPanelFollower.cs",
+      "type": "file",
+      "name": "HeadLockedPanelFollower.cs",
+      "filePath": "unity/Quest3Client/Assets/Scripts/UI/HeadLockedPanelFollower.cs",
+      "summary": "C# 源文件，参与 Unity 客户端的网络、交互、渲染或测试逻辑。",
+      "tags": [
+        "csharp",
+        "code"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Scripts/Vision/VisionColorPalette.cs",
+      "type": "file",
+      "name": "VisionColorPalette.cs",
+      "filePath": "unity/Quest3Client/Assets/Scripts/Vision/VisionColorPalette.cs",
+      "summary": "Unity 视觉呈现层脚本，负责标签、遮罩、颜色表和覆盖物展示。",
+      "tags": [
+        "csharp",
+        "code",
+        "unity",
+        "vision"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Scripts/Vision/VisionFrameProcessedData.cs",
+      "type": "file",
+      "name": "VisionFrameProcessedData.cs",
+      "filePath": "unity/Quest3Client/Assets/Scripts/Vision/VisionFrameProcessedData.cs",
+      "summary": "Unity 视觉呈现层脚本，负责标签、遮罩、颜色表和覆盖物展示。",
+      "tags": [
+        "csharp",
+        "code",
+        "unity",
+        "vision"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Scripts/Vision/VisionLabelPool.cs",
+      "type": "file",
+      "name": "VisionLabelPool.cs",
+      "filePath": "unity/Quest3Client/Assets/Scripts/Vision/VisionLabelPool.cs",
+      "summary": "Unity 视觉呈现层脚本，负责标签、遮罩、颜色表和覆盖物展示。",
+      "tags": [
+        "csharp",
+        "code",
+        "unity",
+        "vision"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Scripts/Vision/VisionMaskOverlay.cs",
+      "type": "file",
+      "name": "VisionMaskOverlay.cs",
+      "filePath": "unity/Quest3Client/Assets/Scripts/Vision/VisionMaskOverlay.cs",
+      "summary": "Unity 视觉呈现层脚本，负责标签、遮罩、颜色表和覆盖物展示。",
+      "tags": [
+        "csharp",
+        "code",
+        "unity",
+        "vision"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Scripts/Vision/VisionObjectColorTable.cs",
+      "type": "file",
+      "name": "VisionObjectColorTable.cs",
+      "filePath": "unity/Quest3Client/Assets/Scripts/Vision/VisionObjectColorTable.cs",
+      "summary": "Unity 视觉呈现层脚本，负责标签、遮罩、颜色表和覆盖物展示。",
+      "tags": [
+        "csharp",
+        "code",
+        "unity",
+        "vision"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Scripts/Vision/VisionOverlayManager.cs",
+      "type": "file",
+      "name": "VisionOverlayManager.cs",
+      "filePath": "unity/Quest3Client/Assets/Scripts/Vision/VisionOverlayManager.cs",
+      "summary": "Unity 视觉呈现层脚本，负责标签、遮罩、颜色表和覆盖物展示。",
+      "tags": [
+        "csharp",
+        "code",
+        "unity",
+        "vision"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Scripts/Vision/VisionRenderConfig.cs",
+      "type": "file",
+      "name": "VisionRenderConfig.cs",
+      "filePath": "unity/Quest3Client/Assets/Scripts/Vision/VisionRenderConfig.cs",
+      "summary": "Unity 视觉呈现层脚本，负责标签、遮罩、颜色表和覆盖物展示。",
+      "tags": [
+        "csharp",
+        "code",
+        "unity",
+        "vision"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Settings/DefaultVolumeProfile.asset",
+      "type": "file",
+      "name": "DefaultVolumeProfile.asset",
+      "filePath": "unity/Quest3Client/Assets/Settings/DefaultVolumeProfile.asset",
+      "summary": "Unity 资源或设置资产文件，提供运行时或编辑器配置。",
+      "tags": [
+        "asset",
+        "code",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Settings/Mobile_Renderer.asset",
+      "type": "file",
+      "name": "Mobile_Renderer.asset",
+      "filePath": "unity/Quest3Client/Assets/Settings/Mobile_Renderer.asset",
+      "summary": "Unity 资源或设置资产文件，提供运行时或编辑器配置。",
+      "tags": [
+        "asset",
+        "code",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Settings/Mobile_RPAsset.asset",
+      "type": "file",
+      "name": "Mobile_RPAsset.asset",
+      "filePath": "unity/Quest3Client/Assets/Settings/Mobile_RPAsset.asset",
+      "summary": "Unity 资源或设置资产文件，提供运行时或编辑器配置。",
+      "tags": [
+        "asset",
+        "code",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Settings/PC_Renderer.asset",
+      "type": "file",
+      "name": "PC_Renderer.asset",
+      "filePath": "unity/Quest3Client/Assets/Settings/PC_Renderer.asset",
+      "summary": "Unity 资源或设置资产文件，提供运行时或编辑器配置。",
+      "tags": [
+        "asset",
+        "code",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Settings/PC_RPAsset.asset",
+      "type": "file",
+      "name": "PC_RPAsset.asset",
+      "filePath": "unity/Quest3Client/Assets/Settings/PC_RPAsset.asset",
+      "summary": "Unity 资源或设置资产文件，提供运行时或编辑器配置。",
+      "tags": [
+        "asset",
+        "code",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Settings/SampleSceneProfile.asset",
+      "type": "file",
+      "name": "SampleSceneProfile.asset",
+      "filePath": "unity/Quest3Client/Assets/Settings/SampleSceneProfile.asset",
+      "summary": "Unity 资源或设置资产文件，提供运行时或编辑器配置。",
+      "tags": [
+        "asset",
+        "code",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Settings/UniversalRenderPipelineGlobalSettings.asset",
+      "type": "file",
+      "name": "UniversalRenderPipelineGlobalSettings.asset",
+      "filePath": "unity/Quest3Client/Assets/Settings/UniversalRenderPipelineGlobalSettings.asset",
+      "summary": "Unity 资源或设置资产文件，提供运行时或编辑器配置。",
+      "tags": [
+        "asset",
+        "code",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Settings/VisionColorPalette.asset",
+      "type": "file",
+      "name": "VisionColorPalette.asset",
+      "filePath": "unity/Quest3Client/Assets/Settings/VisionColorPalette.asset",
+      "summary": "Unity 资源或设置资产文件，提供运行时或编辑器配置。",
+      "tags": [
+        "asset",
+        "code",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Settings/VisionRenderConfig.asset",
+      "type": "file",
+      "name": "VisionRenderConfig.asset",
+      "filePath": "unity/Quest3Client/Assets/Settings/VisionRenderConfig.asset",
+      "summary": "Unity 资源或设置资产文件，提供运行时或编辑器配置。",
+      "tags": [
+        "asset",
+        "code",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Shaders/DepthArraySliceToFloat.shader",
+      "type": "file",
+      "name": "DepthArraySliceToFloat.shader",
+      "filePath": "unity/Quest3Client/Assets/Shaders/DepthArraySliceToFloat.shader",
+      "summary": "着色器文件，用于深度可视化、点云或视觉叠加效果。",
+      "tags": [
+        "shader",
+        "code"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Shaders/DepthPointCloud.shader",
+      "type": "file",
+      "name": "DepthPointCloud.shader",
+      "filePath": "unity/Quest3Client/Assets/Shaders/DepthPointCloud.shader",
+      "summary": "着色器文件，用于深度可视化、点云或视觉叠加效果。",
+      "tags": [
+        "shader",
+        "code"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Shaders/DepthProbeGaussian.shader",
+      "type": "file",
+      "name": "DepthProbeGaussian.shader",
+      "filePath": "unity/Quest3Client/Assets/Shaders/DepthProbeGaussian.shader",
+      "summary": "着色器文件，用于深度可视化、点云或视觉叠加效果。",
+      "tags": [
+        "shader",
+        "code"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Shaders/DepthProbeLit.shader",
+      "type": "file",
+      "name": "DepthProbeLit.shader",
+      "filePath": "unity/Quest3Client/Assets/Shaders/DepthProbeLit.shader",
+      "summary": "着色器文件，用于深度可视化、点云或视觉叠加效果。",
+      "tags": [
+        "shader",
+        "code"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Shaders/DepthProbePoint.shader",
+      "type": "file",
+      "name": "DepthProbePoint.shader",
+      "filePath": "unity/Quest3Client/Assets/Shaders/DepthProbePoint.shader",
+      "summary": "着色器文件，用于深度可视化、点云或视觉叠加效果。",
+      "tags": [
+        "shader",
+        "code"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Shaders/VisionAnchorSphere.shader",
+      "type": "file",
+      "name": "VisionAnchorSphere.shader",
+      "filePath": "unity/Quest3Client/Assets/Shaders/VisionAnchorSphere.shader",
+      "summary": "着色器文件，用于深度可视化、点云或视觉叠加效果。",
+      "tags": [
+        "shader",
+        "code"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/Shaders/VisionMaskOverlay.shader",
+      "type": "file",
+      "name": "VisionMaskOverlay.shader",
+      "filePath": "unity/Quest3Client/Assets/Shaders/VisionMaskOverlay.shader",
+      "summary": "着色器文件，用于深度可视化、点云或视觉叠加效果。",
+      "tags": [
+        "shader",
+        "code"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/XR/Loaders/OpenXRLoader.asset",
+      "type": "file",
+      "name": "OpenXRLoader.asset",
+      "filePath": "unity/Quest3Client/Assets/XR/Loaders/OpenXRLoader.asset",
+      "summary": "Unity 资源或设置资产文件，提供运行时或编辑器配置。",
+      "tags": [
+        "asset",
+        "code",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/XR/Loaders/SimulationLoader.asset",
+      "type": "file",
+      "name": "SimulationLoader.asset",
+      "filePath": "unity/Quest3Client/Assets/XR/Loaders/SimulationLoader.asset",
+      "summary": "Unity 资源或设置资产文件，提供运行时或编辑器配置。",
+      "tags": [
+        "asset",
+        "code",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/XR/Resources/XRSimulationRuntimeSettings.asset",
+      "type": "file",
+      "name": "XRSimulationRuntimeSettings.asset",
+      "filePath": "unity/Quest3Client/Assets/XR/Resources/XRSimulationRuntimeSettings.asset",
+      "summary": "Unity 资源或设置资产文件，提供运行时或编辑器配置。",
+      "tags": [
+        "asset",
+        "code",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/XR/Settings/OpenXR Editor Settings.asset",
+      "type": "file",
+      "name": "OpenXR Editor Settings.asset",
+      "filePath": "unity/Quest3Client/Assets/XR/Settings/OpenXR Editor Settings.asset",
+      "summary": "Unity 资源或设置资产文件，提供运行时或编辑器配置。",
+      "tags": [
+        "asset",
+        "code",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/XR/Settings/OpenXRPackageSettings.asset",
+      "type": "file",
+      "name": "OpenXRPackageSettings.asset",
+      "filePath": "unity/Quest3Client/Assets/XR/Settings/OpenXRPackageSettings.asset",
+      "summary": "Unity 资源或设置资产文件，提供运行时或编辑器配置。",
+      "tags": [
+        "asset",
+        "code",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/XR/Settings/XRSimulationSettings.asset",
+      "type": "file",
+      "name": "XRSimulationSettings.asset",
+      "filePath": "unity/Quest3Client/Assets/XR/Settings/XRSimulationSettings.asset",
+      "summary": "Unity 资源或设置资产文件，提供运行时或编辑器配置。",
+      "tags": [
+        "asset",
+        "code",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/XR/UserSimulationSettings/Resources/XRSimulationPreferences.asset",
+      "type": "file",
+      "name": "XRSimulationPreferences.asset",
+      "filePath": "unity/Quest3Client/Assets/XR/UserSimulationSettings/Resources/XRSimulationPreferences.asset",
+      "summary": "Unity 资源或设置资产文件，提供运行时或编辑器配置。",
+      "tags": [
+        "asset",
+        "code",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/XR/UserSimulationSettings/SimulationEnvironmentAssetsManager.asset",
+      "type": "file",
+      "name": "SimulationEnvironmentAssetsManager.asset",
+      "filePath": "unity/Quest3Client/Assets/XR/UserSimulationSettings/SimulationEnvironmentAssetsManager.asset",
+      "summary": "Unity 资源或设置资产文件，提供运行时或编辑器配置。",
+      "tags": [
+        "asset",
+        "code",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Assets/XR/XRGeneralSettingsPerBuildTarget.asset",
+      "type": "file",
+      "name": "XRGeneralSettingsPerBuildTarget.asset",
+      "filePath": "unity/Quest3Client/Assets/XR/XRGeneralSettingsPerBuildTarget.asset",
+      "summary": "Unity 资源或设置资产文件，提供运行时或编辑器配置。",
+      "tags": [
+        "asset",
+        "code",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "config:unity/Quest3Client/Packages/manifest.json",
+      "type": "config",
+      "name": "manifest.json",
+      "filePath": "unity/Quest3Client/Packages/manifest.json",
+      "summary": "Unity 包管理配置，声明 Meta XR、OpenXR、URP 等依赖。",
+      "tags": [
+        "json",
+        "config",
+        "unity"
+      ]
+    },
+    {
+      "id": "config:unity/Quest3Client/Packages/packages-lock.json",
+      "type": "config",
+      "name": "packages-lock.json",
+      "filePath": "unity/Quest3Client/Packages/packages-lock.json",
+      "summary": "Unity 包管理配置，声明 Meta XR、OpenXR、URP 等依赖。",
+      "tags": [
+        "json",
+        "config",
+        "unity"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/ProjectSettings/AudioManager.asset",
+      "type": "file",
+      "name": "AudioManager.asset",
+      "filePath": "unity/Quest3Client/ProjectSettings/AudioManager.asset",
+      "summary": "Unity 项目级设置文件，定义输入、渲染、XR 与编辑器行为。",
+      "tags": [
+        "asset",
+        "code",
+        "unity",
+        "config",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/ProjectSettings/ClusterInputManager.asset",
+      "type": "file",
+      "name": "ClusterInputManager.asset",
+      "filePath": "unity/Quest3Client/ProjectSettings/ClusterInputManager.asset",
+      "summary": "Unity 项目级设置文件，定义输入、渲染、XR 与编辑器行为。",
+      "tags": [
+        "asset",
+        "code",
+        "unity",
+        "config",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/ProjectSettings/DynamicsManager.asset",
+      "type": "file",
+      "name": "DynamicsManager.asset",
+      "filePath": "unity/Quest3Client/ProjectSettings/DynamicsManager.asset",
+      "summary": "Unity 项目级设置文件，定义输入、渲染、XR 与编辑器行为。",
+      "tags": [
+        "asset",
+        "code",
+        "unity",
+        "config",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/ProjectSettings/EditorBuildSettings.asset",
+      "type": "file",
+      "name": "EditorBuildSettings.asset",
+      "filePath": "unity/Quest3Client/ProjectSettings/EditorBuildSettings.asset",
+      "summary": "Unity 项目级设置文件，定义输入、渲染、XR 与编辑器行为。",
+      "tags": [
+        "asset",
+        "code",
+        "unity",
+        "config",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/ProjectSettings/EditorSettings.asset",
+      "type": "file",
+      "name": "EditorSettings.asset",
+      "filePath": "unity/Quest3Client/ProjectSettings/EditorSettings.asset",
+      "summary": "Unity 项目级设置文件，定义输入、渲染、XR 与编辑器行为。",
+      "tags": [
+        "asset",
+        "code",
+        "unity",
+        "config",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/ProjectSettings/GraphicsSettings.asset",
+      "type": "file",
+      "name": "GraphicsSettings.asset",
+      "filePath": "unity/Quest3Client/ProjectSettings/GraphicsSettings.asset",
+      "summary": "Unity 项目级设置文件，定义输入、渲染、XR 与编辑器行为。",
+      "tags": [
+        "asset",
+        "code",
+        "unity",
+        "config",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/ProjectSettings/InputManager.asset",
+      "type": "file",
+      "name": "InputManager.asset",
+      "filePath": "unity/Quest3Client/ProjectSettings/InputManager.asset",
+      "summary": "Unity 项目级设置文件，定义输入、渲染、XR 与编辑器行为。",
+      "tags": [
+        "asset",
+        "code",
+        "unity",
+        "config",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/ProjectSettings/MemorySettings.asset",
+      "type": "file",
+      "name": "MemorySettings.asset",
+      "filePath": "unity/Quest3Client/ProjectSettings/MemorySettings.asset",
+      "summary": "Unity 项目级设置文件，定义输入、渲染、XR 与编辑器行为。",
+      "tags": [
+        "asset",
+        "code",
+        "unity",
+        "config",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/ProjectSettings/MultiplayerManager.asset",
+      "type": "file",
+      "name": "MultiplayerManager.asset",
+      "filePath": "unity/Quest3Client/ProjectSettings/MultiplayerManager.asset",
+      "summary": "Unity 项目级设置文件，定义输入、渲染、XR 与编辑器行为。",
+      "tags": [
+        "asset",
+        "code",
+        "unity",
+        "config",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/ProjectSettings/NavMeshAreas.asset",
+      "type": "file",
+      "name": "NavMeshAreas.asset",
+      "filePath": "unity/Quest3Client/ProjectSettings/NavMeshAreas.asset",
+      "summary": "Unity 项目级设置文件，定义输入、渲染、XR 与编辑器行为。",
+      "tags": [
+        "asset",
+        "code",
+        "unity",
+        "config",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/ProjectSettings/PackageManagerSettings.asset",
+      "type": "file",
+      "name": "PackageManagerSettings.asset",
+      "filePath": "unity/Quest3Client/ProjectSettings/PackageManagerSettings.asset",
+      "summary": "Unity 项目级设置文件，定义输入、渲染、XR 与编辑器行为。",
+      "tags": [
+        "asset",
+        "code",
+        "unity",
+        "config",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/ProjectSettings/Physics2DSettings.asset",
+      "type": "file",
+      "name": "Physics2DSettings.asset",
+      "filePath": "unity/Quest3Client/ProjectSettings/Physics2DSettings.asset",
+      "summary": "Unity 项目级设置文件，定义输入、渲染、XR 与编辑器行为。",
+      "tags": [
+        "asset",
+        "code",
+        "unity",
+        "config",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/ProjectSettings/PresetManager.asset",
+      "type": "file",
+      "name": "PresetManager.asset",
+      "filePath": "unity/Quest3Client/ProjectSettings/PresetManager.asset",
+      "summary": "Unity 项目级设置文件，定义输入、渲染、XR 与编辑器行为。",
+      "tags": [
+        "asset",
+        "code",
+        "unity",
+        "config",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/ProjectSettings/ProjectSettings.asset",
+      "type": "file",
+      "name": "ProjectSettings.asset",
+      "filePath": "unity/Quest3Client/ProjectSettings/ProjectSettings.asset",
+      "summary": "Unity 项目级设置文件，定义输入、渲染、XR 与编辑器行为。",
+      "tags": [
+        "asset",
+        "code",
+        "unity",
+        "config",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "document:unity/Quest3Client/ProjectSettings/ProjectVersion.txt",
+      "type": "document",
+      "name": "ProjectVersion.txt",
+      "filePath": "unity/Quest3Client/ProjectSettings/ProjectVersion.txt",
+      "summary": "Unity 项目级设置文件，定义输入、渲染、XR 与编辑器行为。",
+      "tags": [
+        "txt",
+        "docs",
+        "unity",
+        "config"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/ProjectSettings/QualitySettings.asset",
+      "type": "file",
+      "name": "QualitySettings.asset",
+      "filePath": "unity/Quest3Client/ProjectSettings/QualitySettings.asset",
+      "summary": "Unity 项目级设置文件，定义输入、渲染、XR 与编辑器行为。",
+      "tags": [
+        "asset",
+        "code",
+        "unity",
+        "config",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "config:unity/Quest3Client/ProjectSettings/SceneTemplateSettings.json",
+      "type": "config",
+      "name": "SceneTemplateSettings.json",
+      "filePath": "unity/Quest3Client/ProjectSettings/SceneTemplateSettings.json",
+      "summary": "Unity 项目级设置文件，定义输入、渲染、XR 与编辑器行为。",
+      "tags": [
+        "json",
+        "config",
+        "unity"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/ProjectSettings/ShaderGraphSettings.asset",
+      "type": "file",
+      "name": "ShaderGraphSettings.asset",
+      "filePath": "unity/Quest3Client/ProjectSettings/ShaderGraphSettings.asset",
+      "summary": "Unity 项目级设置文件，定义输入、渲染、XR 与编辑器行为。",
+      "tags": [
+        "asset",
+        "code",
+        "unity",
+        "config",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/ProjectSettings/TagManager.asset",
+      "type": "file",
+      "name": "TagManager.asset",
+      "filePath": "unity/Quest3Client/ProjectSettings/TagManager.asset",
+      "summary": "Unity 项目级设置文件，定义输入、渲染、XR 与编辑器行为。",
+      "tags": [
+        "asset",
+        "code",
+        "unity",
+        "config",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/ProjectSettings/TimeManager.asset",
+      "type": "file",
+      "name": "TimeManager.asset",
+      "filePath": "unity/Quest3Client/ProjectSettings/TimeManager.asset",
+      "summary": "Unity 项目级设置文件，定义输入、渲染、XR 与编辑器行为。",
+      "tags": [
+        "asset",
+        "code",
+        "unity",
+        "config",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/ProjectSettings/UnityConnectSettings.asset",
+      "type": "file",
+      "name": "UnityConnectSettings.asset",
+      "filePath": "unity/Quest3Client/ProjectSettings/UnityConnectSettings.asset",
+      "summary": "Unity 项目级设置文件，定义输入、渲染、XR 与编辑器行为。",
+      "tags": [
+        "asset",
+        "code",
+        "unity",
+        "config",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/ProjectSettings/URPProjectSettings.asset",
+      "type": "file",
+      "name": "URPProjectSettings.asset",
+      "filePath": "unity/Quest3Client/ProjectSettings/URPProjectSettings.asset",
+      "summary": "Unity 项目级设置文件，定义输入、渲染、XR 与编辑器行为。",
+      "tags": [
+        "asset",
+        "code",
+        "unity",
+        "config",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/ProjectSettings/VersionControlSettings.asset",
+      "type": "file",
+      "name": "VersionControlSettings.asset",
+      "filePath": "unity/Quest3Client/ProjectSettings/VersionControlSettings.asset",
+      "summary": "Unity 项目级设置文件，定义输入、渲染、XR 与编辑器行为。",
+      "tags": [
+        "asset",
+        "code",
+        "unity",
+        "config",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/ProjectSettings/VFXManager.asset",
+      "type": "file",
+      "name": "VFXManager.asset",
+      "filePath": "unity/Quest3Client/ProjectSettings/VFXManager.asset",
+      "summary": "Unity 项目级设置文件，定义输入、渲染、XR 与编辑器行为。",
+      "tags": [
+        "asset",
+        "code",
+        "unity",
+        "config",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/ProjectSettings/XRSettings.asset",
+      "type": "file",
+      "name": "XRSettings.asset",
+      "filePath": "unity/Quest3Client/ProjectSettings/XRSettings.asset",
+      "summary": "Unity 项目级设置文件，定义输入、渲染、XR 与编辑器行为。",
+      "tags": [
+        "asset",
+        "code",
+        "unity",
+        "config",
+        "unity-asset"
+      ]
+    },
+    {
+      "id": "config:unity/Quest3Client/Tests/DepthViewportRaycast.ConsoleTests/DepthViewportRaycast.ConsoleTests.csproj",
+      "type": "config",
+      "name": "DepthViewportRaycast.ConsoleTests.csproj",
+      "filePath": "unity/Quest3Client/Tests/DepthViewportRaycast.ConsoleTests/DepthViewportRaycast.ConsoleTests.csproj",
+      "summary": "Unity 控制台测试项目，用于验证消息解析、标签格式化、遮罩采样和叠加逻辑。",
+      "tags": [
+        "csproj",
+        "config"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Tests/DepthViewportRaycast.ConsoleTests/Program.cs",
+      "type": "file",
+      "name": "Program.cs",
+      "filePath": "unity/Quest3Client/Tests/DepthViewportRaycast.ConsoleTests/Program.cs",
+      "summary": "Unity 控制台测试项目，用于验证消息解析、标签格式化、遮罩采样和叠加逻辑。",
+      "tags": [
+        "csharp",
+        "code"
+      ]
+    },
+    {
+      "id": "config:unity/Quest3Client/Tests/PassthroughRayResolver.ConsoleTests/PassthroughRayResolver.ConsoleTests.csproj",
+      "type": "config",
+      "name": "PassthroughRayResolver.ConsoleTests.csproj",
+      "filePath": "unity/Quest3Client/Tests/PassthroughRayResolver.ConsoleTests/PassthroughRayResolver.ConsoleTests.csproj",
+      "summary": "Unity 控制台测试项目，用于验证消息解析、标签格式化、遮罩采样和叠加逻辑。",
+      "tags": [
+        "csproj",
+        "config"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Tests/PassthroughRayResolver.ConsoleTests/Program.cs",
+      "type": "file",
+      "name": "Program.cs",
+      "filePath": "unity/Quest3Client/Tests/PassthroughRayResolver.ConsoleTests/Program.cs",
+      "summary": "Unity 控制台测试项目，用于验证消息解析、标签格式化、遮罩采样和叠加逻辑。",
+      "tags": [
+        "csharp",
+        "code"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Tests/VisionLabelFormatting.ConsoleTests/Program.cs",
+      "type": "file",
+      "name": "Program.cs",
+      "filePath": "unity/Quest3Client/Tests/VisionLabelFormatting.ConsoleTests/Program.cs",
+      "summary": "Unity 控制台测试项目，用于验证消息解析、标签格式化、遮罩采样和叠加逻辑。",
+      "tags": [
+        "csharp",
+        "code"
+      ]
+    },
+    {
+      "id": "config:unity/Quest3Client/Tests/VisionLabelFormatting.ConsoleTests/VisionLabelFormatting.ConsoleTests.csproj",
+      "type": "config",
+      "name": "VisionLabelFormatting.ConsoleTests.csproj",
+      "filePath": "unity/Quest3Client/Tests/VisionLabelFormatting.ConsoleTests/VisionLabelFormatting.ConsoleTests.csproj",
+      "summary": "Unity 控制台测试项目，用于验证消息解析、标签格式化、遮罩采样和叠加逻辑。",
+      "tags": [
+        "csproj",
+        "config"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Tests/VisionLabelPool.ConsoleTests/Program.cs",
+      "type": "file",
+      "name": "Program.cs",
+      "filePath": "unity/Quest3Client/Tests/VisionLabelPool.ConsoleTests/Program.cs",
+      "summary": "Unity 控制台测试项目，用于验证消息解析、标签格式化、遮罩采样和叠加逻辑。",
+      "tags": [
+        "csharp",
+        "code"
+      ]
+    },
+    {
+      "id": "config:unity/Quest3Client/Tests/VisionLabelPool.ConsoleTests/VisionLabelPool.ConsoleTests.csproj",
+      "type": "config",
+      "name": "VisionLabelPool.ConsoleTests.csproj",
+      "filePath": "unity/Quest3Client/Tests/VisionLabelPool.ConsoleTests/VisionLabelPool.ConsoleTests.csproj",
+      "summary": "Unity 控制台测试项目，用于验证消息解析、标签格式化、遮罩采样和叠加逻辑。",
+      "tags": [
+        "csproj",
+        "config"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Tests/VisionMaskSampling.ConsoleTests/Program.cs",
+      "type": "file",
+      "name": "Program.cs",
+      "filePath": "unity/Quest3Client/Tests/VisionMaskSampling.ConsoleTests/Program.cs",
+      "summary": "Unity 控制台测试项目，用于验证消息解析、标签格式化、遮罩采样和叠加逻辑。",
+      "tags": [
+        "csharp",
+        "code"
+      ]
+    },
+    {
+      "id": "config:unity/Quest3Client/Tests/VisionMaskSampling.ConsoleTests/VisionMaskSampling.ConsoleTests.csproj",
+      "type": "config",
+      "name": "VisionMaskSampling.ConsoleTests.csproj",
+      "filePath": "unity/Quest3Client/Tests/VisionMaskSampling.ConsoleTests/VisionMaskSampling.ConsoleTests.csproj",
+      "summary": "Unity 控制台测试项目，用于验证消息解析、标签格式化、遮罩采样和叠加逻辑。",
+      "tags": [
+        "csproj",
+        "config"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Tests/VisionMessageParser.ConsoleTests/Program.cs",
+      "type": "file",
+      "name": "Program.cs",
+      "filePath": "unity/Quest3Client/Tests/VisionMessageParser.ConsoleTests/Program.cs",
+      "summary": "Unity 控制台测试项目，用于验证消息解析、标签格式化、遮罩采样和叠加逻辑。",
+      "tags": [
+        "csharp",
+        "code"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Tests/VisionMessageParser.ConsoleTests/UnityEngineStubs.cs",
+      "type": "file",
+      "name": "UnityEngineStubs.cs",
+      "filePath": "unity/Quest3Client/Tests/VisionMessageParser.ConsoleTests/UnityEngineStubs.cs",
+      "summary": "Unity 控制台测试项目，用于验证消息解析、标签格式化、遮罩采样和叠加逻辑。",
+      "tags": [
+        "csharp",
+        "code"
+      ]
+    },
+    {
+      "id": "config:unity/Quest3Client/Tests/VisionMessageParser.ConsoleTests/VisionMessageParser.ConsoleTests.csproj",
+      "type": "config",
+      "name": "VisionMessageParser.ConsoleTests.csproj",
+      "filePath": "unity/Quest3Client/Tests/VisionMessageParser.ConsoleTests/VisionMessageParser.ConsoleTests.csproj",
+      "summary": "Unity 控制台测试项目，用于验证消息解析、标签格式化、遮罩采样和叠加逻辑。",
+      "tags": [
+        "csproj",
+        "config"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Tests/VisionOverlayManager.ConsoleTests/Program.cs",
+      "type": "file",
+      "name": "Program.cs",
+      "filePath": "unity/Quest3Client/Tests/VisionOverlayManager.ConsoleTests/Program.cs",
+      "summary": "Unity 控制台测试项目，用于验证消息解析、标签格式化、遮罩采样和叠加逻辑。",
+      "tags": [
+        "csharp",
+        "code"
+      ]
+    },
+    {
+      "id": "config:unity/Quest3Client/Tests/VisionOverlayManager.ConsoleTests/VisionOverlayManager.ConsoleTests.csproj",
+      "type": "config",
+      "name": "VisionOverlayManager.ConsoleTests.csproj",
+      "filePath": "unity/Quest3Client/Tests/VisionOverlayManager.ConsoleTests/VisionOverlayManager.ConsoleTests.csproj",
+      "summary": "Unity 控制台测试项目，用于验证消息解析、标签格式化、遮罩采样和叠加逻辑。",
+      "tags": [
+        "csproj",
+        "config"
+      ]
+    },
+    {
+      "id": "file:unity/Quest3Client/Tests/VisionShaderAsset.ConsoleTests/Program.cs",
+      "type": "file",
+      "name": "Program.cs",
+      "filePath": "unity/Quest3Client/Tests/VisionShaderAsset.ConsoleTests/Program.cs",
+      "summary": "Unity 控制台测试项目，用于验证消息解析、标签格式化、遮罩采样和叠加逻辑。",
+      "tags": [
+        "csharp",
+        "code"
+      ]
+    },
+    {
+      "id": "config:unity/Quest3Client/Tests/VisionShaderAsset.ConsoleTests/VisionShaderAsset.ConsoleTests.csproj",
+      "type": "config",
+      "name": "VisionShaderAsset.ConsoleTests.csproj",
+      "filePath": "unity/Quest3Client/Tests/VisionShaderAsset.ConsoleTests/VisionShaderAsset.ConsoleTests.csproj",
+      "summary": "Unity 控制台测试项目，用于验证消息解析、标签格式化、遮罩采样和叠加逻辑。",
+      "tags": [
+        "csproj",
+        "config"
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "source": "file:backend/quest3server/__main__.py",
+      "target": "file:backend/quest3server/run_dashboard.py",
+      "type": "imports",
+      "weight": 0.7
+    },
+    {
+      "source": "file:backend/quest3server/main.py",
+      "target": "file:backend/quest3server/log_manager.py",
+      "type": "imports",
+      "weight": 0.7
+    },
+    {
+      "source": "file:backend/quest3server/main.py",
+      "target": "file:backend/quest3server/tracking/__init__.py",
+      "type": "imports",
+      "weight": 0.7
+    },
+    {
+      "source": "file:backend/quest3server/tracking/__init__.py",
+      "target": "file:backend/quest3server/tracking/engine.py",
+      "type": "imports",
+      "weight": 0.7
+    },
+    {
+      "source": "file:backend/quest3server/tracking/__init__.py",
+      "target": "file:backend/quest3server/tracking/types.py",
+      "type": "imports",
+      "weight": 0.7
+    },
+    {
+      "source": "file:backend/quest3server/tracking/engine.py",
+      "target": "file:backend/quest3server/tracking/types.py",
+      "type": "imports",
+      "weight": 0.7
+    },
+    {
+      "source": "file:backend/quest3server/vision/__init__.py",
+      "target": "file:backend/quest3server/vision/providers.py",
+      "type": "imports",
+      "weight": 0.7
+    },
+    {
+      "source": "file:backend/quest3server/vision/__init__.py",
+      "target": "file:backend/quest3server/vision/runtime.py",
+      "type": "imports",
+      "weight": 0.7
+    },
+    {
+      "source": "file:backend/quest3server/vision/metrics.py",
+      "target": "file:backend/quest3server/vision/types.py",
+      "type": "imports",
+      "weight": 0.7
+    },
+    {
+      "source": "file:backend/quest3server/vision/pipeline.py",
+      "target": "file:backend/quest3server/vision/metrics.py",
+      "type": "imports",
+      "weight": 0.7
+    },
+    {
+      "source": "file:backend/quest3server/vision/pipeline.py",
+      "target": "file:backend/quest3server/vision/rle.py",
+      "type": "imports",
+      "weight": 0.7
+    },
+    {
+      "source": "file:backend/quest3server/vision/pipeline.py",
+      "target": "file:backend/quest3server/vision/types.py",
+      "type": "imports",
+      "weight": 0.7
+    },
+    {
+      "source": "file:backend/quest3server/vision/providers.py",
+      "target": "file:backend/quest3server/vision/pipeline.py",
+      "type": "imports",
+      "weight": 0.7
+    },
+    {
+      "source": "file:backend/quest3server/vision/providers.py",
+      "target": "file:backend/quest3server/vision/types.py",
+      "type": "imports",
+      "weight": 0.7
+    },
+    {
+      "source": "file:backend/quest3server/vision/runtime.py",
+      "target": "file:backend/quest3server/log_manager.py",
+      "type": "imports",
+      "weight": 0.7
+    },
+    {
+      "source": "file:backend/quest3server/vision/runtime.py",
+      "target": "file:backend/quest3server/vision/pipeline.py",
+      "type": "imports",
+      "weight": 0.7
+    },
+    {
+      "source": "file:backend/quest3server/vision/runtime.py",
+      "target": "file:backend/quest3server/vision/providers.py",
+      "type": "imports",
+      "weight": 0.7
+    },
+    {
+      "source": "file:backend/quest3server/vision/runtime.py",
+      "target": "file:backend/quest3server/vision/types.py",
+      "type": "imports",
+      "weight": 0.7
+    }
+  ],
+  "layers": [
+    {
+      "id": "layer:documentation",
+      "name": "文档与范围",
+      "description": "包含项目范围、实施计划、SDK 参考、审计记录与目录说明文档。",
+      "nodeIds": [
+        "document:docs/01_MVP_SCOPE.md",
+        "document:docs/02_QUEST3_UNITY_STREAMING_PLAN.md",
+        "document:docs/03_SDK_REFERENCE.md",
+        "document:docs/04_QUEST3_STREAMING_TECH_REPORT.md",
+        "document:docs/archive/IMPLEMENTATION_SUMMARY_legacy.md",
+        "document:docs/archive/MQTT_AUTO_DISCOVERY_DESIGN_legacy.md",
+        "document:docs/archive/README.md",
+        "document:docs/archive/SETUP_legacy.md",
+        "document:docs/archive/SNIFFER_GUIDE_legacy.md",
+        "document:docs/archive/SYSTEM_DESIGN_legacy.md",
+        "document:docs/archive/UNIVERSAL_SYSTEM_DESIGN_legacy.md",
+        "document:docs/audit-2026-05-29.md",
+        "document:docs/CHANGELOG_2026-02-15.md",
+        "document:docs/DIRECTORY_GUIDE.md",
+        "document:docs/project-report-v0.1.md",
+        "document:README.md"
+      ]
+    },
+    {
+      "id": "layer:backend-runtime",
+      "name": "后端运行时",
+      "description": "包含 Python 接收服务、视觉运行时、跟踪引擎及其直接配置。",
+      "nodeIds": [
+        "config:backend/pyproject.toml",
+        "file:backend/quest3server/__init__.py",
+        "file:backend/quest3server/__main__.py",
+        "file:backend/quest3server/log_manager.py",
+        "file:backend/quest3server/main.py",
+        "file:backend/quest3server/run_dashboard.py",
+        "file:backend/quest3server/tracking/__init__.py",
+        "file:backend/quest3server/tracking/depth_alignment.py",
+        "file:backend/quest3server/tracking/engine.py",
+        "file:backend/quest3server/tracking/types.py",
+        "file:backend/quest3server/vision/__init__.py",
+        "file:backend/quest3server/vision/metrics.py",
+        "file:backend/quest3server/vision/pipeline.py",
+        "file:backend/quest3server/vision/providers.py",
+        "file:backend/quest3server/vision/rle.py",
+        "file:backend/quest3server/vision/runtime.py",
+        "file:backend/quest3server/vision/types.py"
+      ]
+    },
+    {
+      "id": "layer:backend-tests",
+      "name": "后端与仓库测试",
+      "description": "包含 Python 测试和仓库级 C# 辅助测试，用于验证核心行为。",
+      "nodeIds": [
+        "file:tests/test_vision_overlay_shaders.py",
+        "file:tests/test_vision_renderer_feature_registration.py",
+        "file:tests/test_vision_renderer_scripts.py",
+        "file:tests/test_vision_shader_assets.py",
+        "file:tests/vision_parser_runner/NewtonsoftJsonStubs.cs",
+        "file:tests/vision_parser_runner/Program.cs",
+        "file:tests/vision_parser_runner/UnityEngineStubs.cs",
+        "config:tests/vision_parser_runner/VisionParserRunner.csproj"
+      ]
+    },
+    {
+      "id": "layer:shared-contracts",
+      "name": "共享契约",
+      "description": "包含跨端共享的数据结构与渲染契约定义。",
+      "nodeIds": [
+        "file:contracts/bbox_wireframe_render.ts",
+        "file:contracts/types.ts"
+      ]
+    },
+    {
+      "id": "layer:unity-runtime",
+      "name": "Unity 运行时脚本",
+      "description": "包含 Quest 3 客户端的网络、交互、追踪、视觉和渲染脚本。",
+      "nodeIds": [
+        "file:unity/Quest3Client/Assets/Scripts/Interaction/ControllerRaycaster.cs",
+        "file:unity/Quest3Client/Assets/Scripts/Interaction/DepthCursor.cs",
+        "file:unity/Quest3Client/Assets/Scripts/Interaction/ObjectGrabber.cs",
+        "file:unity/Quest3Client/Assets/Scripts/Interaction/TriggerDepthProbe.cs",
+        "file:unity/Quest3Client/Assets/Scripts/Networking/BackendCommunicationManager.cs",
+        "file:unity/Quest3Client/Assets/Scripts/Networking/DepthFrameSampler.cs",
+        "file:unity/Quest3Client/Assets/Scripts/Networking/DepthStreamModule.cs",
+        "file:unity/Quest3Client/Assets/Scripts/Networking/DepthViewportRaycast.cs",
+        "file:unity/Quest3Client/Assets/Scripts/Networking/HeartbeatModule.cs",
+        "file:unity/Quest3Client/Assets/Scripts/Networking/PixelProjector.cs",
+        "file:unity/Quest3Client/Assets/Scripts/Networking/RaycastQueryModule.cs",
+        "file:unity/Quest3Client/Assets/Scripts/Networking/RgbStreamModule.cs",
+        "file:unity/Quest3Client/Assets/Scripts/Networking/StreamTransportSwitcher.cs",
+        "file:unity/Quest3Client/Assets/Scripts/Networking/VisionContracts.cs",
+        "file:unity/Quest3Client/Assets/Scripts/Networking/VisionMaskSampling.cs",
+        "file:unity/Quest3Client/Assets/Scripts/Networking/VisionMessageParser.cs",
+        "file:unity/Quest3Client/Assets/Scripts/Networking/VisionMessageParser.Runtime.cs",
+        "file:unity/Quest3Client/Assets/Scripts/Networking/VisionReceiverModule.cs",
+        "file:unity/Quest3Client/Assets/Scripts/Networking/VisionSocketOwnership.cs",
+        "file:unity/Quest3Client/Assets/Scripts/Networking/VisionWorldPositionFactory.cs",
+        "file:unity/Quest3Client/Assets/Scripts/Rendering/VisionLineUnlit.shader",
+        "file:unity/Quest3Client/Assets/Scripts/Rendering/VisionOverlayConfig.cs",
+        "file:unity/Quest3Client/Assets/Scripts/Rendering/VisionOverlayUnlit.shader",
+        "file:unity/Quest3Client/Assets/Scripts/Rendering/VisionRenderData.cs",
+        "file:unity/Quest3Client/Assets/Scripts/Scanning/DepthPointCloudRenderer.cs",
+        "file:unity/Quest3Client/Assets/Scripts/Tracking/TrackingManager.cs",
+        "file:unity/Quest3Client/Assets/Scripts/UI/HeadLockedPanelFollower.cs",
+        "file:unity/Quest3Client/Assets/Scripts/Vision/VisionColorPalette.cs",
+        "file:unity/Quest3Client/Assets/Scripts/Vision/VisionFrameProcessedData.cs",
+        "file:unity/Quest3Client/Assets/Scripts/Vision/VisionLabelPool.cs",
+        "file:unity/Quest3Client/Assets/Scripts/Vision/VisionMaskOverlay.cs",
+        "file:unity/Quest3Client/Assets/Scripts/Vision/VisionObjectColorTable.cs",
+        "file:unity/Quest3Client/Assets/Scripts/Vision/VisionOverlayManager.cs",
+        "file:unity/Quest3Client/Assets/Scripts/Vision/VisionRenderConfig.cs"
+      ]
+    },
+    {
+      "id": "layer:unity-assets",
+      "name": "Unity 场景与资源",
+      "description": "包含场景、预制体、着色器、运行时资源与 Unity 资产配置。",
+      "nodeIds": [
+        "file:unity/Quest3Client/Assets/InputSystem_Actions.inputactions",
+        "config:unity/Quest3Client/Assets/Plugins/Android/AndroidManifest.xml",
+        "file:unity/Quest3Client/Assets/Resources/BboxWireframe.mat",
+        "file:unity/Quest3Client/Assets/Resources/CursorMaterial.mat",
+        "file:unity/Quest3Client/Assets/Resources/ImmersiveDebuggerSettings.asset",
+        "file:unity/Quest3Client/Assets/Resources/InputActions.asset",
+        "file:unity/Quest3Client/Assets/Resources/MetaXRAcousticMaterialMapping.asset",
+        "file:unity/Quest3Client/Assets/Resources/MetaXRAcousticSettings.asset",
+        "file:unity/Quest3Client/Assets/Resources/MetaXRAudioSettings.asset",
+        "file:unity/Quest3Client/Assets/Resources/OculusRuntimeSettings.asset",
+        "file:unity/Quest3Client/Assets/Resources/OVRBuildConfig.asset",
+        "file:unity/Quest3Client/Assets/Resources/OVROverlayCanvasSettings.asset",
+        "file:unity/Quest3Client/Assets/Resources/OVRPlatformToolSettings.asset",
+        "file:unity/Quest3Client/Assets/Resources/SmartRoomDepthArraySliceToFloat.shader",
+        "file:unity/Quest3Client/Assets/Scenes/SampleScene.unity",
+        "file:unity/Quest3Client/Assets/Scenes/VisionOverlayRig.prefab",
+        "file:unity/Quest3Client/Assets/Settings/DefaultVolumeProfile.asset",
+        "file:unity/Quest3Client/Assets/Settings/Mobile_Renderer.asset",
+        "file:unity/Quest3Client/Assets/Settings/Mobile_RPAsset.asset",
+        "file:unity/Quest3Client/Assets/Settings/PC_Renderer.asset",
+        "file:unity/Quest3Client/Assets/Settings/PC_RPAsset.asset",
+        "file:unity/Quest3Client/Assets/Settings/SampleSceneProfile.asset",
+        "file:unity/Quest3Client/Assets/Settings/UniversalRenderPipelineGlobalSettings.asset",
+        "file:unity/Quest3Client/Assets/Settings/VisionColorPalette.asset",
+        "file:unity/Quest3Client/Assets/Settings/VisionRenderConfig.asset",
+        "file:unity/Quest3Client/Assets/Shaders/DepthArraySliceToFloat.shader",
+        "file:unity/Quest3Client/Assets/Shaders/DepthPointCloud.shader",
+        "file:unity/Quest3Client/Assets/Shaders/DepthProbeGaussian.shader",
+        "file:unity/Quest3Client/Assets/Shaders/DepthProbeLit.shader",
+        "file:unity/Quest3Client/Assets/Shaders/DepthProbePoint.shader",
+        "file:unity/Quest3Client/Assets/Shaders/VisionAnchorSphere.shader",
+        "file:unity/Quest3Client/Assets/Shaders/VisionMaskOverlay.shader"
+      ]
+    },
+    {
+      "id": "layer:unity-project-config",
+      "name": "Unity 项目配置",
+      "description": "包含 Unity 包清单、XR/渲染/输入等项目级设置。",
+      "nodeIds": [
+        "config:unity/Quest3Client/Packages/manifest.json",
+        "config:unity/Quest3Client/Packages/packages-lock.json",
+        "file:unity/Quest3Client/ProjectSettings/AudioManager.asset",
+        "file:unity/Quest3Client/ProjectSettings/ClusterInputManager.asset",
+        "file:unity/Quest3Client/ProjectSettings/DynamicsManager.asset",
+        "file:unity/Quest3Client/ProjectSettings/EditorBuildSettings.asset",
+        "file:unity/Quest3Client/ProjectSettings/EditorSettings.asset",
+        "file:unity/Quest3Client/ProjectSettings/GraphicsSettings.asset",
+        "file:unity/Quest3Client/ProjectSettings/InputManager.asset",
+        "file:unity/Quest3Client/ProjectSettings/MemorySettings.asset",
+        "file:unity/Quest3Client/ProjectSettings/MultiplayerManager.asset",
+        "file:unity/Quest3Client/ProjectSettings/NavMeshAreas.asset",
+        "file:unity/Quest3Client/ProjectSettings/PackageManagerSettings.asset",
+        "file:unity/Quest3Client/ProjectSettings/Physics2DSettings.asset",
+        "file:unity/Quest3Client/ProjectSettings/PresetManager.asset",
+        "file:unity/Quest3Client/ProjectSettings/ProjectSettings.asset",
+        "document:unity/Quest3Client/ProjectSettings/ProjectVersion.txt",
+        "file:unity/Quest3Client/ProjectSettings/QualitySettings.asset",
+        "config:unity/Quest3Client/ProjectSettings/SceneTemplateSettings.json",
+        "file:unity/Quest3Client/ProjectSettings/ShaderGraphSettings.asset",
+        "file:unity/Quest3Client/ProjectSettings/TagManager.asset",
+        "file:unity/Quest3Client/ProjectSettings/TimeManager.asset",
+        "file:unity/Quest3Client/ProjectSettings/UnityConnectSettings.asset",
+        "file:unity/Quest3Client/ProjectSettings/URPProjectSettings.asset",
+        "file:unity/Quest3Client/ProjectSettings/VersionControlSettings.asset",
+        "file:unity/Quest3Client/ProjectSettings/VFXManager.asset",
+        "file:unity/Quest3Client/ProjectSettings/XRSettings.asset"
+      ]
+    },
+    {
+      "id": "layer:unity-tests",
+      "name": "Unity 控制台测试",
+      "description": "包含 Unity 独立控制台测试项目，用于验证消息解析和视觉模块。",
+      "nodeIds": [
+        "config:unity/Quest3Client/Tests/DepthViewportRaycast.ConsoleTests/DepthViewportRaycast.ConsoleTests.csproj",
+        "file:unity/Quest3Client/Tests/DepthViewportRaycast.ConsoleTests/Program.cs",
+        "config:unity/Quest3Client/Tests/PassthroughRayResolver.ConsoleTests/PassthroughRayResolver.ConsoleTests.csproj",
+        "file:unity/Quest3Client/Tests/PassthroughRayResolver.ConsoleTests/Program.cs",
+        "file:unity/Quest3Client/Tests/VisionLabelFormatting.ConsoleTests/Program.cs",
+        "config:unity/Quest3Client/Tests/VisionLabelFormatting.ConsoleTests/VisionLabelFormatting.ConsoleTests.csproj",
+        "file:unity/Quest3Client/Tests/VisionLabelPool.ConsoleTests/Program.cs",
+        "config:unity/Quest3Client/Tests/VisionLabelPool.ConsoleTests/VisionLabelPool.ConsoleTests.csproj",
+        "file:unity/Quest3Client/Tests/VisionMaskSampling.ConsoleTests/Program.cs",
+        "config:unity/Quest3Client/Tests/VisionMaskSampling.ConsoleTests/VisionMaskSampling.ConsoleTests.csproj",
+        "file:unity/Quest3Client/Tests/VisionMessageParser.ConsoleTests/Program.cs",
+        "file:unity/Quest3Client/Tests/VisionMessageParser.ConsoleTests/UnityEngineStubs.cs",
+        "config:unity/Quest3Client/Tests/VisionMessageParser.ConsoleTests/VisionMessageParser.ConsoleTests.csproj",
+        "file:unity/Quest3Client/Tests/VisionOverlayManager.ConsoleTests/Program.cs",
+        "config:unity/Quest3Client/Tests/VisionOverlayManager.ConsoleTests/VisionOverlayManager.ConsoleTests.csproj",
+        "file:unity/Quest3Client/Tests/VisionShaderAsset.ConsoleTests/Program.cs",
+        "config:unity/Quest3Client/Tests/VisionShaderAsset.ConsoleTests/VisionShaderAsset.ConsoleTests.csproj"
+      ]
+    },
+    {
+      "id": "layer:workspace-root",
+      "name": "工作区根目录",
+      "description": "包含仓库根级配置、解决方案文件与 understand-anything 配置。",
+      "nodeIds": [
+        "file:.understand-anything/.understandignore",
+        "config:.understand-anything/config.json",
+        "file:conftest.py",
+        "document:requirements.txt",
+        "config:Smart Room.sln",
+        "file:unity/Quest3Client/Assets/CompositionLayers/UserSettings/CompositionLayersPreferences.asset",
+        "file:unity/Quest3Client/Assets/CompositionLayers/UserSettings/Resources/CompositionLayersRuntimeSettings.asset",
+        "file:unity/Quest3Client/Assets/Oculus/OculusProjectConfig.asset",
+        "file:unity/Quest3Client/Assets/Readme.asset",
+        "file:unity/Quest3Client/Assets/XR/Loaders/OpenXRLoader.asset",
+        "file:unity/Quest3Client/Assets/XR/Loaders/SimulationLoader.asset",
+        "file:unity/Quest3Client/Assets/XR/Resources/XRSimulationRuntimeSettings.asset",
+        "file:unity/Quest3Client/Assets/XR/Settings/OpenXR Editor Settings.asset",
+        "file:unity/Quest3Client/Assets/XR/Settings/OpenXRPackageSettings.asset",
+        "file:unity/Quest3Client/Assets/XR/Settings/XRSimulationSettings.asset",
+        "file:unity/Quest3Client/Assets/XR/UserSimulationSettings/Resources/XRSimulationPreferences.asset",
+        "file:unity/Quest3Client/Assets/XR/UserSimulationSettings/SimulationEnvironmentAssetsManager.asset",
+        "file:unity/Quest3Client/Assets/XR/XRGeneralSettingsPerBuildTarget.asset"
+      ]
+    }
+  ],
+  "tour": [
+    {
+      "order": 1,
+      "title": "从 README 和范围文档入手",
+      "description": "先理解这个仓库为什么存在，以及 Quest 3 MVP 当前只覆盖哪些端到端能力。",
+      "nodeIds": [
+        "document:README.md",
+        "document:docs/01_MVP_SCOPE.md"
+      ]
+    },
+    {
+      "order": 2,
+      "title": "查看 Python 服务入口",
+      "description": "后端的核心入口分成 API/WebSocket 服务与桌面调试面板两个启动面，二者共同支撑接收、展示和调试流程。",
+      "nodeIds": [
+        "file:backend/quest3server/__main__.py",
+        "file:backend/quest3server/run_dashboard.py",
+        "file:backend/quest3server/main.py"
+      ]
+    },
+    {
+      "order": 3,
+      "title": "理解视觉与跟踪引擎",
+      "description": "这一组文件承载视觉推理、跟踪状态机、分割与结果广播，是后端智能能力的核心。",
+      "nodeIds": [
+        "file:backend/quest3server/tracking/engine.py",
+        "file:backend/quest3server/vision/pipeline.py",
+        "file:backend/quest3server/vision/providers.py",
+        "file:backend/quest3server/vision/runtime.py"
+      ]
+    },
+    {
+      "order": 4,
+      "title": "检查共享数据契约",
+      "description": "共享契约定义了视觉结果如何在后端、Unity 客户端和测试代码之间对齐。",
+      "nodeIds": [
+        "file:contracts/types.ts",
+        "file:contracts/bbox_wireframe_render.ts",
+        "file:unity/Quest3Client/Assets/Scripts/Networking/VisionContracts.cs"
+      ]
+    },
+    {
+      "order": 5,
+      "title": "跟进 Unity 网络与接收链路",
+      "description": "Unity 侧通过网络模块发送 RGB/深度/控制消息，并接收视觉结果后再映射回世界空间。",
+      "nodeIds": [
+        "file:unity/Quest3Client/Assets/Scripts/Networking/BackendCommunicationManager.cs",
+        "file:unity/Quest3Client/Assets/Scripts/Networking/RgbStreamModule.cs",
+        "file:unity/Quest3Client/Assets/Scripts/Networking/DepthStreamModule.cs",
+        "file:unity/Quest3Client/Assets/Scripts/Networking/VisionReceiverModule.cs"
+      ]
+    },
+    {
+      "order": 6,
+      "title": "回到 Unity 交互与呈现",
+      "description": "最后看交互、跟踪和视觉叠加脚本，理解后端结果如何在 Quest 3 端变成可见的世界锚定反馈。",
+      "nodeIds": [
+        "file:unity/Quest3Client/Assets/Scripts/Interaction/TriggerDepthProbe.cs",
+        "file:unity/Quest3Client/Assets/Scripts/Tracking/TrackingManager.cs",
+        "file:unity/Quest3Client/Assets/Scripts/Vision/VisionOverlayManager.cs",
+        "file:unity/Quest3Client/Assets/Scenes/SampleScene.unity"
+      ]
+    }
+  ]
+}

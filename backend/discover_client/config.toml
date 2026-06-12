@@ -13,12 +13,3 @@ port = 1883
 topic_blacklist = []
 topic_whitelist = []
 username = ""
-
-[[sources]]
-source_id = "2"
-source_type = "mdns"
-enabled = true
-
-[sources.settings]
-scan_interval_s = 30
-service_types = ["_mqtt._tcp.local.", "_home-assistant._tcp.local.", "_http._tcp.local."]

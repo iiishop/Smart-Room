@@ -202,7 +202,7 @@ class Worker(QObject):
             if self.data_snapshot is not None:
                 for sensor_name, reading in self.data_snapshot.get_latest(device.device_id).items():
                     data_sensors[sensor_name] = {
-                        "value": reading.value,
+                        "value": reading.text_value if reading.text_value else reading.value,
                         "unit": reading.unit,
                         "ts": reading.timestamp,
                     }

@@ -63,6 +63,35 @@ def test_data_snapshot_supports_alternative_payload_shapes() -> None:
     assert nested[0].value == 21.2
 
 
+def test_data_snapshot_extracts_text_values() -> None:
+    ds = DataSnapshot()
+
+    readings = ds.ingest(
+        "light-1",
+        {
+            "topic": "mock/light-1/state",
+            "value": {"power": "OFF", "brightness": 100},
+            "timestamp": 100.0,
+        },
+    )
+    assert readings is not None
+    assert len(readings) == 2
+
+    # Numeric extraction: brightness
+    brightness = [r for r in readings if r.sensor_type == "brightness"][0]
+    assert brightness.value == 100.0
+    assert brightness.text_value is None
+
+    # Text extraction: power
+    power = [r for r in readings if r.sensor_type == "power"][0]
+    assert power.text_value == "OFF"
+    assert power.value == 0.0
+
+    # Verify both show up in get_latest
+    latest = ds.get_latest("light-1")
+    assert set(latest.keys()) == {"power", "brightness"}
+
+
 def test_data_snapshot_prunes_expired_readings() -> None:
     ds = DataSnapshot(retention_s=10)
 

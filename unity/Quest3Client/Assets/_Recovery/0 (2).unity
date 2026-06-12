@@ -1737,7 +1737,7 @@ MonoBehaviour:
   environmentRaycastManager: {fileID: 0}
   depthArraySliceShader: {fileID: 0}
   targetFrameRateHz: 10
-  maxPixelsPerFrame: 0
+  maxPixelsPerFrame: 19200
   usePreprocessedDepthTexture: 0
   flipVertical: 1
   syncTimestampWithLatestRgb: 1
@@ -2080,7 +2080,7 @@ MonoBehaviour:
   depthCursor: {fileID: 1375737369}
   controllerRaycaster: {fileID: 736496067}
   pixelProjector: {fileID: 1313628479}
-  depthStream: {fileID: 1313628476}
+  depthStream: {fileID: 0}
   xrCamera: {fileID: 1000850322}
   backendBaseUrl: http://localhost:8500
   bboxLineMaterial: {fileID: 0}

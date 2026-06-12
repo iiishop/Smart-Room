@@ -5,6 +5,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using UnityEngine;
+using System.Text.RegularExpressions;
 
 namespace SmartRoom.Networking
 {
@@ -44,6 +45,8 @@ namespace SmartRoom.Networking
         private float _nextRgbReconnectAt;
         private float _nextDepthReconnectAt;
         private float _nextVisionReconnectAt;
+        private static readonly Regex StackLineRegex =
+            new Regex(@"\(at\s+(.*):(\d+)\)", RegexOptions.Compiled);
 
         public bool IsControlConnected => _controlSocket != null && _controlSocket.State == WebSocketState.Open;
         public bool IsRgbConnected => _rgbSocket != null && _rgbSocket.State == WebSocketState.Open;
@@ -57,6 +60,8 @@ namespace SmartRoom.Networking
             {
                 transportSwitcher = FindFirstObjectByType<StreamTransportSwitcher>();
             }
+
+            Application.logMessageReceived += HandleUnityLog;
         }
 
         private void Start()
@@ -462,6 +467,42 @@ namespace SmartRoom.Networking
             }
         }
 
+        private void HandleUnityLog(string condition, string stackTrace, LogType type)
+        {
+            if (_isQuitting)
+            {
+                return;
+            }
+
+            string level = type switch
+            {
+                LogType.Error => "ERROR",
+                LogType.Exception => "ERROR",
+                LogType.Assert => "ERROR",
+                LogType.Warning => "WARNING",
+                _ => "INFO",
+            };
+
+            if (condition != null && condition.Contains("HeartbeatModule"))
+            {
+                return;
+            }
+
+            string script = null;
+            int line = -1;
+            if (!string.IsNullOrEmpty(stackTrace))
+            {
+                var match = StackLineRegex.Match(stackTrace);
+                if (match.Success)
+                {
+                    script = match.Groups[1].Value;
+                    int.TryParse(match.Groups[2].Value, out line);
+                }
+            }
+
+            QueueUnityLog(level, condition, script, line, stackTrace);
+        }
+
         public void QueueUnityLog(
             string level,
             string message,
@@ -547,6 +588,11 @@ namespace SmartRoom.Networking
             }
 
             _cts?.Dispose();
+        }
+
+        private void OnDestroy()
+        {
+            Application.logMessageReceived -= HandleUnityLog;
         }
     }
 

@@ -10,15 +10,15 @@ from typing import Any
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
 
-from .log_manager import add_log, add_python_log, list_logs
+from .log_manager import add_log, add_python_log, install_python_logging_bridge, list_logs
 from .tracking import TrackingEngine, TrackState
-from .tracking.depth_alignment import align_depth_to_rgb, intrinsics_from_focal_principal
 
 
 app = FastAPI(title="Smart Room Receiver Backend")
+install_python_logging_bridge()
 
 _lock = Lock()
 _state = {
@@ -34,11 +34,15 @@ _state = {
 }
 _latest_rgb_jpeg: bytes | None = None
 _latest_rgb_bgr: Any = None  # decoded BGR numpy array for tracking engine
+_latest_rgb_timestamp_ms: int | None = None
 _latest_depth_packet: bytes | None = None
-_latest_aligned_depth: np.ndarray | None = None  # depth reprojected into RGB frame
+_latest_aligned_depth: np.ndarray | None = None  # sparse depth aligned into RGB frame
+_latest_aligned_valid_mask: np.ndarray | None = None
+_latest_debug_projection_meta: dict[str, Any] | None = None
 _last_trigger_frame_jpeg: bytes | None = None  # original RGB frame from last trigger
 _last_trigger_pixel: tuple[int, int] | None = None  # (px, py) from last trigger
 _last_rgb_intrinsics: np.ndarray | None = None  # 3×3 K from last trigger
+_last_trigger_bundle_meta: dict[str, Any] | None = None
 _latest_rgb_packet: bytes | None = None
 _rgb_preview_clients: set[WebSocket] = set()
 _rgb_raw_preview_clients: set[WebSocket] = set()
@@ -47,6 +51,7 @@ _heartbeat_clients: set[WebSocket] = set()
 _next_raycast_query_id = 1
 _latest_raycast_result: dict = {}
 _camera_intrinsics: dict = {}
+_depth_source_meta: dict = {}
 
 _tracking_engine: TrackingEngine | None = None
 _tracking_clients: set[WebSocket] = set()
@@ -79,6 +84,24 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _summarize_trigger_bundle(meta: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(meta, dict):
+        return None
+
+    depth_snapshot = meta.get("depth_snapshot") or {}
+    return {
+        "trigger_timestamp_ms": meta.get("trigger_timestamp_ms"),
+        "unity_frame_count": meta.get("unity_frame_count"),
+        "pixel_xy": meta.get("pixel_xy"),
+        "rgb_frame_wh": meta.get("rgb_frame_wh"),
+        "rgb_requested_wh": meta.get("rgb_requested_wh"),
+        "rgb_current_wh": meta.get("rgb_current_wh"),
+        "depth_sampled_wh": depth_snapshot.get("sampled_wh"),
+        "depth_source_wh": depth_snapshot.get("source_wh"),
+        "depth_captured_at_unix_ms": depth_snapshot.get("captured_at_unix_ms"),
+    }
+
+
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok"}
@@ -89,6 +112,10 @@ async def status() -> dict:
     with _lock:
         snapshot = dict(_state)
         snapshot["camera_intrinsics"] = dict(_camera_intrinsics)
+        snapshot["depth_source_meta"] = dict(_depth_source_meta)
+        snapshot["aligned_depth_meta"] = dict(_latest_debug_projection_meta or {})
+    snapshot["latest_rgb_timestamp_ms"] = _latest_rgb_timestamp_ms
+    snapshot["trigger_bundle"] = _summarize_trigger_bundle(_last_trigger_bundle_meta)
     snapshot["tracking"] = {
         "active": _tracking_engine is not None and _tracking_engine.state != TrackState.IDLE,
         "state": _tracking_engine.state.value if _tracking_engine else "idle",
@@ -324,15 +351,45 @@ async def heartbeat_socket(websocket: WebSocket) -> None:
                         "cx": payload.get("cx"),
                         "cy": payload.get("cy"),
                         "projection_matrix": payload.get("projection_matrix"),
+                        "sensor_width": payload.get("sensor_width"),
+                        "sensor_height": payload.get("sensor_height"),
+                        "requested_width": payload.get("requested_width"),
+                        "requested_height": payload.get("requested_height"),
+                        "current_width": payload.get("current_width"),
+                        "current_height": payload.get("current_height"),
+                        "stream_width": payload.get("stream_width"),
+                        "stream_height": payload.get("stream_height"),
+                        "preferred_width": payload.get("preferred_width"),
+                        "preferred_height": payload.get("preferred_height"),
+                        "supported_resolutions": payload.get("supported_resolutions") or [],
+                        "timestamp_ms": payload.get("timestamp_ms"),
+                    }
+
+                elif payload_type == "depth_source_meta":
+                    global _depth_source_meta
+                    _depth_source_meta = {
+                        "source_width": payload.get("source_width"),
+                        "source_height": payload.get("source_height"),
+                        "sampled_width": payload.get("sampled_width"),
+                        "sampled_height": payload.get("sampled_height"),
+                        "stride": payload.get("stride"),
+                        "flip_vertical": payload.get("flip_vertical"),
+                        "preprocessed": payload.get("preprocessed"),
+                        "zbuffer_params": payload.get("zbuffer_params") or [],
+                        "unity_frame_count": payload.get("unity_frame_count"),
+                        "timestamp_ms": payload.get("timestamp_ms"),
                     }
 
                 elif payload_type == "client_log":
+                    line = payload.get("line")
+                    if isinstance(line, int) and line < 0:
+                        line = None
                     add_log(
                         level=payload.get("level", "INFO"),
                         source=payload.get("source", "unity"),
                         message=payload.get("message", "(empty)"),
-                        script=payload.get("script"),
-                        line=payload.get("line"),
+                        script=payload.get("script") or None,
+                        line=line,
                         stack_trace=payload.get("stack_trace"),
                     )
 
@@ -505,7 +562,9 @@ async def _ingest_rgb_frame(
         global _latest_rgb_jpeg
         global _latest_rgb_packet
         global _latest_rgb_bgr
+        global _latest_rgb_timestamp_ms
         _latest_rgb_jpeg = jpeg
+        _latest_rgb_timestamp_ms = timestamp_ms
         if raw_packet is not None:
             _latest_rgb_packet = raw_packet
         _state["last_rgb_frame_id"] = frame_id
@@ -528,6 +587,7 @@ async def _ingest_rgb_frame(
 async def track_start(body: dict) -> dict[str, Any]:
     pixel_x = float(body.get("pixel_x", -1))
     pixel_y = float(body.get("pixel_y", -1))
+    trigger_bundle_meta = body.get("trigger_bundle_meta")
     if pixel_x < 0 or pixel_y < 0:
         raise HTTPException(status_code=400, detail="pixel_x and pixel_y required")
     if _latest_rgb_bgr is None:
@@ -535,36 +595,8 @@ async def track_start(body: dict) -> dict[str, Any]:
     if not _models_ready:
         raise HTTPException(status_code=503, detail="Tracking models not ready yet (still loading)")
 
-    # ── optional: align depth to RGB if intrinsics provided ──────────
-    global _latest_aligned_depth
-    _latest_aligned_depth = None
-
-    rgb_intrinsics_flat = body.get("rgb_intrinsics")
-    depth_reproj_flat = body.get("depth_reproj")
-    rgb_pose_flat = body.get("rgb_pose")
-
-    if rgb_intrinsics_flat and depth_reproj_flat and _latest_depth_packet is not None:
-        try:
-            K = np.array(rgb_intrinsics_flat, dtype=np.float32).reshape(3, 3)
-            global _last_rgb_intrinsics
-            _last_rgb_intrinsics = K
-            reproj = np.array(depth_reproj_flat, dtype=np.float32).reshape(4, 4)
-            rgb_pose = np.array(rgb_pose_flat, dtype=np.float32) if rgb_pose_flat and len(rgb_pose_flat) == 7 else None
-            depth_raw = _depth_packet_to_array(_latest_depth_packet)
-            if depth_raw is not None:
-                h_rgb, w_rgb = _latest_rgb_bgr.shape[:2]
-                aligned = align_depth_to_rgb(
-                    depth_raw, reproj, K, h_rgb, w_rgb, rgb_pose=rgb_pose,
-                )
-                if aligned is not None:
-                    _latest_aligned_depth = aligned
-                    add_python_log(
-                        "debug",
-                        f"Depth aligned: {aligned.shape[1]}×{aligned.shape[0]}, "
-                        f"range=[{np.nanmin(aligned):.2f}, {np.nanmax(aligned):.2f}]m",
-                    )
-        except Exception as exc:
-            add_python_log("warning", f"Depth alignment failed: {exc}")
+    # ── aligned depth is now sent by Unity via POST /api/depth/aligned ──
+    # (no more server-side matrix alignment)
 
     engine = _get_tracking_engine()
     engine.stop()
@@ -573,10 +605,25 @@ async def track_start(body: dict) -> dict[str, Any]:
     py = int(pixel_y * h) if pixel_y <= 1.0 else int(pixel_y)
 
     # Save the original frame + click pixel for dashboard preview
-    global _last_trigger_frame_jpeg, _last_trigger_pixel
+    global _last_trigger_frame_jpeg, _last_trigger_pixel, _last_trigger_bundle_meta, _last_rgb_intrinsics
     _last_trigger_pixel = (px, py)
+    _last_trigger_bundle_meta = trigger_bundle_meta if isinstance(trigger_bundle_meta, dict) else None
     if _latest_rgb_jpeg is not None:
         _last_trigger_frame_jpeg = _latest_rgb_jpeg
+
+    if isinstance(_last_trigger_bundle_meta, dict):
+        rgb_intrinsics9 = _last_trigger_bundle_meta.get("rgb_intrinsics9")
+        if isinstance(rgb_intrinsics9, list) and len(rgb_intrinsics9) == 9:
+            _last_rgb_intrinsics = np.array(rgb_intrinsics9, dtype=np.float32).reshape((3, 3))
+        trigger_ts = _last_trigger_bundle_meta.get("trigger_timestamp_ms")
+        rgb_delta = None
+        if isinstance(trigger_ts, (int, float)) and _latest_rgb_timestamp_ms is not None:
+            rgb_delta = int(_latest_rgb_timestamp_ms - int(trigger_ts))
+        add_python_log(
+            "info",
+            f"Trigger bundle stored: trigger_ts={trigger_ts}, latest_rgb_ts={_latest_rgb_timestamp_ms}, rgb_delta_ms={rgb_delta}, "
+            f"rgb_frame_wh={_last_trigger_bundle_meta.get('rgb_frame_wh')}, depth_snapshot={(_last_trigger_bundle_meta.get('depth_snapshot') or {}).get('sampled_wh')}"
+        )
 
     result = engine.detect(px, py, _latest_rgb_bgr.copy())
     add_python_log("info", f"Tracking detect at ({px},{py}) -> {result.label}")
@@ -612,6 +659,16 @@ async def track_status() -> dict[str, Any]:
         "active": _tracking_engine.state != TrackState.IDLE,
         "state": _tracking_engine.state.value,
         "label": _tracking_engine.label,
+    }
+
+
+@app.get("/api/trigger-bundle/latest")
+async def trigger_bundle_latest() -> dict[str, Any]:
+    return {
+        "ok": _last_trigger_bundle_meta is not None,
+        "bundle": _last_trigger_bundle_meta,
+        "latest_rgb_timestamp_ms": _latest_rgb_timestamp_ms,
+        "has_aligned_depth": _latest_aligned_depth is not None,
     }
 
 
@@ -672,15 +729,125 @@ async def track_last_original():
     return Response(content=buf.tobytes(), media_type="image/jpeg")
 
 
+@app.post("/api/depth/aligned")
+async def receive_aligned_depth(request: Request):
+    """Receive strict sparse aligned depth from Unity as JSON + base64 payloads."""
+    global _latest_aligned_depth, _latest_aligned_valid_mask, _latest_debug_projection_meta, _last_rgb_intrinsics
+    try:
+        body = await request.json()
+        w = int(body.get("width", 0))
+        h = int(body.get("height", 0))
+        sparse_b64 = body.get("sparse_depth_f32_le")
+        valid_b64 = body.get("valid_mask_u8")
+        rgb_intrinsics9 = body.get("rgb_intrinsics9")
+        debug_meta = body.get("debug_projection_meta") or {}
+        if w <= 0 or h <= 0:
+            raise HTTPException(status_code=400, detail="width/height required")
+        if not sparse_b64 or not valid_b64:
+            raise HTTPException(status_code=400, detail="sparse_depth_f32_le and valid_mask_u8 required")
+
+        sparse_bytes = base64.b64decode(sparse_b64)
+        valid_bytes = base64.b64decode(valid_b64)
+        expected_sparse = w * h * 4
+        expected_mask = w * h
+        if len(sparse_bytes) != expected_sparse:
+            raise HTTPException(status_code=400, detail=f"sparse payload length mismatch: expected {expected_sparse}, got {len(sparse_bytes)}")
+        if len(valid_bytes) != expected_mask:
+            raise HTTPException(status_code=400, detail=f"mask payload length mismatch: expected {expected_mask}, got {len(valid_bytes)}")
+
+        arr = np.frombuffer(sparse_bytes, dtype="<f4").reshape((h, w)).copy()
+        valid_mask = np.frombuffer(valid_bytes, dtype=np.uint8).reshape((h, w)).copy()
+        arr[valid_mask == 0] = np.nan
+        _latest_aligned_depth = arr
+        _latest_aligned_valid_mask = valid_mask
+        _latest_debug_projection_meta = debug_meta
+
+        if isinstance(rgb_intrinsics9, list) and len(rgb_intrinsics9) == 9:
+            _last_rgb_intrinsics = np.array(rgb_intrinsics9, dtype=np.float32).reshape((3, 3))
+        elif _last_rgb_intrinsics is None:
+            raise HTTPException(status_code=400, detail="rgb_intrinsics9 missing and no trigger intrinsics stored yet")
+        valid_count = int((valid_mask > 0).sum())
+        valid_ratio = valid_count / float(w * h)
+        add_python_log("debug",
+            f"Aligned depth received: {w}×{h}, "
+            f"range=[{np.nanmin(arr):.2f}, {np.nanmax(arr):.2f}]m, "
+            f"valid={int((~np.isnan(arr)).sum())}")
+        return {"ok": True}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        add_python_log("warning", f"Aligned depth receive failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/depth/aligned-v2")
+async def receive_aligned_depth_v2(request: Request):
+    """Receive strict sparse aligned depth from Unity as JSON + base64 payloads."""
+    global _latest_aligned_depth, _latest_aligned_valid_mask, _latest_debug_projection_meta, _last_rgb_intrinsics
+    try:
+        body = await request.json()
+        w = int(body.get("width", 0))
+        h = int(body.get("height", 0))
+        sparse_b64 = body.get("sparse_depth_f32_le")
+        valid_b64 = body.get("valid_mask_u8")
+        rgb_intrinsics9 = body.get("rgb_intrinsics9")
+        debug_meta = body.get("debug_projection_meta") or {}
+        if w <= 0 or h <= 0:
+            raise HTTPException(status_code=400, detail="width/height required")
+        if not sparse_b64 or not valid_b64:
+            raise HTTPException(status_code=400, detail="sparse_depth_f32_le and valid_mask_u8 required")
+
+        sparse_bytes = base64.b64decode(sparse_b64)
+        valid_bytes = base64.b64decode(valid_b64)
+        expected_sparse = w * h * 4
+        expected_mask = w * h
+        if len(sparse_bytes) != expected_sparse:
+            raise HTTPException(status_code=400, detail=f"sparse payload length mismatch: expected {expected_sparse}, got {len(sparse_bytes)}")
+        if len(valid_bytes) != expected_mask:
+            raise HTTPException(status_code=400, detail=f"mask payload length mismatch: expected {expected_mask}, got {len(valid_bytes)}")
+
+        arr = np.frombuffer(sparse_bytes, dtype="<f4").reshape((h, w)).copy()
+        valid_mask = np.frombuffer(valid_bytes, dtype=np.uint8).reshape((h, w)).copy()
+        arr[valid_mask == 0] = np.nan
+        _latest_aligned_depth = arr
+        _latest_aligned_valid_mask = valid_mask
+        _latest_debug_projection_meta = debug_meta
+
+        if isinstance(rgb_intrinsics9, list) and len(rgb_intrinsics9) == 9:
+            _last_rgb_intrinsics = np.array(rgb_intrinsics9, dtype=np.float32).reshape((3, 3))
+        elif _last_rgb_intrinsics is None:
+            raise HTTPException(status_code=400, detail="rgb_intrinsics9 missing and no trigger intrinsics stored yet")
+
+        valid_count = int((valid_mask > 0).sum())
+        valid_ratio = valid_count / float(w * h)
+        add_python_log(
+            "debug",
+            f"Aligned depth v2 received: {w}x{h}, "
+            f"range=[{np.nanmin(arr):.2f}, {np.nanmax(arr):.2f}]m, "
+            f"valid={valid_count}, ratio={valid_ratio:.4f}, semantics={debug_meta.get('depth_value_semantics', 'unknown')}",
+        )
+        return {"ok": True}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        add_python_log("warning", f"Aligned depth v2 receive failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @app.get("/api/depth/at")
 async def depth_at_pixel(px: int = Query(...), py: int = Query(...)):
-    """Return the aligned depth (metres) at a given RGB pixel."""
-    if _latest_aligned_depth is None:
-        return {"depth_m": None, "source": "none"}
+    """Return the strict sparse aligned depth (metres) at a given RGB pixel."""
+    if _latest_aligned_depth is None or _latest_aligned_valid_mask is None:
+        return {"depth_m": None, "valid": False, "source": "none"}
     from .tracking.depth_alignment import query_depth_at_pixel
 
     d = query_depth_at_pixel(_latest_aligned_depth, px, py)
-    return {"depth_m": d, "source": "aligned"}
+    valid = bool(
+        0 <= py < _latest_aligned_valid_mask.shape[0]
+        and 0 <= px < _latest_aligned_valid_mask.shape[1]
+        and _latest_aligned_valid_mask[py, px] > 0
+    )
+    return {"depth_m": d, "valid": valid, "source": "sparse_aligned"}
 
 
 @app.get("/api/depth/topdown")
@@ -701,6 +868,16 @@ async def depth_topdown():
     return Response(content=buf.tobytes(), media_type="image/jpeg")
 
 
+@app.get("/api/depth/debug-meta")
+async def depth_debug_meta() -> dict[str, Any]:
+    return {
+        "ok": _latest_debug_projection_meta is not None,
+        "debug_projection_meta": _latest_debug_projection_meta,
+        "has_sparse_aligned_depth": _latest_aligned_depth is not None,
+        "has_valid_mask": _latest_aligned_valid_mask is not None,
+    }
+
+
 @app.get("/api/depth/aligned-heatmap")
 async def depth_aligned_heatmap():
     """Return the aligned-depth frame as a JPEG heatmap, same resolution as RGB.
@@ -708,28 +885,57 @@ async def depth_aligned_heatmap():
     Uses depth values reprojected into the RGB frame via align_depth_to_rgb().
     Returns 204 if no aligned depth is available yet (no trigger with intrinsics).
     """
-    if _latest_aligned_depth is None:
+    if _latest_aligned_depth is None or _latest_aligned_valid_mask is None:
         return Response(status_code=204)
 
     # Depth (metres) → colour heatmap (near=red, far=blue)
-    valid = ~np.isnan(_latest_aligned_depth) & (_latest_aligned_depth > 0)
+    valid = (_latest_aligned_valid_mask > 0) & ~np.isnan(_latest_aligned_depth) & (_latest_aligned_depth > 0)
     d_max = float(np.nanmax(_latest_aligned_depth[valid])) if valid.any() else 5.0
     d_max = np.clip(d_max, 0.5, 8.0)
 
-    # Normalise 0..1, invert so near=bright
     d_norm = np.clip(_latest_aligned_depth / max(d_max, 0.01), 0, 1)
     d_norm = np.where(valid, 1.0 - d_norm, 0.0)
 
     hue = (d_norm * 120).astype(np.uint8)  # 0° red → 120° green (far)
     sat = np.full_like(hue, 200, dtype=np.uint8)
-    val = np.where(valid, 220, 0).astype(np.uint8)
+    val = np.where(valid, 255, 0).astype(np.uint8)
     hsv = np.stack([hue, sat, val], axis=2)
     bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+    alpha = np.where(valid, 255, 0).astype(np.uint8)
+    bgra = np.dstack([bgr, alpha])
 
-    ok, buf = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    ok, buf = cv2.imencode(".png", bgra)
     if not ok:
         raise HTTPException(status_code=500, detail="Failed to encode")
-    return Response(content=buf.tobytes(), media_type="image/jpeg")
+    return Response(content=buf.tobytes(), media_type="image/png")
+
+
+@app.get("/api/depth/verify-conversion")
+async def depth_verify_conversion():
+    """Cross-validate Meta's ZBP formula against t-34400's NDC→linear.
+
+    Takes the latest raw depth packet (NDC buffer) and ZBufferParams,
+    converts via both formulas, and reports any discrepancy.
+
+    Returns 204 if no raw depth data is available.
+    """
+    from quest3server.tracking.depth_alignment import verify_depth_conversion
+
+    global _depth_source_meta, _latest_depth_packet
+
+    zbp = _depth_source_meta.get("zbuffer_params") if _depth_source_meta else None
+    if zbp is None or len(zbp) < 2:
+        return {"error": "no ZBufferParams available from depth source meta"}
+
+    raw_array = _depth_packet_to_array(_latest_depth_packet) if _latest_depth_packet else None
+    if raw_array is None:
+        return Response(status_code=204)
+
+    # The raw DEP1 packet contains NDC depth values [0, 1]
+    zbp_arr = np.array([zbp[0], zbp[1], zbp[2] if len(zbp) > 2 else 0, zbp[3] if len(zbp) > 3 else 0], dtype=np.float32)
+    result = verify_depth_conversion(raw_array, zbp_arr)
+
+    return result
 
 
 @app.websocket("/ws/tracking")

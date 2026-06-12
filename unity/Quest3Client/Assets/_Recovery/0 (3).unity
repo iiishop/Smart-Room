@@ -1737,7 +1737,7 @@ MonoBehaviour:
   environmentRaycastManager: {fileID: 0}
   depthArraySliceShader: {fileID: 0}
   targetFrameRateHz: 10
-  maxPixelsPerFrame: 0
+  maxPixelsPerFrame: 19200
   usePreprocessedDepthTexture: 0
   flipVertical: 1
   syncTimestampWithLatestRgb: 1

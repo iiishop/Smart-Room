@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 #
 # Florence-2 object detection:
 #   https://huggingface.co/docs/transformers/model_doc/florence2
-#   https://huggingface.co/florence-community/Florence-2-base
+#   https://huggingface.co/florence-community/Florence-2-large
 #   task_prompt="<OD>" → bboxes + class labels
 #
 # Florence-2 region description (fallback):
@@ -53,7 +53,7 @@ class TrackingEngine:
     References
     ----------
     - Florence-2 <OD> task:
-      https://huggingface.co/florence-community/Florence-2-base
+      https://huggingface.co/florence-community/Florence-2-large
     - SAM2 point + box prompt:
       https://huggingface.co/docs/transformers/model_doc/sam2
     - SigLIP 2:
@@ -61,7 +61,7 @@ class TrackingEngine:
     """
 
     _IMAGE_PREDICTOR_MODEL = "facebook/sam2.1-hiera-tiny"
-    _FLORENCE2_MODEL = "florence-community/Florence-2-base"
+    _FLORENCE2_MODEL = "florence-community/Florence-2-large"
     _SIGLIP_MODEL = "google/siglip2-base-patch16-224"
     _CLIP_SIM_THRESHOLD = 0.18  # below this: try region description as fallback label
 
@@ -768,7 +768,7 @@ class TrackingEngine:
         """Fallback: Florence-2 <REGION_TO_DESCRIPTION> for a specific bbox.
 
         Location tokens follow the Florence-2 convention (0-999 normalized):
-        https://huggingface.co/florence-community/Florence-2-base
+        https://huggingface.co/florence-community/Florence-2-large
         """
         h, w = rgb.shape[:2]
         loc_x0 = int(x0 / max(w, 1) * 999)
@@ -942,7 +942,7 @@ class TrackingEngine:
         ).to("cuda")
         self._clip_proc = AutoProcessor.from_pretrained(self._SIGLIP_MODEL)
         logger.info(
-            "TrackingEngine models loaded (SAM2-tiny + Florence-2-base + SigLIP2-B/16, %.1f GB VRAM)",
+            "TrackingEngine models loaded (SAM2-tiny + Florence-2-large + SigLIP2-B/16, %.1f GB VRAM)",
             torch.cuda.memory_allocated() / 1024 ** 3,
         )
 

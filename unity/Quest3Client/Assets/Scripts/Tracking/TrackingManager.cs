@@ -24,10 +24,33 @@ namespace SmartRoom.Tracking
     /// </summary>
     public sealed class TrackingManager : MonoBehaviour
     {
+        [Serializable]
+        private sealed class TriggerCaptureBundle
+        {
+            public long triggerTimestampMs;
+            public long pcaTimestampMs;
+            public int unityFrameCount;
+            public float hitX;
+            public float hitY;
+            public float hitZ;
+            public float pixelX;
+            public float pixelY;
+            public int rgbFrameWidth;
+            public int rgbFrameHeight;
+            public int rgbRequestedWidth;
+            public int rgbRequestedHeight;
+            public int rgbCurrentWidth;
+            public int rgbCurrentHeight;
+            public float[] rgbIntrinsics9;
+            public float[] rgbPose7;
+            public Networking.DepthStreamModule.DepthFrameSnapshot depthSnapshot;
+        }
+
         [Header("References")]
         [SerializeField] private Interaction.DepthCursor depthCursor;
         [SerializeField] private Interaction.ControllerRaycaster controllerRaycaster;
         [SerializeField] private Networking.PixelProjector pixelProjector;
+        [SerializeField] private Networking.DepthStreamModule depthStream;
         [SerializeField] private Camera xrCamera;
 
         [Header("Backend")]
@@ -123,6 +146,7 @@ namespace SmartRoom.Tracking
             // This is the official API that handles PCA intrinsics + sensor
             // calibration internally, avoiding manual coordinate chain errors.
             Vector2 pixel;
+            TriggerCaptureBundle bundle = null;
             if (pixelProjector != null && pixelProjector.IsReady
                 && pixelProjector.CameraAccess != null
                 && pixelProjector.CameraAccess.IsPlaying)
@@ -134,14 +158,45 @@ namespace SmartRoom.Tracking
                 // Reference: Meta PCA WorldToViewportPoint(Vector3, Pose?)
                 //   https://developers.meta.com/horizon/reference/mruk/v85/
                 var triggerPose = pca.GetCameraPose();
+                long triggerTimestampMs = pca.Timestamp == default
+                    ? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+                    : new DateTimeOffset(DateTime.SpecifyKind(pca.Timestamp, DateTimeKind.Utc)).ToUnixTimeMilliseconds();
                 Vector2 viewport = pca.WorldToViewportPoint(hitPoint, triggerPose);
                 // Meta viewport: (0,0)=bottom-left, (1,1)=top-right.
-                // Our stream JPEG: Y=0 at top.  Flip Y.
+                // If the hit point is already outside the PCA image frustum,
+                // fail closed instead of clamping to an arbitrary image edge.
+                bool insideViewport =
+                    viewport.x >= 0f && viewport.x <= 1f &&
+                    viewport.y >= 0f && viewport.y <= 1f;
+                if (!insideViewport)
+                {
+                    Debug.LogWarning(
+                        $"[TrackingManager] Trigger rejected: viewport out of bounds. " +
+                        $"viewport=({viewport.x:F4},{viewport.y:F4}), hit=({hitPoint.x:F3},{hitPoint.y:F3},{hitPoint.z:F3})"
+                    );
+                    ShowStatus("Target is outside RGB camera view");
+                    return;
+                }
+
+                // Our stream JPEG: Y=0 at top. Flip Y from Meta viewport.
                 float streamPx = viewport.x * pixelProjector.ImageWidth;
                 float streamPy = (1f - viewport.y) * pixelProjector.ImageHeight;
                 pixel = new Vector2(
                     Mathf.Clamp(streamPx, 0, pixelProjector.ImageWidth - 1),
                     Mathf.Clamp(streamPy, 0, pixelProjector.ImageHeight - 1)
+                );
+                bundle = CreateTriggerCaptureBundle(
+                    triggerTimestampMs,
+                    triggerPose,
+                    hitPoint,
+                    pixel
+                );
+                Debug.Log(
+                    $"[TrackingManager] Trigger bundle seed: ts_ms={triggerTimestampMs}, " +
+                    $"hit=({hitPoint.x:F3},{hitPoint.y:F3},{hitPoint.z:F3}), " +
+                    $"pose_pos=({triggerPose.position.x:F3},{triggerPose.position.y:F3},{triggerPose.position.z:F3}), " +
+                    $"pose_rot=({triggerPose.rotation.x:F4},{triggerPose.rotation.y:F4},{triggerPose.rotation.z:F4},{triggerPose.rotation.w:F4}), " +
+                    $"viewport=({viewport.x:F4},{viewport.y:F4}), rgb_px=({streamPx:F1},{streamPy:F1})"
                 );
             }
             else if (pixelProjector != null && pixelProjector.IsReady)
@@ -158,7 +213,7 @@ namespace SmartRoom.Tracking
             Debug.Log($"[TrackingManager] Trigger at world={hitPoint}, pixel=({pixel.x:F0},{pixel.y:F0})");
 
             ShowStatus("Detecting...");
-            await DetectAsync(pixel);
+            await DetectAsync(pixel, bundle);
         }
 
         private Vector2 WorldToScreenPoint(Vector3 worldPoint)
@@ -187,48 +242,158 @@ namespace SmartRoom.Tracking
             };
         }
 
-        private float[] BuildRgbCameraPose()
-        {
-            // RGB camera world pose from PassthroughCameraAccess.GetCameraPose().
-            // Sends position (x,y,z) + rotation quaternion (x,y,z,w) as 7 floats.
-            // Reference: https://developers.meta.com/horizon/documentation/unity/unity-pca-documentation/
-            if (pixelProjector == null || !pixelProjector.IsReady
-                || pixelProjector.CameraAccess == null
-                || !pixelProjector.CameraAccess.IsPlaying)
-                return null;
-
-            var pose = pixelProjector.CameraAccess.GetCameraPose();
-            return new float[] {
-                pose.position.x, pose.position.y, pose.position.z,
-                pose.rotation.x, pose.rotation.y, pose.rotation.z, pose.rotation.w,
-            };
-        }
-
-        private float[] GetDepthReprojMatrix()
-        {
-            // _EnvironmentDepthReprojectionMatrices is a global shader
-            // array set by the Meta Depth API.  Index 0 = left eye.
-            var mat = Shader.GetGlobalMatrix("_EnvironmentDepthReprojectionMatrices");
-            // Unity Matrix4x4 is column-major; flatten to row-major for Python.
-            return new float[] {
-                mat.m00, mat.m01, mat.m02, mat.m03,
-                mat.m10, mat.m11, mat.m12, mat.m13,
-                mat.m20, mat.m21, mat.m22, mat.m23,
-                mat.m30, mat.m31, mat.m32, mat.m33,
-            };
-        }
-
-        private async Task DetectAsync(Vector2 pixel)
+        private async Task UploadAlignedDepthAsync(
+            Networking.DepthStreamModule.AlignedDepthProjectionResult projection,
+            TriggerCaptureBundle bundle)
         {
             try
             {
+                using var http = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+                byte[] sparseBytes = new byte[projection.sparseAlignedDepth.Length * sizeof(float)];
+                System.Buffer.BlockCopy(projection.sparseAlignedDepth, 0, sparseBytes, 0, sparseBytes.Length);
+                var payload = JsonConvert.SerializeObject(new
+                {
+                    width = projection.rgbWidth,
+                    height = projection.rgbHeight,
+                    sparse_depth_f32_le = System.Convert.ToBase64String(sparseBytes),
+                    valid_mask_u8 = System.Convert.ToBase64String(projection.validMask),
+                    rgb_intrinsics9 = bundle?.rgbIntrinsics9,
+                    rgb_pose7 = bundle?.rgbPose7,
+                    trigger_timestamp_ms = bundle?.triggerTimestampMs,
+                    debug_projection_meta = projection.debugProjectionMeta == null ? null : new
+                    {
+                        depth_width = projection.debugProjectionMeta.depthWidth,
+                        depth_height = projection.debugProjectionMeta.depthHeight,
+                        rgb_width = projection.debugProjectionMeta.rgbWidth,
+                        rgb_height = projection.debugProjectionMeta.rgbHeight,
+                        source_width = projection.debugProjectionMeta.sourceWidth,
+                        source_height = projection.debugProjectionMeta.sourceHeight,
+                        attempted_points = projection.debugProjectionMeta.attemptedPoints,
+                        valid_points = projection.debugProjectionMeta.validPoints,
+                        clipped_points = projection.debugProjectionMeta.clippedPoints,
+                        points_behind_camera = projection.debugProjectionMeta.pointsBehindCamera,
+                        collided_pixels = projection.debugProjectionMeta.collidedPixels,
+                        min_pixel_x = projection.debugProjectionMeta.minPixelX,
+                        max_pixel_x = projection.debugProjectionMeta.maxPixelX,
+                        min_pixel_y = projection.debugProjectionMeta.minPixelY,
+                        max_pixel_y = projection.debugProjectionMeta.maxPixelY,
+                        avg_pixel_x = projection.debugProjectionMeta.avgPixelX,
+                        avg_pixel_y = projection.debugProjectionMeta.avgPixelY,
+                        min_rgb_camera_z = projection.debugProjectionMeta.minRgbCameraZ,
+                        max_rgb_camera_z = projection.debugProjectionMeta.maxRgbCameraZ,
+                        avg_rgb_camera_z = projection.debugProjectionMeta.avgRgbCameraZ,
+                        used_flip_vertical = projection.debugProjectionMeta.usedFlipVertical,
+                        used_preprocessed_depth_texture = projection.debugProjectionMeta.usedPreprocessedDepthTexture,
+                        captured_at_unix_ms = projection.debugProjectionMeta.capturedAtUnixMs,
+                        depth_value_semantics = projection.debugProjectionMeta.depthValueSemantics,
+                    },
+                });
+                var content = new System.Net.Http.StringContent(payload, Encoding.UTF8, "application/json");
+                var resp = await http.PostAsync($"{backendBaseUrl}/api/depth/aligned-v2", content);
+                if (!resp.IsSuccessStatusCode)
+                    Debug.LogWarning($"[TrackingManager] Aligned depth upload failed: {resp.StatusCode}");
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogWarning($"[TrackingManager] Aligned depth upload error: {ex.Message}");
+            }
+        }
+
+        private TriggerCaptureBundle CreateTriggerCaptureBundle(
+            long triggerTimestampMs,
+            Pose triggerPose,
+            Vector3 hitPoint,
+            Vector2 pixel)
+        {
+            if (pixelProjector == null || pixelProjector.CameraAccess == null)
+                return null;
+
+            var pca = pixelProjector.CameraAccess;
+            var depthSnapshot = depthStream != null ? depthStream.CaptureSnapshot() : null;
+            var bundle = new TriggerCaptureBundle
+            {
+                triggerTimestampMs = triggerTimestampMs,
+                pcaTimestampMs = triggerTimestampMs,
+                unityFrameCount = Time.frameCount,
+                hitX = hitPoint.x,
+                hitY = hitPoint.y,
+                hitZ = hitPoint.z,
+                pixelX = pixel.x,
+                pixelY = pixel.y,
+                rgbFrameWidth = pixelProjector.ImageWidth,
+                rgbFrameHeight = pixelProjector.ImageHeight,
+                rgbRequestedWidth = pca.RequestedResolution.x,
+                rgbRequestedHeight = pca.RequestedResolution.y,
+                rgbCurrentWidth = pca.CurrentResolution.x,
+                rgbCurrentHeight = pca.CurrentResolution.y,
+                rgbIntrinsics9 = BuildRgbIntrinsics(),
+                rgbPose7 = new[]
+                {
+                    triggerPose.position.x, triggerPose.position.y, triggerPose.position.z,
+                    triggerPose.rotation.x, triggerPose.rotation.y, triggerPose.rotation.z, triggerPose.rotation.w,
+                },
+                depthSnapshot = depthSnapshot,
+            };
+
+            Debug.Log(
+                $"[TrackingManager] Trigger bundle frozen: ts_ms={bundle.triggerTimestampMs}, " +
+                $"pca_ts_ms={bundle.pcaTimestampMs}, " +
+                $"unity_frame={bundle.unityFrameCount}, rgb={bundle.rgbFrameWidth}x{bundle.rgbFrameHeight}, " +
+                $"pca_current={bundle.rgbCurrentWidth}x{bundle.rgbCurrentHeight}, " +
+                $"depth_sampled={(depthSnapshot != null ? depthSnapshot.sampledWidth.ToString() : "none")}x{(depthSnapshot != null ? depthSnapshot.sampledHeight.ToString() : "none")}, " +
+                $"depth_source={(depthSnapshot != null ? depthSnapshot.sourceWidth.ToString() : "none")}x{(depthSnapshot != null ? depthSnapshot.sourceHeight.ToString() : "none")}"
+            );
+
+            return bundle;
+        }
+
+        private async Task DetectAsync(Vector2 pixel, TriggerCaptureBundle bundle)
+        {
+            try
+            {
+                // Build aligned depth on Unity side using Meta's APIs
+                if (bundle != null && bundle.depthSnapshot != null && pixelProjector != null)
+                {
+                    var pca = pixelProjector.CameraAccess;
+                    if (pca != null && pca.isActiveAndEnabled)
+                    {
+                        var projection = depthStream.BuildAlignedDepth(
+                            bundle.depthSnapshot,
+                            bundle.rgbFrameWidth, bundle.rgbFrameHeight,
+                            bundle.rgbPose7,
+                            pca);
+                        if (projection != null)
+                            await UploadAlignedDepthAsync(projection, bundle);
+                    }
+                }
+
                 var payload = JsonConvert.SerializeObject(new
                 {
                     pixel_x = pixel.x,
                     pixel_y = pixel.y,
-                    rgb_intrinsics = BuildRgbIntrinsics(),
-                    rgb_pose = BuildRgbCameraPose(),
-                    depth_reproj = GetDepthReprojMatrix(),
+                    trigger_bundle_meta = bundle == null ? null : new
+                    {
+                        trigger_timestamp_ms = bundle.triggerTimestampMs,
+                        unity_frame_count = bundle.unityFrameCount,
+                        hit_xyz = new[] { bundle.hitX, bundle.hitY, bundle.hitZ },
+                        pixel_xy = new[] { bundle.pixelX, bundle.pixelY },
+                        rgb_frame_wh = new[] { bundle.rgbFrameWidth, bundle.rgbFrameHeight },
+                        rgb_requested_wh = new[] { bundle.rgbRequestedWidth, bundle.rgbRequestedHeight },
+                        rgb_current_wh = new[] { bundle.rgbCurrentWidth, bundle.rgbCurrentHeight },
+                        rgb_intrinsics9 = bundle.rgbIntrinsics9,
+                        rgb_pose7 = bundle.rgbPose7,
+                        depth_snapshot = bundle.depthSnapshot == null ? null : new
+                        {
+                            sampled_wh = new[] { bundle.depthSnapshot.sampledWidth, bundle.depthSnapshot.sampledHeight },
+                            source_wh = new[] { bundle.depthSnapshot.sourceWidth, bundle.depthSnapshot.sourceHeight },
+                            z_buffer_params = bundle.depthSnapshot.zBufferParams,
+                            reprojection_matrix = bundle.depthSnapshot.reprojectionMatrix,
+                            used_preprocessed_depth_texture = bundle.depthSnapshot.usedPreprocessedDepthTexture,
+                            used_flip_vertical = bundle.depthSnapshot.usedFlipVertical,
+                            unity_frame_count = bundle.depthSnapshot.unityFrameCount,
+                            captured_at_unix_ms = bundle.depthSnapshot.capturedAtUnixMs,
+                        },
+                    },
                 });
 
                 using var http = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(15) };
