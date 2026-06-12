@@ -9,8 +9,10 @@ from PySide6.QtWidgets import QApplication
 
 from discover_client.gui.evidence_page import EvidencePage
 from discover_client.gui.main_window import MainWindow
+from discover_client.identification.data_snapshot import SensorReading
 from discover_client.identification.device import Device
 from discover_client.identification.evidence import SignalEvidence
+from discover_client.identification.features import DeviceFeatures
 
 
 def _get_app() -> QApplication:
@@ -24,6 +26,8 @@ class _FakeWorker(QObject):
     event_received = Signal(str, str, float, str, dict)
     evidence_produced = Signal(object)
     dedup_updated = Signal(list)
+    features_updated = Signal(list)
+    data_updated = Signal(dict)
     status_changed = Signal(str, bool)
 
 
@@ -48,7 +52,7 @@ def test_main_window_routes_worker_evidence_to_evidence_page() -> None:
     window = MainWindow()
     window._add_panel("mqtt-lab", "mqtt", {"host": "broker.local"})
 
-    assert window._stack.count() == 3
+    assert window._stack.count() == 5
     assert window._stack.currentIndex() == 0
 
     window._on_event(
@@ -90,7 +94,7 @@ def test_main_window_routes_dedup_updates_to_dedup_page() -> None:
         service_types={"_matter._tcp.local."},
     )
 
-    assert window._stack.count() == 3
+    assert window._stack.count() == 5
 
     window._on_dedup_updated([device])
 
@@ -102,4 +106,55 @@ def test_main_window_routes_dedup_updates_to_dedup_page() -> None:
     assert table.item(0, 3).text() == "58:04:4F"
     assert table.item(0, 4).text() == "TP-Link Systems Inc."
     assert table.item(0, 5).text() == "_matter._tcp.local."
-    assert table.item(0, 6).text() == "2"
+    assert table.item(0, 7).text() == "2"
+
+
+def test_main_window_routes_feature_updates_to_features_page() -> None:
+    _get_app()
+    window = MainWindow()
+
+    window._on_features_updated(
+        [
+            DeviceFeatures(
+                device_id="device-1",
+                capabilities=["数值型数据", "温度传感", "湿度传感"],
+                protocols=["MQTT"],
+                vendor_hints=["govee"],
+                topic_prefixes=["govee/H5179/a1b2c3d4e5f6"],
+                evidence_count=36,
+            )
+        ]
+    )
+
+    table = window._features_page._table
+    assert table.rowCount() == 1
+    assert table.item(0, 0).text() == "device-1"
+    assert table.item(0, 1).text() == "数值型数据, 温度传感, 湿度传感"
+    assert table.item(0, 2).text() == "MQTT"
+    assert table.item(0, 3).text() == "govee"
+    assert table.item(0, 4).text() == "govee/H5179/a1b2c3d4e5f6"
+    assert table.item(0, 5).text() == "36"
+
+
+def test_main_window_routes_data_updates_to_data_page() -> None:
+    _get_app()
+    window = MainWindow()
+
+    device = Device(device_id="device-1")
+    window._on_dedup_updated([device])
+    window._on_data_updated(
+        {
+            "device-1": {
+                "temperature": [
+                    SensorReading(sensor_type="temperature", value=23.5, unit="C", timestamp=1710000000.0)
+                ]
+            }
+        }
+    )
+
+    table = window._data_page._table
+    assert table.rowCount() == 1
+    assert table.item(0, 0).text() == "device-1"
+    assert table.item(0, 1).text() == "temperature"
+    assert table.item(0, 2).text() == "23.5"
+    assert table.item(0, 3).text() == "C"

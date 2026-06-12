@@ -6,7 +6,7 @@ import threading
 from PySide6.QtCore import QObject, Signal
 
 from discover_client.client import DiscoverClient
-from discover_client.identification import ANNOTATORS, Deduplicator
+from discover_client.identification import ANNOTATORS, DataSnapshot, Deduplicator, FeatureExtractor
 from discover_client.source import SourceEvent
 from discover_client.config import load_config
 
@@ -17,6 +17,8 @@ class Worker(QObject):
     event_received = Signal(str, str, float, str, dict)
     evidence_produced = Signal(object)
     dedup_updated = Signal(list)
+    features_updated = Signal(list)
+    data_updated = Signal(dict)
     status_changed = Signal(str, bool)
 
     def __init__(self, parent=None):
@@ -25,6 +27,8 @@ class Worker(QObject):
         self._thread: threading.Thread | None = None
         self._running = False
         self.deduplicator: Deduplicator | None = None
+        self.feature_extractor: FeatureExtractor | None = None
+        self.data_snapshot: DataSnapshot | None = None
 
     def start(self) -> None:
         if self._running:
@@ -49,6 +53,8 @@ class Worker(QObject):
     async def _async_main(self) -> None:
         self._client = DiscoverClient()
         self.deduplicator = Deduplicator()
+        self.feature_extractor = FeatureExtractor()
+        self.data_snapshot = DataSnapshot()
         configs = load_config()
 
         def on_event(event: SourceEvent) -> None:
@@ -76,7 +82,28 @@ class Worker(QObject):
                 self.evidence_produced.emit(evidence)
                 if self.deduplicator is not None:
                     self.deduplicator.ingest(evidence)
-                    self.dedup_updated.emit(self.deduplicator.get_devices())
+                    devices = self.deduplicator.get_devices()
+                    self.dedup_updated.emit(devices)
+                    if self.feature_extractor is not None:
+                        features = [self.feature_extractor.extract(device) for device in devices]
+                        self.features_updated.emit(features)
+                    if event.event_type == "data" and self.data_snapshot is not None:
+                        data_event = {
+                            "topic": event.payload.get("topic", ""),
+                            "value": event.payload.get("value"),
+                            "timestamp": event.timestamp,
+                        }
+                        for device in devices:
+                            matched = False
+                            for prefix in device.topic_prefixes:
+                                if data_event["topic"].startswith(prefix):
+                                    readings = self.data_snapshot.ingest(device.device_id, data_event)
+                                    if readings:
+                                        self.data_updated.emit(self.data_snapshot.get_all())
+                                    matched = True
+                                    break
+                            if matched:
+                                break
 
         self._client.subscribe(on_event)
 

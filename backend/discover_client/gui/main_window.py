@@ -30,9 +30,12 @@ from PySide6.QtWidgets import (
 )
 
 from discover_client.gui.copyable_table import CopyableTableWidget
+from discover_client.gui.data_page import DataPage
 from discover_client.gui.dedup_page import DedupPage
 from discover_client.gui.evidence_page import EvidencePage
+from discover_client.gui.features_page import FeaturesPage
 from discover_client.identification.device import Device
+from discover_client.identification.features import DeviceFeatures
 from discover_client.identification.evidence import SignalEvidence
 
 # ── Source palette (left sidebar) ───────────────────────────────
@@ -237,9 +240,17 @@ class MainWindow(QMainWindow):
         self._btn_page3 = QPushButton("Dedup")
         self._btn_page3.setObjectName("navBtn")
         self._btn_page3.clicked.connect(lambda: self._stack.setCurrentIndex(2))
+        self._btn_page4 = QPushButton("Features")
+        self._btn_page4.setObjectName("navBtn")
+        self._btn_page4.clicked.connect(lambda: self._stack.setCurrentIndex(3))
+        self._btn_page5 = QPushButton("Data")
+        self._btn_page5.setObjectName("navBtn")
+        self._btn_page5.clicked.connect(lambda: self._stack.setCurrentIndex(4))
         nav.addWidget(self._btn_page1)
         nav.addWidget(self._btn_page2)
         nav.addWidget(self._btn_page3)
+        nav.addWidget(self._btn_page4)
+        nav.addWidget(self._btn_page5)
         nav.addStretch()
         root.addLayout(nav)
 
@@ -305,6 +316,12 @@ class MainWindow(QMainWindow):
         self._dedup_page = DedupPage()
         self._stack.addWidget(self._dedup_page)
 
+        self._features_page = FeaturesPage()
+        self._stack.addWidget(self._features_page)
+
+        self._data_page = DataPage()
+        self._stack.addWidget(self._data_page)
+
         # Worker
         from discover_client.gui.worker import Worker
 
@@ -312,6 +329,8 @@ class MainWindow(QMainWindow):
         self.worker.event_received.connect(self._on_event)
         self.worker.evidence_produced.connect(self._on_evidence)
         self.worker.dedup_updated.connect(self._on_dedup_updated)
+        self.worker.features_updated.connect(self._on_features_updated)
+        self.worker.data_updated.connect(self._on_data_updated)
         self.worker.status_changed.connect(self._on_status)
 
         # Right side starts empty — user adds sources via palette
@@ -445,6 +464,13 @@ class MainWindow(QMainWindow):
 
     def _on_dedup_updated(self, devices: list[Device]) -> None:
         self._dedup_page.set_devices(devices)
+        self._data_page.set_devices(devices)
+
+    def _on_features_updated(self, features: list[DeviceFeatures]) -> None:
+        self._features_page.set_features(features)
+
+    def _on_data_updated(self, snapshot: dict[str, dict[str, list[object]]]) -> None:
+        self._data_page.set_snapshot(snapshot)
 
     def _summarize_event(self, event_type: str, payload: dict) -> str:
         if event_type == "data":
