@@ -1,15 +1,34 @@
 """Background worker that runs DiscoverClient's asyncio loop."""
 
 import asyncio
+import json
 import threading
+from dataclasses import dataclass, field
 
 from PySide6.QtCore import QObject, Signal
 
 from discover_client.client import DiscoverClient
-from discover_client.identification import ANNOTATORS, DataSnapshot, Deduplicator, FeatureExtractor
+from discover_client.gui.device_profile_page import DeviceProfile
+from discover_client.identification import ANNOTATORS, DataSnapshot, Deduplicator, FeatureExtractor, TopicClassifier
 from discover_client.operations import OperationsTracker
 from discover_client.source import SourceEvent
 from discover_client.config import load_config
+
+
+@dataclass
+class _DeviceClassificationState:
+    scores: dict[str, float] = field(default_factory=lambda: {"telemetry": 0.0, "command": 0.0, "unknown": 0.0})
+    samples: int = 0
+
+    def update(self, label: str, confidence: float) -> None:
+        self.samples += 1
+        self.scores[label] = self.scores.get(label, 0.0) + confidence
+
+    def summary(self) -> tuple[str, float]:
+        label = max(self.scores, key=self.scores.get)
+        total = sum(self.scores.values())
+        confidence = 0.0 if total <= 0 else self.scores[label] / total
+        return label, confidence
 
 
 class Worker(QObject):
@@ -17,7 +36,9 @@ class Worker(QObject):
 
     event_received = Signal(str, str, float, str, dict)
     evidence_produced = Signal(object)
+    device_classified = Signal(str, object)
     dedup_updated = Signal(list)
+    device_profile_updated = Signal(list)
     features_updated = Signal(list)
     data_updated = Signal(dict)
     operations_updated = Signal(list)
@@ -32,6 +53,8 @@ class Worker(QObject):
         self.feature_extractor: FeatureExtractor | None = None
         self.data_snapshot: DataSnapshot | None = None
         self._ops_tracker: OperationsTracker | None = None
+        self._classifier: TopicClassifier | None = None
+        self._classification_state: dict[str, _DeviceClassificationState] = {}
 
     def start(self) -> None:
         if self._running:
@@ -59,6 +82,7 @@ class Worker(QObject):
         self.feature_extractor = FeatureExtractor()
         self.data_snapshot = DataSnapshot()
         self._ops_tracker = OperationsTracker()
+        self._classifier = TopicClassifier()
         configs = load_config()
 
         def on_event(event: SourceEvent) -> None:
@@ -91,11 +115,38 @@ class Worker(QObject):
                     if self.feature_extractor is not None:
                         features = [self.feature_extractor.extract(device) for device in devices]
                         self.features_updated.emit(features)
-                    if device is not None and self._ops_tracker is not None:
+
+                    classification = None
+                    if (
+                        event.source_type == "mqtt"
+                        and event.event_type == "data"
+                        and self._classifier is not None
+                    ):
+                        classification = self._classifier.classify(
+                            event.payload.get("topic", ""),
+                            event.payload.get("value"),
+                        )
+                        state = self._classification_state.setdefault(device.device_id, _DeviceClassificationState())
+                        state.update(classification.label, classification.confidence)
+                        self.device_classified.emit(device.device_id, classification)
+
+                    if (
+                        device is not None
+                        and self._ops_tracker is not None
+                        and classification is not None
+                        and classification.label == "command"
+                        and classification.confidence >= 0.7
+                    ):
                         changed = self._ops_tracker.ingest(device.device_id, evidence)
                         if changed is not None:
                             self.operations_updated.emit(self._ops_tracker.get_capabilities(device.device_id))
-                    if event.event_type == "data" and self.data_snapshot is not None:
+                    if (
+                        event.event_type == "data"
+                        and self.data_snapshot is not None
+                        and classification is not None
+                        and classification.label == "telemetry"
+                        and classification.confidence >= 0.7
+                    ):
                         data_event = {
                             "topic": event.payload.get("topic", ""),
                             "value": event.payload.get("value"),
@@ -112,6 +163,7 @@ class Worker(QObject):
                                     break
                             if matched:
                                 break
+                    self.device_profile_updated.emit(self._build_device_profiles(devices))
 
         self._client.subscribe(on_event)
 
@@ -126,3 +178,68 @@ class Worker(QObject):
                 await asyncio.sleep(0.1)
         finally:
             await self._client.stop()
+
+    def publish_mqtt(self, topic: str, payload: object) -> bool:
+        if not topic or self._client is None:
+            return False
+
+        encoded = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=True)
+        for source in self._client._sources.values():
+            if getattr(source, "source_type", None) != "mqtt":
+                continue
+            client = getattr(source, "_client", None)
+            if client is None:
+                continue
+            client.publish(topic, encoded)
+            return True
+        return False
+
+    def _build_device_profiles(self, devices: list) -> list[DeviceProfile]:
+        profiles: list[DeviceProfile] = []
+        for device in devices:
+            category, confidence = self._classification_state.get(device.device_id, _DeviceClassificationState()).summary()
+            data_sensors: dict[str, dict] = {}
+            if self.data_snapshot is not None:
+                for sensor_name, reading in self.data_snapshot.get_latest(device.device_id).items():
+                    data_sensors[sensor_name] = {
+                        "value": reading.value,
+                        "unit": reading.unit,
+                        "ts": reading.timestamp,
+                    }
+
+            operations: list[dict] = []
+            if self._ops_tracker is not None:
+                for capability in self._ops_tracker.get_capabilities(device.device_id):
+                    operations.append(
+                        {
+                            "action": capability.action.replace("_", " ").title(),
+                            "topic": capability.topic,
+                            "accepted_values": list(capability.accepted_values),
+                            "args": _infer_operation_args(capability.topic, capability.accepted_values),
+                        }
+                    )
+
+            profiles.append(
+                DeviceProfile(
+                    device_id=device.device_id,
+                    category=category,
+                    confidence=confidence,
+                    ip_addresses=set(device.ip_addresses),
+                    mac_prefixes=set(device.mac_prefixes),
+                    vendor=device.vendor,
+                    data_sensors=data_sensors,
+                    operations=operations,
+                    total_evidence_count=device.total_evidence_count,
+                    last_seen=device.last_seen,
+                )
+            )
+        return profiles
+
+
+def _infer_operation_args(topic: str, accepted_values: list[str]) -> list[dict]:
+    if accepted_values:
+        return []
+    lowered = topic.lower()
+    if any(token in lowered for token in {"brightness", "level", "dimmer"}):
+        return [{"key": "value", "type": "number", "example": "50"}]
+    return [{"key": "value", "type": "string", "example": ""}]

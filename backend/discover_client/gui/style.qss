@@ -192,6 +192,60 @@ QMainWindow {
     padding: 16px;
 }
 
+#deviceProfileCard {
+    background-color: rgb(33, 37, 43);
+    border: 1px solid rgb(44, 49, 58);
+    border-radius: 10px;
+}
+
+#deviceProfileCard:hover {
+    border: 1px solid rgb(189, 147, 249);
+}
+
+#deviceProfileTitle {
+    font-size: 12pt;
+    font-weight: bold;
+    background: transparent;
+}
+
+#deviceProfileSubtitle,
+#deviceProfileIdentity,
+#deviceProfileMeta,
+#deviceProfileEvidence,
+#deviceProfileToggle,
+#deviceProfileOperationMeta,
+#deviceProfileDataItem {
+    background: transparent;
+}
+
+#deviceProfileSubtitle,
+#deviceProfileIdentity,
+#deviceProfileOperationMeta,
+#deviceProfileDataItem {
+    color: rgb(140, 145, 160);
+}
+
+#deviceProfileMeta,
+#deviceProfileEvidence,
+#deviceProfileSectionTitle,
+#deviceProfileDot,
+#deviceProfileToggle {
+    color: rgb(189, 147, 249);
+}
+
+#deviceProfileSection {
+    background-color: rgb(40, 44, 52);
+    border: 1px solid rgb(44, 49, 58);
+    border-radius: 8px;
+}
+
+#deviceProfileInput {
+    background-color: rgb(24, 26, 31);
+    border: 1px solid rgb(44, 49, 58);
+    border-radius: 6px;
+    padding: 6px 8px;
+}
+
 #navBtn {
     background-color: rgb(44, 49, 58);
     color: rgb(221, 221, 221);

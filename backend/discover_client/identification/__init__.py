@@ -1,6 +1,7 @@
 """Device identification primitives and annotator registry."""
 
 from discover_client.identification.annotator import ANNOTATORS, Annotator, register_annotator
+from discover_client.identification.classifier import Classification, TopicClassifier
 from discover_client.identification.data_snapshot import DataSnapshot, SensorReading
 from discover_client.identification.deduplicator import Deduplicator
 from discover_client.identification.device import Device, DeviceHypothesis
@@ -13,6 +14,8 @@ __all__ = [
     "ANNOTATORS",
     "Annotator",
     "register_annotator",
+    "Classification",
+    "TopicClassifier",
     "DataSnapshot",
     "Device",
     "DeviceHypothesis",

@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
 from discover_client.gui.copyable_table import CopyableTableWidget
 from discover_client.gui.data_page import DataPage
 from discover_client.gui.dedup_page import DedupPage
+from discover_client.gui.device_profile_page import DeviceProfile, DeviceProfilePage
 from discover_client.gui.evidence_page import EvidencePage
 from discover_client.gui.features_page import FeaturesPage
 from discover_client.gui.operations_page import OperationsPage
@@ -245,16 +246,20 @@ class MainWindow(QMainWindow):
         self._btn_page6 = QPushButton("Operations")
         self._btn_page6.setObjectName("navBtn")
         self._btn_page6.clicked.connect(lambda: self._stack.setCurrentIndex(3))
+        self._btn_page7 = QPushButton("Device Profiles")
+        self._btn_page7.setObjectName("navBtn")
+        self._btn_page7.clicked.connect(lambda: self._stack.setCurrentIndex(4))
         self._btn_page3 = QPushButton("Dedup")
         self._btn_page3.setObjectName("navBtn")
-        self._btn_page3.clicked.connect(lambda: self._stack.setCurrentIndex(4))
+        self._btn_page3.clicked.connect(lambda: self._stack.setCurrentIndex(5))
         self._btn_page4 = QPushButton("Features")
         self._btn_page4.setObjectName("navBtn")
-        self._btn_page4.clicked.connect(lambda: self._stack.setCurrentIndex(5))
+        self._btn_page4.clicked.connect(lambda: self._stack.setCurrentIndex(6))
         nav.addWidget(self._btn_page1)
         nav.addWidget(self._btn_page2)
         nav.addWidget(self._btn_page5)
         nav.addWidget(self._btn_page6)
+        nav.addWidget(self._btn_page7)
         nav.addWidget(self._btn_page3)
         nav.addWidget(self._btn_page4)
         nav.addStretch()
@@ -325,6 +330,10 @@ class MainWindow(QMainWindow):
         self._operations_page = OperationsPage()
         self._stack.addWidget(self._operations_page)
 
+        self._device_profile_page = DeviceProfilePage()
+        self._device_profile_page.publish_requested.connect(self._on_publish_requested)
+        self._stack.addWidget(self._device_profile_page)
+
         self._dedup_page = DedupPage()
         self._stack.addWidget(self._dedup_page)
 
@@ -338,6 +347,7 @@ class MainWindow(QMainWindow):
         self.worker.event_received.connect(self._on_event)
         self.worker.evidence_produced.connect(self._on_evidence)
         self.worker.dedup_updated.connect(self._on_dedup_updated)
+        self.worker.device_profile_updated.connect(self._on_device_profiles_updated)
         self.worker.features_updated.connect(self._on_features_updated)
         self.worker.data_updated.connect(self._on_data_updated)
         self.worker.operations_updated.connect(self._on_operations_updated)
@@ -486,6 +496,12 @@ class MainWindow(QMainWindow):
         if not capabilities:
             return
         self._operations_page.set_capabilities(capabilities[0].device_id, capabilities)
+
+    def _on_device_profiles_updated(self, profiles: list[DeviceProfile]) -> None:
+        self._device_profile_page.set_profiles(profiles)
+
+    def _on_publish_requested(self, topic: str, payload: object) -> None:
+        self.worker.publish_mqtt(topic, payload)
 
     def _summarize_event(self, event_type: str, payload: dict) -> str:
         if event_type == "data":

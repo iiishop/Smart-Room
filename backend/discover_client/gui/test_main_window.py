@@ -7,12 +7,14 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QApplication
 
+from discover_client.gui.device_profile_page import DeviceProfile
 from discover_client.gui.evidence_page import EvidencePage
 from discover_client.gui.main_window import MainWindow
 from discover_client.identification.data_snapshot import SensorReading
 from discover_client.identification.device import Device
 from discover_client.identification.evidence import SignalEvidence
 from discover_client.identification.features import DeviceFeatures
+from discover_client.operations import OperationCapability
 
 
 def _get_app() -> QApplication:
@@ -26,6 +28,8 @@ class _FakeWorker(QObject):
     event_received = Signal(str, str, float, str, dict)
     evidence_produced = Signal(object)
     dedup_updated = Signal(list)
+    device_classified = Signal(str, object)
+    device_profile_updated = Signal(list)
     features_updated = Signal(list)
     data_updated = Signal(dict)
     operations_updated = Signal(list)
@@ -53,7 +57,7 @@ def test_main_window_routes_worker_evidence_to_evidence_page() -> None:
     window = MainWindow()
     window._add_panel("mqtt-lab", "mqtt", {"host": "broker.local"})
 
-    assert window._stack.count() == 6
+    assert window._stack.count() == 7
     assert window._stack.currentIndex() == 0
 
     window._on_event(
@@ -95,7 +99,7 @@ def test_main_window_routes_dedup_updates_to_dedup_page() -> None:
         service_types={"_matter._tcp.local."},
     )
 
-    assert window._stack.count() == 6
+    assert window._stack.count() == 7
 
     window._on_dedup_updated([device])
 
@@ -168,3 +172,48 @@ def test_main_window_starts_with_empty_operations_placeholder() -> None:
     assert window._operations_page._placeholder.text() == "(no operations discovered)"
     assert not window._operations_page._table.isVisible()
     assert not window._operations_page._placeholder.isHidden()
+
+
+def test_main_window_routes_device_profiles_to_profile_page() -> None:
+    _get_app()
+    window = MainWindow()
+
+    window._on_device_profiles_updated(
+        [
+            DeviceProfile(
+                device_id="device-3",
+                category="Matter 设备",
+                confidence=0.68,
+                ip_addresses={"192.168.5.2"},
+                mac_prefixes={"58:04:4F"},
+                vendor="TP-Link Hub",
+                data_sensors={
+                    "temperature": {"value": 25.3, "unit": "C", "ts": 1710000000.0},
+                },
+                operations=[
+                    {
+                        "action": "Toggle",
+                        "topic": "device-3/set",
+                        "args": [],
+                        "accepted_values": ["ON", "OFF"],
+                    },
+                    {
+                        "action": "Set Brightness",
+                        "topic": "device-3/brightness/set",
+                        "args": [{"key": "value", "type": "number", "example": "50"}],
+                        "accepted_values": [],
+                    },
+                ],
+                total_evidence_count=7,
+                last_seen=1710000000.0,
+            )
+        ]
+    )
+
+    assert window._device_profile_page._cards_layout.count() == 1
+    card = window._device_profile_page._cards["device-3"]
+    assert card._title_label.text() == "device-3"
+    assert "TP-Link Hub" in card._subtitle_label.text()
+    assert "Matter 设备" in card._meta_label.text()
+    assert card._data_layout.count() == 1
+    assert card._operations_layout.count() == 2
