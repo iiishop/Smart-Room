@@ -428,6 +428,16 @@ class MainWindow(QMainWindow):
             value = payload.get("value", "")
             return f"{topic} -> {value}"
         if event_type == "discovery":
+            # nmap: IP + MAC + vendor
+            if "mac" in payload:
+                ip = payload.get("ip", "")
+                mac = payload.get("mac", "") or ""
+                vendor = payload.get("vendor", "") or ""
+                hostnames = payload.get("hostnames", [])
+                name = hostnames[0] if hostnames else ""
+                os = payload.get("os_guess", "") or ""
+                return f"{name} ({ip})  {mac}  {vendor}  {os}"
+            # mDNS/SSDP
             name = payload.get("name") or payload.get("service_type", "")
             host = payload.get("host", "")
             return f"+ {name} @ {host}"
