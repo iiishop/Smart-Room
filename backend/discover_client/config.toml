@@ -2,7 +2,24 @@
 
 
 [[sources]]
-source_id = "127.0.0.1"
+source_id = "1"
+source_type = "mdns"
+enabled = true
+
+[sources.settings]
+scan_interval_s = 30
+service_types = []
+
+[[sources]]
+source_id = "2"
+source_type = "ssdp"
+enabled = true
+
+[sources.settings]
+scan_interval_s = 60
+
+[[sources]]
+source_id = "3"
 source_type = "mqtt"
 enabled = true
 
@@ -13,21 +30,3 @@ port = 1883
 topic_blacklist = []
 topic_whitelist = []
 username = ""
-
-[[sources]]
-source_id = "111"
-source_type = "mdns"
-enabled = true
-
-[sources.settings]
-scan_interval_s = 30
-service_types = ["_mqtt._tcp.local.", "_home-assistant._tcp.local.", "_http._tcp.local."]
-
-[[sources]]
-source_id = "222"
-source_type = "mdns"
-enabled = true
-
-[sources.settings]
-scan_interval_s = 30
-service_types = ["_mqtt._tcp.local.", "_home-assistant._tcp.local.", "_http._tcp.local."]
