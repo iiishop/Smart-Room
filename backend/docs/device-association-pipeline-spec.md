@@ -44,14 +44,34 @@ If the device is a known commercial product (e.g. Govee H5179), VLM may output
 the exact model name directly. The matching step then becomes a simple string
 lookup against device profiles that mention that model.
 
-### Tier 2 — MQTT Identify Protocol (fallback, requires firmware support)
+### Tier 2 — Operation-Based Identification (fallback, no firmware change)
 
-VR system publishes an identify command to a candidate device via MQTT. The
-device responds with a visible signal (LED flash, screen indicator). The VR
-camera detects which device in view is responding.
+Two strategies, tried in order:
 
-Requires each device to implement a minimal `device/identify` handler. For
-DIY lab devices, this is a firmware-level change — fully controllable.
+**2a. Existing Capability Trigger (preferred)**
+
+Use already-discovered device operations (from the operation pipeline). If
+a device is known to have a switch/toggle/control topic, publish a test
+command and watch for visual change:
+
+```
+VR publishes:  govee/.../switch ← {"value": "on"}
+Camera sees:   one device's LED lights up → device matched
+```
+
+No firmware changes needed — the operation pipeline has already
+discovered the capability by observing topic patterns. The camera detects
+state change (light on/off, screen toggle, relay click) and associates it
+with the commanding device.
+
+**2b. Dedicated Identify LED (backup)**
+
+If no usable operation is discovered, fall back to a standard identify
+topic. The device responds with a visible signal (LED flash, screen
+indicator). The camera detects which device is responding.
+
+Requires each device to implement a `device/identify` handler. For DIY
+lab devices, this is a firmware-level change.
 
 ### Tier 3 — Manual Selection (last resort)
 
@@ -133,27 +153,43 @@ Output as JSON:
 
 **Confidence threshold**: ≥ 0.7 → accept match. < 0.7 → fall to Tier 2.
 
-### 3.4 Identify Protocol (both sides, new)
+### 3.4 Identification Protocol (both sides, new)
 
-**MQTT topic convention**:
+**Strategy A — Capability Trigger (no firmware change needed):**
+
+When the operation pipeline has discovered a usable capability (e.g. a
+`switch` topic), the VR system publishes a test command to that topic:
+
+```
+govee/.../switch ← {"value": "on"}     # use discovered operation topic
+```
+
+The camera detects a visual state change (LED lights up, screen toggles,
+relay clicks) and associates the change with the commanding device. This
+requires NO firmware change — it uses already-observed operation patterns.
+
+**Strategy B — Dedicated Identify (firmware fallback):**
+
+If no usable operation is discovered, fall back to a standard identify
+topic:
 
 ```
 device/identify/{device_id}    ← VR publishes {"action": "identify", "duration_s": 3}
 device/identify/ack/{device_id} ← Device publishes {"status": "identifying"}
 ```
 
-**Device handler** (firmware-side, per-device):
+**Device handler** (firmware-side, per-device, only if no operation available):
 
 ```
 on_message("device/identify/{my_device_id}"):
     if msg.action == "identify":
-        flash_led(msg.duration_s)   # or show "IDENTIFY" on screen
+        flash_led(msg.duration_s)
         publish("device/identify/ack/{my_device_id}", {"status": "identifying"})
 ```
 
-**VR detection**: When identify is active and the device acknowledges, the VR
-system monitors the camera feed for a known visual pattern (LED blink at known
-frequency, screen text change). If detected, the device is bound.
+**VR detection**: The VR system monitors the camera feed for a visual change
+(LED blink, screen text change, state toggle). If detected, the device is
+bound.
 
 ### 3.5 Manual Binding (VR side, fallback)
 
@@ -209,15 +245,18 @@ On user gaze:
 | 3 | MQTT profile publishing | Discover | MQTT client |
 | 4 | VLM visual description prompt | VR | VLM API key, camera access |
 | 5 | Match engine (LLM call) | Shared | DeviceProfile, VLM output |
-| 6 | Identify protocol handler | Both | MQTT topic convention, firmware change |
-| 7 | Manual binding UI | VR | Spatial anchor, device list UI |
-| 8 | Tier orchestration (fallback logic) | VR | All of the above |
+| 6 | Operation-based identification | Both | Operation pipeline, MQTT, camera change detection |
+| 7 | Identify protocol handler (firmware fallback) | Both | MQTT topic convention, firmware change |
+| 8 | Manual binding UI | VR | Spatial anchor, device list UI |
+| 9 | Tier orchestration (fallback logic) | VR | All of the above |
 
 ## Success Criteria
 
 - Tier 1 correctly matches a Govee H5179 (commercial device with recognizable
   topic patterns) against its visual appearance within 3s of gaze
-- Tier 2 correctly associates a DIY breadboard sensor using LED identify within
+- Tier 2a correctly associates a device with a known switch topic by triggering
+  it and detecting the visual state change within 3s of command
+- Tier 2b correctly associates a DIY breadboard sensor using LED identify within
   5s of command
 - Tier 3 manual binding completes within 10s of user interaction
 - Profiles update within 60s of new device data appearing
