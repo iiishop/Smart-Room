@@ -1,0 +1,29 @@
+# discover_client/config.toml - source configurations
+
+[[sources]]
+source_id = "mqtt-lab"
+source_type = "mqtt"
+enabled = true
+
+[sources.settings]
+host = "192.168.1.100"
+port = 1883
+topic_whitelist = ["govee/#", "zigbee2mqtt/#"]
+topic_blacklist = []
+
+[[sources]]
+source_id = "mdns-lan"
+source_type = "mdns"
+enabled = true
+
+[sources.settings]
+scan_interval_s = 30
+service_types = ["_mqtt._tcp.local.", "_home-assistant._tcp.local.", "_http._tcp.local."]
+
+[[sources]]
+source_id = "ssdp-lan"
+source_type = "ssdp"
+enabled = false
+
+[sources.settings]
+scan_interval_s = 60

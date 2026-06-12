@@ -8,6 +8,7 @@ dependencies = [
     "httpx>=0.24.0",
     "numpy>=2.0.0,<2.3.0",
     "opencv-python>=4.12.0.88",
+    "paho-mqtt>=2.0.0",
     "pyside6>=6.10.2",
     "pyyaml>=6.0",
     "Pillow>=11.0.0",
@@ -15,9 +16,11 @@ dependencies = [
     "torch>=2.6.0",
     "torchvision>=0.21.0",
     "transformers>=4.40.0",
+    "tomli>=2.0.0; python_version < '3.11'",
     "uvicorn[standard]>=0.40.0",
     "websocket-client>=1.8.0",
     "websockets>=16.0",
+    "zeroconf>=0.130",
 ]
 
 [build-system]
@@ -25,7 +28,7 @@ requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["quest3server*"]
+include = ["quest3server*", "discover_client*"]
 
 [tool.uv]
 package = true
