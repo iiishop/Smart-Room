@@ -7,12 +7,12 @@ from datetime import datetime
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHeaderView,
-    QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
+from discover_client.gui.main_window import CopyableTableWidget
 from discover_client.identification.device import Device
 
 
@@ -35,7 +35,7 @@ class DedupPage(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
 
-        self._table = QTableWidget(0, len(self.COLUMNS))
+        self._table = CopyableTableWidget(0, len(self.COLUMNS))
         self._table.setObjectName("dedupTable")
         self._table.setHorizontalHeaderLabels(self.COLUMNS)
         self._table.horizontalHeader().setStretchLastSection(True)

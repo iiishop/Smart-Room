@@ -8,12 +8,12 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QHeaderView,
     QTabWidget,
-    QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
+from discover_client.gui.main_window import CopyableTableWidget
 from discover_client.identification.evidence import SignalEvidence
 
 
@@ -27,7 +27,7 @@ class EvidencePage(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._tables: dict[str, QTableWidget] = {}
+        self._tables: dict[str, CopyableTableWidget] = {}
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -40,8 +40,8 @@ class EvidencePage(QWidget):
             self._tables[source_type] = table
             self._tabs.addTab(table, source_type.upper())
 
-    def _make_table(self, columns: list[str]) -> QTableWidget:
-        table = QTableWidget(0, len(columns))
+    def _make_table(self, columns: list[str]) -> CopyableTableWidget:
+        table = CopyableTableWidget(0, len(columns))
         table.setObjectName("evidenceTable")
         table.setHorizontalHeaderLabels(columns)
         table.horizontalHeader().setStretchLastSection(True)
