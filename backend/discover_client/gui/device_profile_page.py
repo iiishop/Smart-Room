@@ -40,9 +40,6 @@ class DeviceProfileCard(QFrame):
         self.setObjectName("deviceProfileCard")
         self._profile = profile
         self._expanded = False
-        self._data_labels: dict[str, QLabel] = {}
-        self._operation_rows: dict[str, QFrame] = {}
-        self._operation_inputs: dict[str, dict[str, QLineEdit]] = {}
 
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 12, 12, 12)
@@ -154,69 +151,70 @@ class DeviceProfileCard(QFrame):
         self._render_operations()
 
     def _render_data(self) -> None:
-        incoming = set(self._profile.data_sensors.keys()) if self._profile.data_sensors else set()
-        existing = set(self._data_labels.keys())
-
-        # Remove labels for sensors that disappeared
-        for removed in existing - incoming:
-            label = self._data_labels.pop(removed)
-            self._data_layout.removeWidget(label)
-            label.deleteLater()
-
+        _clear_layout(self._data_layout)
         if not self._profile.data_sensors:
-            # Show placeholder only if there's no data and no existing labels
-            if not self._data_labels:
-                placeholder = QLabel("(no data)")
-                self._data_layout.addWidget(placeholder)
+            self._data_layout.addWidget(QLabel("(no data)"))
             return
 
-        # Remove placeholder if data exists
-        _remove_first_placeholder(self._data_layout)
-
-        for sensor_name in sorted(self._profile.data_sensors):
-            sensor = self._profile.data_sensors[sensor_name]
-            text = f"{sensor_name}: {sensor.get('value', '')}{sensor.get('unit', '')}"
-            if sensor_name in self._data_labels:
-                self._data_labels[sensor_name].setText(text)
-            else:
-                label = QLabel(text)
-                label.setObjectName("deviceProfileDataItem")
-                self._data_labels[sensor_name] = label
-                self._data_layout.addWidget(label)
+        for sensor_name, sensor in sorted(self._profile.data_sensors.items()):
+            value = sensor.get("value", "")
+            unit = sensor.get("unit", "")
+            label = QLabel(f"{sensor_name}: {value}{unit}")
+            label.setObjectName("deviceProfileDataItem")
+            self._data_layout.addWidget(label)
 
     def _render_operations(self) -> None:
-        incoming_ops = self._profile.operations or []
-        incoming_keys = {_op_key(op) for op in incoming_ops}
-        existing_keys = set(self._operation_rows.keys())
-
-        # Remove rows for operations that disappeared
-        for removed_key in existing_keys - incoming_keys:
-            row = self._operation_rows.pop(removed_key)
-            self._operation_inputs.pop(removed_key, None)
-            self._operations_layout.removeWidget(row)
-            row.deleteLater()
-
-        # Show placeholder only if there are no ops and no existing rows
-        if not incoming_ops:
-            if not self._operation_rows:
-                placeholder = QLabel("(no operations)")
-                self._operations_layout.addWidget(placeholder)
+        _clear_layout(self._operations_layout)
+        if not self._profile.operations:
+            self._operations_layout.addWidget(QLabel("(no operations)"))
             return
 
-        # Remove placeholder if operations exist
-        _remove_first_placeholder(self._operations_layout)
+        for operation in self._profile.operations:
+            row = QFrame()
+            row.setObjectName("deviceProfileOperationRow")
+            row_layout = QVBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(4)
 
-        for operation in incoming_ops:
-            key = _op_key(operation)
-            if key in self._operation_rows:
-                # Row already exists — just update text that might have changed
-                row = self._operation_rows[key]
-                _update_op_row_secondary(row, operation)
+            controls = QHBoxLayout()
+            controls.setContentsMargins(0, 0, 0, 0)
+            controls.setSpacing(6)
+            row_layout.addLayout(controls)
+
+            args = operation.get("args", [])
+            if args:
+                inputs: dict[str, QLineEdit] = {}
+                for arg in args:
+                    field = QLineEdit()
+                    field.setPlaceholderText(str(arg.get("example") or arg.get("key") or "value"))
+                    field.setObjectName("deviceProfileInput")
+                    controls.addWidget(field)
+                    inputs[str(arg.get("key") or "value")] = field
+                button = QPushButton(str(operation.get("action") or "Send"))
+                button.clicked.connect(
+                    lambda _checked=False, op=operation, arg_inputs=inputs: self.publish_requested.emit(
+                        str(op.get("topic") or ""),
+                        {key: widget.text() for key, widget in arg_inputs.items()},
+                    )
+                )
+                controls.addWidget(button)
             else:
-                row, inputs = _build_op_row(operation, self.publish_requested)
-                self._operation_rows[key] = row
-                self._operation_inputs[key] = inputs
-                self._operations_layout.addWidget(row)
+                button = QPushButton(str(operation.get("action") or "Send"))
+                button.clicked.connect(
+                    lambda _checked=False, op=operation: self.publish_requested.emit(
+                        str(op.get("topic") or ""),
+                        _payload_for_operation(op),
+                    )
+                )
+                controls.addWidget(button)
+
+            topic = str(operation.get("topic") or "")
+            topic_label = QLabel(f"topic: {topic}   payload: {json.dumps(_preview_payload(operation), ensure_ascii=True)}")
+            topic_label.setObjectName("deviceProfileOperationMeta")
+            topic_label.setWordWrap(True)
+            row_layout.addWidget(topic_label)
+
+            self._operations_layout.addWidget(row)
 
 
 class DeviceProfilePage(QWidget):
@@ -268,90 +266,6 @@ def _clear_layout(layout: QVBoxLayout) -> None:
         widget = item.widget()
         if widget is not None:
             widget.deleteLater()
-
-
-def _op_key(operation: dict) -> str:
-    topic = str(operation.get("topic") or "")
-    action = str(operation.get("action") or "")
-    return f"{topic}::{action}"
-
-
-def _build_op_row(operation: dict, signal: Signal) -> tuple[QFrame, dict[str, QLineEdit]]:
-    row = QFrame()
-    row.setObjectName("deviceProfileOperationRow")
-    row_layout = QVBoxLayout(row)
-    row_layout.setContentsMargins(0, 0, 0, 0)
-    row_layout.setSpacing(4)
-
-    controls = QHBoxLayout()
-    controls.setContentsMargins(0, 0, 0, 0)
-    controls.setSpacing(6)
-    row_layout.addLayout(controls)
-
-    args = operation.get("args", [])
-    inputs: dict[str, QLineEdit] = {}
-    if args:
-        for arg in args:
-            field = QLineEdit()
-            field.setPlaceholderText(str(arg.get("example") or arg.get("key") or "value"))
-            field.setObjectName("deviceProfileInput")
-            controls.addWidget(field)
-            inputs[str(arg.get("key") or "value")] = field
-        button = QPushButton(str(operation.get("action") or "Send"))
-        button.clicked.connect(
-            lambda _checked=False, op=operation, arg_inputs=inputs: signal.emit(
-                str(op.get("topic") or ""),
-                {key: widget.text() for key, widget in arg_inputs.items()},
-            )
-        )
-        controls.addWidget(button)
-    else:
-        button = QPushButton(str(operation.get("action") or "Send"))
-        button.clicked.connect(
-            lambda _checked=False, op=operation: signal.emit(
-                str(op.get("topic") or ""),
-                _payload_for_operation(op),
-            )
-        )
-        controls.addWidget(button)
-
-    topic = str(operation.get("topic") or "")
-    topic_label = QLabel(f"topic: {topic}   payload: {json.dumps(_preview_payload(operation), ensure_ascii=True)}")
-    topic_label.setObjectName("deviceProfileOperationMeta")
-    topic_label.setWordWrap(True)
-    row_layout.addWidget(topic_label)
-
-    # Stash references for incremental update
-    row._button = button  # type: ignore[attr-defined]
-    row._topic_label = topic_label  # type: ignore[attr-defined]
-
-    return row, inputs
-
-
-def _update_op_row_secondary(row: QFrame, operation: dict) -> None:
-    """Update the button text and topic label of an existing operation row without touching QLineEdits."""
-    button: QPushButton = row._button  # type: ignore[attr-defined]
-    button.setText(str(operation.get("action") or "Send"))
-
-    topic_label: QLabel = row._topic_label  # type: ignore[attr-defined]
-    topic = str(operation.get("topic") or "")
-    topic_label.setText(f"topic: {topic}   payload: {json.dumps(_preview_payload(operation), ensure_ascii=True)}")
-
-
-def _remove_first_placeholder(layout: QVBoxLayout) -> None:
-    """If the first widget in the layout is a '(no data)' or '(no operations)' label, remove it."""
-    if layout.count() == 0:
-        return
-    item = layout.itemAt(0)
-    if item is None:
-        return
-    widget = item.widget()
-    if widget is None:
-        return
-    text = widget.property("text")
-    if isinstance(text, str) and text.startswith("(no "):
-        layout.removeWidget(widget)
-        widget.deleteLater()
 
 
 def _payload_for_operation(operation: dict) -> object:
