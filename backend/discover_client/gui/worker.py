@@ -215,7 +215,11 @@ class Worker(QObject):
                             "action": capability.action.replace("_", " ").title(),
                             "topic": capability.topic,
                             "accepted_values": list(capability.accepted_values),
-                            "args": _infer_operation_args(capability.topic, capability.accepted_values),
+                            "args": _infer_operation_args(
+                                capability.topic,
+                                capability.accepted_values,
+                                list(data_sensors.keys()),
+                            ),
                         }
                     )
 
@@ -236,10 +240,26 @@ class Worker(QObject):
         return profiles
 
 
-def _infer_operation_args(topic: str, accepted_values: list[str]) -> list[dict]:
+def _infer_operation_args(topic: str, accepted_values: list[str], data_keys: list[str] | None = None) -> list[dict]:
     if accepted_values:
         return []
+
+    sensor_keys = (data_keys or [])
+
     lowered = topic.lower()
     if any(token in lowered for token in {"brightness", "level", "dimmer"}):
+        if "brightness" in sensor_keys:
+            return [{"key": "brightness", "type": "number", "example": "50"}]
         return [{"key": "value", "type": "number", "example": "50"}]
+
+    # Power/set topics: prefer "power" key if the device reports it, else use the first sensor key
+    if sensor_keys:
+        if "power" in sensor_keys:
+            return [{"key": "power", "type": "string", "example": "ON"}]
+        if "brightness" in sensor_keys:
+            return [{"key": "brightness", "type": "number", "example": "50"}]
+        # Use the first data key as a hint
+        first = sensor_keys[0]
+        return [{"key": first, "type": "string", "example": ""}]
+
     return [{"key": "value", "type": "string", "example": ""}]
