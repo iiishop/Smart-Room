@@ -53,19 +53,20 @@ class Worker(QObject):
             # Track real connection state from status events
             if event.event_type == "status":
                 msg = event.payload.get("msg", "")
-                if "connected" in msg:
+                if "connected" in msg or msg == "scanning":
                     self.status_changed.emit(event.source_id, True)
-                elif msg in ("stopped",) or "Disconnected" in str(msg):
+                elif msg == "stopped" or "Disconnected" in str(msg):
                     self.status_changed.emit(event.source_id, False)
 
         self._client.subscribe(on_event)
 
+        # All enabled sources start as not-yet-connected
+        for c in configs:
+            if c.enabled:
+                self.status_changed.emit(c.source_id, False)
+
         try:
             await self._client.start(configs)
-            # All enabled sources start as not-yet-connected
-            for c in configs:
-                if c.enabled:
-                    self.status_changed.emit(c.source_id, False)
             while self._running:
                 await asyncio.sleep(0.1)
         finally:

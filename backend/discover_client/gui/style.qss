@@ -117,6 +117,24 @@ QMainWindow {
     font-weight: bold;
 }
 
+/* Global event log table */
+#globalLogTable {
+    background-color: rgb(40, 44, 52);
+    border: 1px solid rgb(44, 49, 58);
+    border-radius: 4px;
+    gridline-color: rgb(44, 49, 58);
+    font-size: 9pt;
+}
+
+#globalLogTable QHeaderView::section {
+    background-color: rgb(33, 37, 43);
+    color: rgb(189, 147, 249);
+    border: none;
+    border-bottom: 1px solid rgb(44, 49, 58);
+    padding: 4px 8px;
+    font-weight: bold;
+}
+
 /* Buttons */
 QPushButton {
     background-color: rgb(189, 147, 249);

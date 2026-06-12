@@ -12,6 +12,7 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -95,7 +96,7 @@ class SourcePalette(QScrollArea):
 # ── Source panel (right side, one per added source) ──────────────
 
 class SourcePanel(QGroupBox):
-    """One added source — shows status, stats, and event table."""
+    """Compact source card — status dot, name, type, stats, settings preview."""
 
     edit_requested = Signal(str, str, dict)  # source_id, source_type, settings
 
@@ -109,8 +110,8 @@ class SourcePanel(QGroupBox):
         self._start_time = time.time()
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(6)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(4)
 
         # Title bar
         title_bar = QHBoxLayout()
@@ -143,39 +144,11 @@ class SourcePanel(QGroupBox):
             preview_label.setWordWrap(True)
             layout.addWidget(preview_label)
 
-        # Event table
-        self._table = QTableWidget(0, 2)
-        self._table.setObjectName("panelTable")
-        self._table.setHorizontalHeaderLabels(["Time", "Event"])
-        self._table.horizontalHeader().setStretchLastSection(True)
-        self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        self._table.setMaximumHeight(160)
-        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        layout.addWidget(self._table)
-
     def mouseDoubleClickEvent(self, event):
         self.edit_requested.emit(self.source_id, self.source_type, self._settings)
         super().mouseDoubleClickEvent(event)
 
-    def add_event(self, event_type: str, payload: dict) -> None:
-        ts = datetime.now().strftime("%H:%M:%S")
-        summary = self._summarize(event_type, payload)
-
-        row = self._table.rowCount()
-        if row >= 200:
-            self._table.removeRow(0)
-            row = 199
-        self._table.insertRow(row)
-        self._table.setItem(row, 0, QTableWidgetItem(ts))
-        item = QTableWidgetItem(summary)
-        if event_type == "error":
-            item.setForeground(QColor("#ff5555"))
-        elif event_type == "discovery":
-            item.setForeground(QColor("#50fa7b"))
-        self._table.setItem(row, 1, item)
-        self._table.scrollToBottom()
-
+    def increment_msg_count(self) -> None:
         self._msg_count += 1
         elapsed = max(time.time() - self._start_time, 1)
         self._stats.setText(f"msgs: {self._msg_count}  rate: {self._msg_count / elapsed:.1f}/s")
@@ -199,21 +172,6 @@ class SourcePanel(QGroupBox):
             if isinstance(w, QLabel) and w.objectName() == "panelPreview":
                 w.setText(preview)
                 break
-
-    def _summarize(self, event_type: str, payload: dict) -> str:
-        if event_type == "data":
-            topic = payload.get("topic", "")
-            value = payload.get("value", "")
-            return f"{topic} -> {value}"
-        if event_type == "discovery":
-            name = payload.get("name") or payload.get("service_type", "")
-            host = payload.get("host", "")
-            return f"+ {name} @ {host}"
-        if event_type == "status":
-            return payload.get("msg", str(payload))
-        if event_type == "error":
-            return f"ERROR: {payload.get('msg', str(payload))}"
-        return str(payload)
 
 
 # ── Main window ──────────────────────────────────────────────────
@@ -260,12 +218,24 @@ class MainWindow(QMainWindow):
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self._card_container = QWidget()
-        self._card_layout = QVBoxLayout(self._card_container)
-        self._card_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self._card_layout.setSpacing(8)
-        self._card_layout.addStretch()
+        self._card_grid = QGridLayout(self._card_container)
+        self._card_grid.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self._card_grid.setSpacing(8)
+        for col in range(4):
+            self._card_grid.setColumnStretch(col, 1)
         self.scroll.setWidget(self._card_container)
-        right.addWidget(self.scroll)
+        right.addWidget(self.scroll, stretch=1)
+
+        # Global event log table — stretches to fill remaining space
+        self._log_table = QTableWidget(0, 3)
+        self._log_table.setObjectName("globalLogTable")
+        self._log_table.setHorizontalHeaderLabels(["Time", "Source", "Event"])
+        self._log_table.horizontalHeader().setStretchLastSection(True)
+        self._log_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self._log_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self._log_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._log_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        right.addWidget(self._log_table, stretch=2)
 
         root.addLayout(right, stretch=1)
 
@@ -296,8 +266,11 @@ class MainWindow(QMainWindow):
 
     def _add_panel(self, source_id: str, source_type: str, settings: dict) -> None:
         panel = SourcePanel(source_id, source_type, settings)
+        panel.setMinimumHeight(90)
         panel.edit_requested.connect(self._on_edit_source)
-        self._card_layout.addWidget(panel)
+        n = len(self._panels)
+        row, col = n // 4, n % 4
+        self._card_grid.addWidget(panel, row, col)
         self._panels[source_id] = panel
 
     def _on_edit_source(self, source_id: str, source_type: str, settings: dict) -> None:
@@ -347,8 +320,43 @@ class MainWindow(QMainWindow):
     # ── Events from worker ───────────────────────────────────
 
     def _on_event(self, source_id: str, event_type: str, payload: dict) -> None:
+        # Update source card stats
         if source_id in self._panels:
-            self._panels[source_id].add_event(event_type, payload)
+            self._panels[source_id].increment_msg_count()
+
+        # Append to global log table
+        ts = datetime.now().strftime("%H:%M:%S")
+        summary = self._summarize_event(event_type, payload)
+
+        row = self._log_table.rowCount()
+        if row >= 500:
+            self._log_table.removeRow(0)
+            row = 499
+        self._log_table.insertRow(row)
+        self._log_table.setItem(row, 0, QTableWidgetItem(ts))
+        self._log_table.setItem(row, 1, QTableWidgetItem(source_id))
+        item = QTableWidgetItem(summary)
+        if event_type == "error":
+            item.setForeground(QColor("#ff5555"))
+        elif event_type == "discovery":
+            item.setForeground(QColor("#50fa7b"))
+        self._log_table.setItem(row, 2, item)
+        self._log_table.scrollToBottom()
+
+    def _summarize_event(self, event_type: str, payload: dict) -> str:
+        if event_type == "data":
+            topic = payload.get("topic", "")
+            value = payload.get("value", "")
+            return f"{topic} -> {value}"
+        if event_type == "discovery":
+            name = payload.get("name") or payload.get("service_type", "")
+            host = payload.get("host", "")
+            return f"+ {name} @ {host}"
+        if event_type == "status":
+            return payload.get("msg", str(payload))
+        if event_type == "error":
+            return f"ERROR: {payload.get('msg', str(payload))}"
+        return str(payload)
 
     def _on_status(self, source_id: str, connected: bool) -> None:
         if source_id in self._panels:
