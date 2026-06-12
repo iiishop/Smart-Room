@@ -28,6 +28,11 @@ class NmapAnnotator(Annotator):
         # Extract mac_prefix (first 3 octets) for OUI-based matching
         mac_prefix = _extract_mac_prefix(mac) if mac else None
 
+        # Enrich vendor via local IEEE OUI database
+        if mac_prefix and (not vendor or vendor == "Unknown"):
+            from discover_client.identification.oui import load_oui
+            vendor = load_oui().get(mac_prefix, vendor)
+
         # Use first hostname as the primary one
         primary_hostname = hostnames[0] if hostnames else None
 
