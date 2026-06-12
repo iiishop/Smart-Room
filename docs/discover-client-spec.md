@@ -322,71 +322,107 @@ scan_interval_s = 60
 
 The `config.py` module reads this file on startup and validates each `[[sources]]` block against its `source_type` schema before constructing `SourceConfig` objects.
 
-## GUI (PySide6)
+## GUI (PySide6 + qt-material)
 
-The configuration panel is built with PySide6 — same stack as `quest3server/run_dashboard.py`. The panel can run standalone or be embedded as a tab in the existing Smart Room Dashboard's `QTabWidget`.
+The configuration panel is built with PySide6 + qt-material for theming. Uses `qt_material.apply_stylesheet(app, theme='dark_teal.xml')` for a Material Design dark theme — no hand-written QSS needed.
 
 ### Event loop model
 
-Quest3server spawns its FastAPI server on a `threading.Thread` and runs the Qt event loop on the main thread ([ref](D:/FromGithub/UCL/CASA0022/Smart Room/backend/quest3server/run_dashboard.py:1305-1313)). Discover Client follows the same pattern:
+Same pattern as quest3server: `threading.Thread` for asyncio (Discover Client), main thread for Qt event loop. The worker emits Qt signals back to the main thread to update UI state.
 
 ```
-Main thread:  QApplication + ConfigPanel (Qt event loop)
+Main thread:  QApplication + MainWindow (Qt event loop)
 Worker thread: DiscoverClient.start() (asyncio event loop)
 ```
 
-The worker thread runs `asyncio.run()` for the Discover Client, emitting Qt signals back to the main thread to update UI state (connection status, event counts, errors).
-
-### Layout
+### Window layout
 
 ```
-┌──────────────────────────────────────────────────┐
-│  Discover Client                        [Start]  │
-│                                                  │
-│  ┌─ Sources ───────────────────────────────────┐ │
-│  │ ┌───────────────────────────────────┐  ┌───┐ │ │
-│  │ │ mqtt-lab                          │  │ ✓ │ │ │
-│  │ │ type: mqtt  ● connected           │  │───│ │ │
-│  │ │ topics: govee/#, zigbee2mqtt/#    │  │   │ │ │
-│  │ └───────────────────────────────────┘  └───┘ │ │
-│  │ ┌───────────────────────────────────┐  ┌───┐ │ │
-│  │ │ mdns-lan                          │  │ ✓ │ │ │
-│  │ │ type: mdns  ● scanning            │  │───│ │ │
-│  │ │ interval: 30s                     │  │   │ │ │
-│  │ └───────────────────────────────────┘  └───┘ │ │
-│  │ ┌───────────────────────────────────┐  ┌───┐ │ │
-│  │ │ ssdp-lan                          │  │   │ │ │
-│  │ │ type: ssdp  ○ disabled            │  │───│ │ │
-│  │ └───────────────────────────────────┘  └───┘ │ │
-│  │                                    [+ Add]  │ │
-│  └──────────────────────────────────────────────┘ │
-│                                                  │
-│  ┌─ Settings ───────────────────────────────────┐ │
-│  │ type: mqtt                                   │ │
-│  │                                              │ │
-│  │ Host       [192.168.1.100          ]         │ │
-│  │ Port       [1883                   ]         │ │
-│  │ Username   [                       ]         │ │
-│  │ Password   [                       ]         │ │
-│  │ Whitelist  [govee/#, zigbee2mqtt/# ]         │ │
-│  │ Blacklist  [                       ]         │ │
-│  │                                     [Save]   │ │
-│  └──────────────────────────────────────────────┘ │
-│                                                  │
-│  ┌─ Log ────────────────────────────────────────┐ │
-│  │ [12:34:01] [mqtt-lab] connected              │ │
-│  │ [12:34:02] [mdns-lan] scanning...            │ │
-│  │ [12:34:03] [mqtt-lab] data: govee/.../temp   │ │
-│  └──────────────────────────────────────────────┘ │
-└──────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│  [Config] [Monitor]                         [▶ Start] [■ Stop] │
+├──────────────────────────────────────────────────────────────┤
+│                                                              │
+│  ┌─ Config Tab ───────────────────────────────────────────┐ │
+│  │ ┌──────────┬──────────────────────────────────────────┐│ │
+│  │ │ Sources  │  Settings: mqtt-lab                      ││ │
+│  │ │          │                                          ││ │
+│  │ │ ┌──────┐ │  Host      [192.168.1.100          ]     ││ │
+│  │ │ │ MQTT │ │  Port      [1883              ▲▼  ]     ││ │
+│  │ │ │  ●   │ │  Username  [                       ]     ││ │
+│  │ │ └──────┘ │  Password  [●●●●●●●●              ]     ││ │
+│  │ │ ┌──────┐ │  Whitelist ┌──────────────────────┐     ││ │
+│  │ │ │ mDNS │ │            │govee/#               │     ││ │
+│  │ │ │  ●   │ │            │zigbee2mqtt/#         │     ││ │
+│  │ │ └──────┘ │            └──────────────────────┘     ││ │
+│  │ │ ┌──────┐ │  Blacklist ┌──────────────────────┐     ││ │
+│  │ │ │ SSDP │ │            │                      │     ││ │
+│  │ │ │  ○   │ │            └──────────────────────┘     ││ │
+│  │ │ └──────┘ │                              [💾 Save]  ││ │
+│  │ │ [+ Add]  │                                          ││ │
+│  │ └──────────┴──────────────────────────────────────────┘│ │
+│  └────────────────────────────────────────────────────────┘ │
+│                                                              │
+│  ┌─ Monitor Tab ──────────────────────────────────────────┐ │
+│  │ ┌─────────────────────────────────────────────────────┐│ │
+│  │ │ mqtt-lab  ● connected  msgs: 142  rate: 2.0/s      ││ │
+│  │ │ ┌────────┬─────────────────────────────────────────┐││ │
+│  │ │ │ 12:34  │ govee/H5179/.../temperature  21.3 °C    │││ │
+│  │ │ │ 12:34  │ govee/H5179/.../humidity     60.7 %     │││ │
+│  │ │ │ 12:33  │ govee/H5179/.../temperature  21.2 °C    │││ │
+│  │ │ └────────┴─────────────────────────────────────────┘││ │
+│  │ ├─────────────────────────────────────────────────────┤│ │
+│  │ │ mdns-lan  ● scanning  services: 3  events: 12      ││ │
+│  │ │ ┌────────┬─────────────────────────────────────────┐││ │
+│  │ │ │ 12:32  │ + _matter._tcp  58044F9ADC05.local:5540 │││ │
+│  │ │ │ 12:31  │ + _matter._tcp  BED59ECF...             │││ │
+│  │ │ └────────┴─────────────────────────────────────────┘││ │
+│  │ ├─────────────────────────────────────────────────────┤│ │
+│  │ │ ssdp-lan  ○ disabled                               ││ │
+│  │ └─────────────────────────────────────────────────────┘│ │
+│  └────────────────────────────────────────────────────────┘ │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-### Widget structure
+### Tabs
 
-| Panel | Widget | Behaviour |
-|-------|--------|-----------|
-| Source list | Scrollable card list | Each card shows source_id, type, connection status, key settings summary. Click to select. Toggle switch to enable/disable. |
-| Add button | `QPushButton` | Opens a dropdown to pick source_type, then adds a new default entry. |
-| Settings editor | Dynamic form | Rebuilds form fields based on selected source's `source_type`. "Save" button writes to `config.toml` and applies to running client if active. |
-| Toolbar | `[Start]` / `[Stop]` | Starts/stops the Discover Client worker thread. Button state reflects client running state. |
-| Log panel | `QTextEdit` (read-only) | Scrollable log of lifecycle events, errors, and optional data sampling. |
+**Config Tab** — Two-panel layout:
+
+| Panel | Content |
+|-------|---------|
+| Left: Source list (250px) | Logo area at top, scrollable source cards. Each card: icon (type), source_id, status dot (●/○), click to select. Bottom: [+ Add] button. |
+| Right: Auto-generated form | Dynamically built from `config.py` SCHEMAS for the selected source_type. Field types inferred from schema: str → QLineEdit, int → QSpinBox, list → QTextEdit (one item per line), password/token → QLineEdit with echoMode=Password. Save button writes to config.toml. |
+
+**Monitor Tab** — Per-source data panels:
+
+| Column | Content |
+|--------|---------|
+| Source header | source_id, status indicator, message count, event rate (events/sec) |
+| Event table | QTableWidget showing time, event_type, compact payload summary. Auto-scrolls. Max 200 rows per source. |
+| Disabled sources | Shown as collapsed/inactive row with "disabled" label. |
+
+### Auto-form field mapping
+
+```python
+FIELD_FOR_KEY: dict[str, type | tuple] = {
+    # Generic patterns (checked first)
+    "host": QLineEdit,
+    "port": (QSpinBox, 1, 65535),
+    "username": QLineEdit,
+    "password": (QLineEdit, "password"),
+    "token": (QLineEdit, "password"),
+    "base_url": QLineEdit,
+    # List fields → multi-line text
+    "topic_whitelist": QTextEdit,
+    "topic_blacklist": QTextEdit,
+    "service_types": QTextEdit,
+    "search_targets": QTextEdit,
+    # Integer fields
+    "scan_interval_s": (QSpinBox, 1, 3600),
+}
+```
+
+Keys not in this map default to QLineEdit for strings, QSpinBox for ints.
+
+### Dependencies
+
+- `qt-material>=2.17` — already in pyproject.toml

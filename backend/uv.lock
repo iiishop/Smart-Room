@@ -1668,6 +1668,18 @@ wheels = [
 ]
 
 [[package]]
+name = "qt-material"
+version = "2.17"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "jinja2" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/3a/57/d6473fc7f9b1a81f6bddea555119270818c54be7717f38d0977bb6161408/qt_material-2.17.tar.gz", hash = "sha256:b500a0c1f5ef8f46a8cf037d1aa5bdf9ea4eb618180b6332539dfbdd0647ad0d", size = 1668475, upload-time = "2025-04-21T17:00:25.783Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/37/63/e1085fd76bfea103b6c93d133d849f80a5a94b924f31897eb936cabe8459/qt_material-2.17-py3-none-any.whl", hash = "sha256:660523341ae45b79d222bf15e202ec76ba3bf5e7e82170b66759738d7bb4873d", size = 1687312, upload-time = "2025-04-21T17:00:23.761Z" },
+]
+
+[[package]]
 name = "regex"
 version = "2026.5.9"
 source = { registry = "https://pypi.org/simple" }
@@ -1885,6 +1897,7 @@ dependencies = [
     { name = "pillow" },
     { name = "pyside6" },
     { name = "pyyaml" },
+    { name = "qt-material" },
     { name = "sam-2" },
     { name = "tomli", marker = "python_full_version < '3.11'" },
     { name = "torch" },
@@ -1913,6 +1926,7 @@ requires-dist = [
     { name = "pillow", specifier = ">=11.0.0" },
     { name = "pyside6", specifier = ">=6.10.2" },
     { name = "pyyaml", specifier = ">=6.0" },
+    { name = "qt-material", specifier = ">=2.17" },
     { name = "sam-2", git = "https://github.com/facebookresearch/segment-anything-2.git?branch=sam2.1" },
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0.0" },
     { name = "torch", specifier = ">=2.6.0", index = "https://download.pytorch.org/whl/cu124" },

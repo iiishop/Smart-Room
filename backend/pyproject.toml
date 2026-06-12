@@ -21,6 +21,7 @@ dependencies = [
     "websocket-client>=1.8.0",
     "websockets>=16.0",
     "zeroconf>=0.130",
+    "qt-material>=2.17",
 ]
 
 [build-system]
