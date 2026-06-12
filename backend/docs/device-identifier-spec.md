@@ -378,6 +378,39 @@ DiscoverClient.subscribe(on_event)
 
 ---
 
+## MQTT Topic Classifier
+
+MQTT 协议不区分操作 topic 和数据 topic——topic 语义完全依赖约定。需要一个带置信度的启发式分类器，在每个 MQTT 事件到达时判定其用途。
+
+### 分类器规则（按置信度降序）
+
+| # | 检测方式 | → 分类 | 置信度 |
+|---|---------|--------|--------|
+| 1 | payload 是小写枚举值（`"ON"`/`"OFF"`/`"TOGGLE"`/`"true"`/`"false"`/`"open"`/`"close"`） | `command` | 0.90 |
+| 2 | topic 末段 = `set` / `command` / `cmnd` / `ctrl` / `control` | `command` | 0.85 |
+| 3 | topic 末段含传感器词（`temperature` / `humidity` / `pressure` / `light` / `motion` / `voltage` / `current` / `power` / `co2` / `pm25`） | `telemetry` | 0.80 |
+| 4 | payload 含数值 + unit 结构（`{"value": 25.3, "unit": "C"}`） | `telemetry` | 0.75 |
+| 5 | topic 末段 = `state` / `status` / `data` / `telemetry` | `telemetry` | 0.70 |
+| 6 | 以上都不匹配 | `unknown` | 0.30 |
+
+### 输出
+
+```python
+@dataclass
+class TopicClassification:
+    category: str           # "telemetry" | "command" | "unknown"
+    confidence: float       # 0.0 ~ 1.0
+    rationale: str          # 命中了哪条规则
+```
+
+### 如何被管线使用
+
+- **数据管线** — 优先处理 `telemetry` 类事件（置信度 ≥ 0.70），提取传感器数值。
+- **操作管线** — 优先处理 `command` 类事件（置信度 ≥ 0.70），记录为设备能力。也考虑 `unknown` 类事件中那些 topic 带有操作语义的模式（`/toggle`, `/switch` 等）。
+- **LLM profiling** — 分类结果作为设备特征的输入信号。
+
+---
+
 ## 边界情况
 
 - **单源设备** — 只有 MQTT 信号，没有 mDNS/SSDP 辅证 → 只用 MQTT 指纹匹配，置信度偏低但足够
