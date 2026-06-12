@@ -8,10 +8,10 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import Qt, Signal, QTimer
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QKeyEvent
 from PySide6.QtWidgets import (
-    QApplication,
     QAbstractItemView,
+    QApplication,
     QCheckBox,
     QFrame,
     QGridLayout,
@@ -27,7 +27,6 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-
 
 # ── Source palette (left sidebar) ───────────────────────────────
 
@@ -198,6 +197,39 @@ class SourcePanel(QGroupBox):
                 break
 
 
+# ── Copyable log table ───────────────────────────────────────────
+
+class CopyableTableWidget(QTableWidget):
+    """QTableWidget with Ctrl+C copy (tab-separated, paste-friendly)."""
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        if event.modifiers() == Qt.KeyboardModifier.ControlModifier and event.key() == Qt.Key.Key_C:
+            self._copy_selected()
+        else:
+            super().keyPressEvent(event)
+
+    def _copy_selected(self) -> None:
+        rows: set[int] = set()
+        cols: set[int] = set()
+        for idx in self.selectedIndexes():
+            rows.add(idx.row())
+            cols.add(idx.column())
+
+        if not rows:
+            return
+
+        sorted_cols = sorted(cols)
+        lines: list[str] = []
+        for r in sorted(rows):
+            cells = []
+            for c in sorted_cols:
+                item = self.item(r, c)
+                cells.append(item.text() if item else "")
+            lines.append("\t".join(cells))
+
+        QApplication.clipboard().setText("\n".join(lines))
+
+
 # ── Main window ──────────────────────────────────────────────────
 
 class MainWindow(QMainWindow):
@@ -251,7 +283,7 @@ class MainWindow(QMainWindow):
         right.addWidget(self.scroll, stretch=1)
 
         # Global event log table — stretches to fill remaining space
-        self._log_table = QTableWidget(0, 3)
+        self._log_table = CopyableTableWidget(0, 3)
         self._log_table.setObjectName("globalLogTable")
         self._log_table.setHorizontalHeaderLabels(["Time", "Source", "Event"])
         self._log_table.horizontalHeader().setStretchLastSection(True)
@@ -259,6 +291,7 @@ class MainWindow(QMainWindow):
         self._log_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         self._log_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._log_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._log_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         right.addWidget(self._log_table, stretch=2)
 
         root.addLayout(right, stretch=1)
