@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from discover_client.gui.copyable_table import CopyableTableWidget
 from discover_client.gui.dedup_page import DedupPage
 from discover_client.gui.evidence_page import EvidencePage
 from discover_client.identification.device import Device
