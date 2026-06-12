@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
+import json
 import logging
 import time
 
@@ -117,11 +118,17 @@ class MqttSource(Source):
         if self._whitelist and not _matches_any(topic, self._whitelist):
             return
 
+        payload_str = msg.payload.decode("utf-8", errors="replace")
+        try:
+            value = json.loads(payload_str)
+        except (json.JSONDecodeError, ValueError):
+            value = payload_str
+
         self.emit(
             "data",
             {
                 "topic": topic,
-                "value": msg.payload.decode("utf-8", errors="replace"),
+                "value": value,
                 "qos": msg.qos,
             },
         )
