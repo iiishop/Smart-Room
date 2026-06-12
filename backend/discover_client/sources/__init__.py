@@ -28,8 +28,10 @@ def registered_types() -> list[str]:
 
 from discover_client.sources.mqtt_source import MqttSource
 from discover_client.sources.mdns_source import MdnsSource
+from discover_client.sources.nmap_source import NmapSource
 from discover_client.sources.ssdp_source import SsdpSource
 
 register("mqtt", MqttSource)
 register("mdns", MdnsSource)
+register("nmap", NmapSource)
 register("ssdp", SsdpSource)

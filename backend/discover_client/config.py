@@ -65,6 +65,14 @@ SCHEMAS: dict[str, SourceTypeSchema] = {
             "scan_interval_s": 60,
         },
     ),
+    "nmap": SourceTypeSchema(
+        required=[],
+        defaults={
+            "scan_interval_s": 300,
+            "target_subnet": "",
+            "scan_flags": "-sn -PR",
+        },
+    ),
     "home_assistant": SourceTypeSchema(
         required=["base_url", "token"],
         defaults={
