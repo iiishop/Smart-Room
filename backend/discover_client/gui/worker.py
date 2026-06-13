@@ -125,10 +125,19 @@ class Worker(QObject):
                             dialect=aggregated.primary_dialect,
                             dialect_confidence=aggregated.dialect_confidence,
                         )
-                        self.evidence_produced.emit(evidence)
+                        # Dedup first to get stable device_id
+                        if self.deduplicator is not None:
+                            device = self.deduplicator.ingest(evidence)
+                            device_id = device.device_id  # use dedup's device_id consistently
+                            devices = self.deduplicator.get_devices()
+                        else:
+                            device_id = aggregated.device_id
+                            devices = []
 
-                        # Fan out to OperationsTracker + DataSnapshot
-                        device_id = aggregated.device_id
+                        self.evidence_produced.emit(evidence)
+                        self.dedup_updated.emit(devices)
+
+                        # Fan out to OperationsTracker + DataSnapshot (after dedup for correct device_id)
                         if self._ops_tracker is not None:
                             for op in aggregated.operations:
                                 self._ops_tracker.ingest_structured(device_id, op)
@@ -143,18 +152,18 @@ class Worker(QObject):
                         state.update("command" if aggregated.operations else "telemetry", aggregated.dialect_confidence)
                         self.device_classified.emit(device_id, None)
 
-                        # Dedup + classification + profile update
+                        # Profile update
                         if self.deduplicator is not None:
-                            device = self.deduplicator.ingest(evidence)
-                            devices = self.deduplicator.get_devices()
-                            self.dedup_updated.emit(devices)
                             if self.feature_extractor is not None:
                                 features = [self.feature_extractor.extract(d) for d in devices]
                                 self.features_updated.emit(features)
                             self.device_profile_updated.emit(self._build_device_profiles(devices))
                         return  # skip old annotator path for this event
-                except Exception:
-                    pass  # fall through to legacy path on any error
+                except Exception as exc:
+                    import traceback
+                    print(f"[dialect pipeline] ERROR: {exc}")
+                    traceback.print_exc()
+                    # fall through to legacy path
 
             # ── Legacy annotator path (non-MQTT events, or MQTT fallback) ──
             annotator_cls = ANNOTATORS.get(event.source_type)
