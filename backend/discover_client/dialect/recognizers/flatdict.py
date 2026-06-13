@@ -26,6 +26,7 @@ class FlatDictRecognizer(DialectRecognizer):
         sensors = []
         suffix = _topic_suffix(topic)
         action = COMMAND_SUFFIXES.get(suffix, "set")
+        is_command = suffix in COMMAND_SUFFIXES
 
         for key, val in payload.items():
             if key in _METADATA_KEYS:
@@ -33,13 +34,15 @@ class FlatDictRecognizer(DialectRecognizer):
             if isinstance(val, bool):
                 continue
 
-            operations.append(RecognizedOperation(
-                topic=topic,
-                action=action,
-                sensor_key=key,
-                accepted_values=_extract_accepted_values(val),
-                is_enum=isinstance(val, str) and _extract_accepted_values(val) != [],
-            ))
+            # Only create operations for command topics (set/toggle/switch etc.)
+            if is_command:
+                operations.append(RecognizedOperation(
+                    topic=topic,
+                    action=action,
+                    sensor_key=key,
+                    accepted_values=_extract_accepted_values(val),
+                    is_enum=isinstance(val, str) and _extract_accepted_values(val) != [],
+                ))
 
             sensors.append(RecognizedSensor(
                 sensor_type=key,

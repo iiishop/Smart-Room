@@ -4,15 +4,15 @@ from discover_client.dialect.aggregator import aggregate
 
 
 def test_flatdict_aggregated() -> None:
-    result = aggregate("mock/light-1/state", {"power": "OFF", "brightness": 100})
+    result = aggregate("mock/light-1/set", {"power": "OFF", "brightness": 100})
     assert result is not None
     assert result.primary_dialect == "flatdict"
     assert result.device_id == "mock/light-1"
     assert len(result.operations) == 2
     assert len(result.sensor_readings) == 2
     op_keys = {(op.topic, op.action, op.sensor_key) for op in result.operations}
-    assert ("mock/light-1/state", "set", "power") in op_keys
-    assert ("mock/light-1/state", "set", "brightness") in op_keys
+    assert ("mock/light-1/set", "set", "power") in op_keys
+    assert ("mock/light-1/set", "set", "brightness") in op_keys
 
 
 def test_tasmota_aggregated() -> None:

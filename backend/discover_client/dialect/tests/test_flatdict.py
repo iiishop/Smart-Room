@@ -22,13 +22,12 @@ def test_flatdict_rejects_service_prefixes() -> None:
     assert rec.match("stat/light-1/POWER", {"POWER": "ON"}) == 0
 
 
-def test_flatdict_extracts_operations_and_sensors() -> None:
+def test_flatdict_extracts_sensors_only_on_telemetry_topics() -> None:
     rec = FlatDictRecognizer()
     result = rec.extract("mock/light-1/state", {"power": "OFF", "brightness": 100})
 
-    # Two operations: power and brightness
-    ops = {(op.sensor_key, op.action) for op in result.operations}
-    assert ops == {("power", "set"), ("brightness", "set")}
+    # state is NOT a command topic → no operations
+    assert len(result.operations) == 0
 
     # Two sensors: power (text) and brightness (numeric)
     sensors = {(s.sensor_type, type(s.value).__name__) for s in result.sensor_readings}
