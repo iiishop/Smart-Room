@@ -57,6 +57,55 @@ class Worker(QObject):
         self._classifier: TopicClassifier | None = None
         self._classification_state: dict[str, _DeviceClassificationState] = {}
 
+        # ── throttle: batch UI signals to one flush every 200ms ──
+        self._throttle_interval: float = 0.2
+        self._flush_scheduled: bool = False
+        self._pending_devices: list = []
+        self._pending_device_ids: list[str] = []
+
+    def _schedule_flush(self, devices: list, device_id: str) -> None:
+        """Accumulate state and schedule a deferred signal flush.
+
+        Data ingestion happens immediately for every event — only Qt signal
+        emissions are batched.  If a flush is already pending we just update
+        the latest device list; the pending timer will pick it up.
+        """
+        self._pending_devices = devices
+        if device_id not in self._pending_device_ids:
+            self._pending_device_ids.append(device_id)
+
+        if self._flush_scheduled:
+            return
+
+        self._flush_scheduled = True
+        loop = asyncio.get_event_loop()
+        loop.call_later(self._throttle_interval, self._do_flush)
+
+    def _do_flush(self) -> None:
+        """Emit all accumulated UI signals with latest state."""
+        self._flush_scheduled = False
+        devices = self._pending_devices
+        device_ids = self._pending_device_ids
+        self._pending_device_ids = []
+
+        # Per-device signals
+        for did in device_ids:
+            self.device_classified.emit(did, None)
+            if self._ops_tracker is not None:
+                self.operations_updated.emit(self._ops_tracker.get_capabilities(did))
+
+        # Global state signals
+        self.dedup_updated.emit(devices)
+        if self.data_snapshot is not None:
+            self.data_updated.emit(self.data_snapshot.get_all())
+
+        if self.feature_extractor is not None:
+            features = [self.feature_extractor.extract(d) for d in devices]
+            self.features_updated.emit(features)
+
+        # Heaviest: rebuild all profile cards
+        self.device_profile_updated.emit(self._build_device_profiles(devices))
+
     def start(self) -> None:
         if self._running:
             return
@@ -136,30 +185,22 @@ class Worker(QObject):
                             devices = []
 
                         self.evidence_produced.emit(evidence)
-                        self.dedup_updated.emit(devices)
 
                         # Fan out to OperationsTracker + DataSnapshot (after dedup for correct device_id)
                         if self._ops_tracker is not None:
                             for op in aggregated.operations:
                                 self._ops_tracker.ingest_structured(device_id, op)
-                            self.operations_updated.emit(self._ops_tracker.get_capabilities(device_id))
 
                         if self.data_snapshot is not None:
                             for sensor in aggregated.sensor_readings:
                                 self.data_snapshot.ingest_structured(device_id, sensor, timestamp=event.timestamp)
-                            self.data_updated.emit(self.data_snapshot.get_all())
 
                         # Update classification state for device profile
                         state = self._classification_state.setdefault(device_id, _DeviceClassificationState())
                         state.update("command" if aggregated.operations else "telemetry", aggregated.dialect_confidence)
-                        self.device_classified.emit(device_id, None)
 
-                        # Profile update
-                        if self.deduplicator is not None:
-                            if self.feature_extractor is not None:
-                                features = [self.feature_extractor.extract(d) for d in devices]
-                                self.features_updated.emit(features)
-                            self.device_profile_updated.emit(self._build_device_profiles(devices))
+                        # Throttle all UI signals to one flush per 200ms
+                        self._schedule_flush(devices, device_id)
                         return  # skip old annotator path for this event
                 except Exception as exc:
                     import traceback
@@ -178,10 +219,6 @@ class Worker(QObject):
                 if self.deduplicator is not None:
                     device = self.deduplicator.ingest(evidence)
                     devices = self.deduplicator.get_devices()
-                    self.dedup_updated.emit(devices)
-                    if self.feature_extractor is not None:
-                        features = [self.feature_extractor.extract(device) for device in devices]
-                        self.features_updated.emit(features)
 
                     classification = None
                     if (
@@ -195,7 +232,6 @@ class Worker(QObject):
                         )
                         state = self._classification_state.setdefault(device.device_id, _DeviceClassificationState())
                         state.update(classification.label, classification.confidence)
-                        self.device_classified.emit(device.device_id, classification)
 
                     if (
                         device is not None
@@ -204,9 +240,8 @@ class Worker(QObject):
                         and classification.label == "command"
                         and classification.confidence >= 0.7
                     ):
-                        changed = self._ops_tracker.ingest(device.device_id, evidence)
-                        if changed is not None:
-                            self.operations_updated.emit(self._ops_tracker.get_capabilities(device.device_id))
+                        self._ops_tracker.ingest(device.device_id, evidence)
+
                     if (
                         event.event_type == "data"
                         and self.data_snapshot is not None
@@ -219,18 +254,18 @@ class Worker(QObject):
                             "value": event.payload.get("value"),
                             "timestamp": event.timestamp,
                         }
-                        for device in devices:
+                        for dev in devices:
                             matched = False
-                            for prefix in device.topic_prefixes:
+                            for prefix in dev.topic_prefixes:
                                 if data_event["topic"].startswith(prefix):
-                                    readings = self.data_snapshot.ingest(device.device_id, data_event)
-                                    if readings:
-                                        self.data_updated.emit(self.data_snapshot.get_all())
+                                    self.data_snapshot.ingest(dev.device_id, data_event)
                                     matched = True
                                     break
                             if matched:
                                 break
-                    self.device_profile_updated.emit(self._build_device_profiles(devices))
+
+                    # Throttle all UI signals to one flush per 200ms
+                    self._schedule_flush(devices, device.device_id)
 
         self._client.subscribe(on_event)
 
