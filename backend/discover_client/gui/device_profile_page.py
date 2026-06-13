@@ -269,7 +269,8 @@ def _preview_payload(operation: dict) -> object:
 def _op_key(operation: dict) -> str:
     topic = str(operation.get("topic") or "")
     action = str(operation.get("action") or "")
-    return f"{topic}::{action}"
+    sensor = str(operation.get("sensor_key") or "")
+    return f"{topic}::{action}::{sensor}"
 
 
 def _build_op_row(operation: dict, signal: Signal) -> tuple[QFrame, dict[str, QLineEdit]]:

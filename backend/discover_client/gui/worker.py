@@ -101,6 +101,62 @@ class Worker(QObject):
                 elif msg == "stopped" or "Disconnected" in str(msg):
                     self.status_changed.emit(event.source_id, False)
 
+            # ── MQTT data events → new dialect pipeline ──
+            if event.source_type == "mqtt" and event.event_type == "data":
+                try:
+                    from discover_client.dialect.aggregator import aggregate
+                    topic = str(event.payload.get("topic", ""))
+                    value = event.payload.get("value")
+                    aggregated = aggregate(topic, value)
+                    if aggregated is not None:
+                        # Build evidence from aggregated output
+                        evidence = SignalEvidence(
+                            source_id=event.source_id,
+                            source_type=event.source_type,
+                            timestamp=event.timestamp,
+                            event_type=event.event_type,
+                            mqtt_topic=topic,
+                            mqtt_payload=value,
+                            mqtt_payload_keys=(
+                                {op.sensor_key for op in aggregated.operations if op.sensor_key}
+                                | {s.sensor_type for s in aggregated.sensor_readings}
+                            ),
+                            topic_prefix=aggregated.device_id,
+                            dialect=aggregated.primary_dialect,
+                            dialect_confidence=aggregated.dialect_confidence,
+                        )
+                        self.evidence_produced.emit(evidence)
+
+                        # Fan out to OperationsTracker + DataSnapshot
+                        device_id = aggregated.device_id
+                        if self._ops_tracker is not None:
+                            for op in aggregated.operations:
+                                self._ops_tracker.ingest_structured(device_id, op)
+                            self.operations_updated.emit(self._ops_tracker.get_capabilities(device_id))
+
+                        if self.data_snapshot is not None:
+                            for sensor in aggregated.sensor_readings:
+                                self.data_snapshot.ingest_structured(device_id, sensor, timestamp=event.timestamp)
+
+                        # Update classification state for device profile
+                        state = self._classification_state.setdefault(device_id, _DeviceClassificationState())
+                        state.update("command" if aggregated.operations else "telemetry", aggregated.dialect_confidence)
+                        self.device_classified.emit(device_id, None)
+
+                        # Dedup + classification + profile update
+                        if self.deduplicator is not None:
+                            device = self.deduplicator.ingest(evidence)
+                            devices = self.deduplicator.get_devices()
+                            self.dedup_updated.emit(devices)
+                            if self.feature_extractor is not None:
+                                features = [self.feature_extractor.extract(d) for d in devices]
+                                self.features_updated.emit(features)
+                            self.device_profile_updated.emit(self._build_device_profiles(devices))
+                        return  # skip old annotator path for this event
+                except Exception:
+                    pass  # fall through to legacy path on any error
+
+            # ── Legacy annotator path (non-MQTT events, or MQTT fallback) ──
             annotator_cls = ANNOTATORS.get(event.source_type)
             if annotator_cls is None:
                 return
@@ -214,6 +270,7 @@ class Worker(QObject):
                         {
                             "action": capability.action.replace("_", " ").title(),
                             "topic": capability.topic,
+                            "sensor_key": capability.sensor_key,
                             "accepted_values": list(capability.accepted_values),
                             "args": _infer_operation_args(
                                 capability.topic,

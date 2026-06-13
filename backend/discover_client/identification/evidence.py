@@ -25,6 +25,9 @@ class SignalEvidence:
     hostname: str | None = None
     mac_prefix: str | None = None
     timestamp: float = 0.0
+    event_type: str = "data"
+    dialect: str | None = None
+    dialect_confidence: float = 0.0
 
     def summarize(self) -> str:
         parts: list[str] = []

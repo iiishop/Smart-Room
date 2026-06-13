@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import time
 
+from discover_client.dialect.recognizer import RecognizedSensor
+
 
 @dataclass
 class SensorReading:
@@ -59,6 +61,32 @@ class DataSnapshot:
             self._prune_device(device_id, now=timestamp)
             return produced
         return None
+
+    def ingest_structured(self, device_id: str, sensor: RecognizedSensor, timestamp: float | None = None) -> list[SensorReading] | None:
+        """Ingest a pre-parsed RecognizedSensor from a dialect recognizer."""
+        ts = timestamp or time.time()
+        self._latest_timestamp = max(self._latest_timestamp, ts)
+
+        if isinstance(sensor.value, (int, float)) and not isinstance(sensor.value, bool):
+            value = float(sensor.value)
+            text_value = None
+        elif isinstance(sensor.value, str):
+            value = 0.0
+            text_value = sensor.value.strip()
+        else:
+            return None
+
+        reading = SensorReading(
+            sensor_type=sensor.sensor_type,
+            value=value,
+            unit=sensor.unit,
+            timestamp=ts,
+            text_value=text_value,
+        )
+        device_readings = self._readings.setdefault(device_id, {})
+        device_readings.setdefault(sensor.sensor_type, []).append(reading)
+        self._prune_device(device_id, now=ts)
+        return [reading]
 
     def get_latest(self, device_id: str) -> dict[str, SensorReading]:
         self._prune_all()
