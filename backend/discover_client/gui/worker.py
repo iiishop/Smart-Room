@@ -10,6 +10,7 @@ from PySide6.QtCore import QObject, Signal
 from discover_client.client import DiscoverClient
 from discover_client.gui.device_profile_page import DeviceProfile
 from discover_client.identification import ANNOTATORS, DataSnapshot, Deduplicator, FeatureExtractor, TopicClassifier
+from discover_client.identification.evidence import SignalEvidence
 from discover_client.operations import OperationsTracker
 from discover_client.source import SourceEvent
 from discover_client.config import load_config
