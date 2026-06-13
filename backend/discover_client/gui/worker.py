@@ -45,6 +45,10 @@ class Worker(QObject):
     operations_updated = Signal(list)
     status_changed = Signal(str, bool)
 
+    # Batch variants for high-volume signals — single signal carries N items
+    events_batch = Signal(list)
+    evidence_batch = Signal(list)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._client: DiscoverClient | None = None
@@ -62,6 +66,8 @@ class Worker(QObject):
         self._flush_scheduled: bool = False
         self._pending_devices: list = []
         self._pending_device_ids: list[str] = []
+        self._pending_events: list[tuple] = []
+        self._pending_evidences: list = []
 
     def _schedule_flush(self, devices: list, device_id: str) -> None:
         """Accumulate state and schedule a deferred signal flush.
@@ -87,6 +93,14 @@ class Worker(QObject):
         devices = self._pending_devices
         device_ids = self._pending_device_ids
         self._pending_device_ids = []
+
+        # Batch the high-volume per-event signals
+        if self._pending_events:
+            self.events_batch.emit(self._pending_events)
+            self._pending_events = []
+        if self._pending_evidences:
+            self.evidence_batch.emit(self._pending_evidences)
+            self._pending_evidences = []
 
         # Per-device signals
         for did in device_ids:
@@ -136,13 +150,13 @@ class Worker(QObject):
         configs = load_config()
 
         def on_event(event: SourceEvent) -> None:
-            self.event_received.emit(
+            self._pending_events.append((
                 event.source_id,
                 event.source_type,
                 event.timestamp,
                 event.event_type,
                 event.payload,
-            )
+            ))
             # Track real connection state from status events
             if event.event_type == "status":
                 msg = event.payload.get("msg", "")
@@ -184,7 +198,7 @@ class Worker(QObject):
                             device_id = aggregated.device_id
                             devices = []
 
-                        self.evidence_produced.emit(evidence)
+                        self._pending_evidences.append(evidence)
 
                         # Fan out to OperationsTracker + DataSnapshot (after dedup for correct device_id)
                         if self._ops_tracker is not None:
@@ -215,7 +229,7 @@ class Worker(QObject):
 
             evidence = annotator_cls().annotate(event)
             if evidence is not None:
-                self.evidence_produced.emit(evidence)
+                self._pending_evidences.append(evidence)
                 if self.deduplicator is not None:
                     device = self.deduplicator.ingest(evidence)
                     devices = self.deduplicator.get_devices()

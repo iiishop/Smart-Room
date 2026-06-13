@@ -344,8 +344,8 @@ class MainWindow(QMainWindow):
         from discover_client.gui.worker import Worker
 
         self.worker = Worker()
-        self.worker.event_received.connect(self._on_event)
-        self.worker.evidence_produced.connect(self._on_evidence)
+        self.worker.events_batch.connect(self._on_events_batch)
+        self.worker.evidence_batch.connect(self._on_evidence_batch)
         self.worker.dedup_updated.connect(self._on_dedup_updated)
         self.worker.device_profile_updated.connect(self._on_device_profiles_updated)
         self.worker.features_updated.connect(self._on_features_updated)
@@ -448,39 +448,39 @@ class MainWindow(QMainWindow):
 
     # ── Events from worker ───────────────────────────────────
 
-    def _on_event(
-        self,
-        source_id: str,
-        source_type: str,
-        timestamp: float,
-        event_type: str,
-        payload: dict,
-    ) -> None:
-        # Update source card stats
-        if source_id in self._panels:
-            self._panels[source_id].increment_msg_count()
+    def _on_events_batch(self, events: list[tuple]) -> None:
+        """Bulk-insert log rows with visual updates disabled until done."""
+        # Update source card message counts
+        for source_id, _, _, _, _ in events:
+            if source_id in self._panels:
+                self._panels[source_id].increment_msg_count()
 
-        # Append to global log table
-        ts = datetime.fromtimestamp(timestamp).strftime("%H:%M:%S")
-        summary = self._summarize_event(event_type, payload)
+        table = self._log_table
+        table.setUpdatesEnabled(False)
 
-        row = self._log_table.rowCount()
-        if row >= 500:
-            self._log_table.removeRow(0)
-            row = 499
-        self._log_table.insertRow(row)
-        self._log_table.setItem(row, 0, QTableWidgetItem(ts))
-        self._log_table.setItem(row, 1, QTableWidgetItem(source_id))
-        item = QTableWidgetItem(summary)
-        if event_type == "error":
-            item.setForeground(QColor("#ff5555"))
-        elif event_type == "discovery":
-            item.setForeground(QColor("#50fa7b"))
-        self._log_table.setItem(row, 2, item)
-        self._log_table.scrollToBottom()
+        for source_id, source_type, timestamp, event_type, payload in events:
+            ts = datetime.fromtimestamp(timestamp).strftime("%H:%M:%S")
+            summary = self._summarize_event(event_type, payload)
 
-    def _on_evidence(self, evidence: SignalEvidence) -> None:
-        self._evidence_page.add_evidence(evidence)
+            row = table.rowCount()
+            if row >= 500:
+                table.removeRow(0)
+                row = 499
+            table.insertRow(row)
+            table.setItem(row, 0, QTableWidgetItem(ts))
+            table.setItem(row, 1, QTableWidgetItem(source_id))
+            item = QTableWidgetItem(summary)
+            if event_type == "error":
+                item.setForeground(QColor("#ff5555"))
+            elif event_type == "discovery":
+                item.setForeground(QColor("#50fa7b"))
+            table.setItem(row, 2, item)
+
+        table.setUpdatesEnabled(True)
+        table.scrollToBottom()
+
+    def _on_evidence_batch(self, evidences: list) -> None:
+        self._evidence_page.add_evidence_batch(evidences)
 
     def _on_dedup_updated(self, devices: list[Device]) -> None:
         self._dedup_page.set_devices(devices)

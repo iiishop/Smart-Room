@@ -70,6 +70,29 @@ class EvidencePage(QWidget):
             table.setItem(row, col, QTableWidgetItem(str(value) if value is not None else ""))
         table.scrollToBottom()
 
+    def add_evidence_batch(self, evidences: list[SignalEvidence]) -> None:
+        """Bulk-insert evidence rows, blocking visual updates until done."""
+        if not evidences:
+            return
+        # All evidence in a batch share the same source_type
+        table = self._tables.get(evidences[0].source_type)
+        if table is None:
+            return
+
+        table.setUpdatesEnabled(False)
+        for evidence in evidences:
+            ts = datetime.fromtimestamp(evidence.timestamp).strftime("%H:%M:%S")
+            values = self._format_evidence(evidence.source_type, ts, evidence)
+            row = table.rowCount()
+            if row >= 500:
+                table.removeRow(0)
+                row = 499
+            table.insertRow(row)
+            for col, value in enumerate(values):
+                table.setItem(row, col, QTableWidgetItem(str(value) if value is not None else ""))
+        table.setUpdatesEnabled(True)
+        table.scrollToBottom()
+
     def _format_evidence(self, source_type: str, ts: str, evidence: SignalEvidence) -> list[str]:
         if source_type == "mqtt":
             keys = sorted(evidence.mqtt_payload_keys or [])

@@ -34,6 +34,8 @@ class _FakeWorker(QObject):
     data_updated = Signal(dict)
     operations_updated = Signal(list)
     status_changed = Signal(str, bool)
+    events_batch = Signal(list)
+    evidence_batch = Signal(list)
 
 
 fake_worker_module = types.ModuleType("discover_client.gui.worker")
@@ -60,23 +62,25 @@ def test_main_window_routes_worker_evidence_to_evidence_page() -> None:
     assert window._stack.count() == 7
     assert window._stack.currentIndex() == 0
 
-    window._on_event(
-        "mqtt-lab",
-        "mqtt",
-        1710000000.0,
-        "data",
-        {"topic": "govee/lamp/state", "value": {"temp": 22}},
-    )
+    window._on_events_batch([
+        (
+            "mqtt-lab",
+            "mqtt",
+            1710000000.0,
+            "data",
+            {"topic": "govee/lamp/state", "value": {"temp": 22}},
+        ),
+    ])
 
-    window._on_evidence(
+    window._on_evidence_batch([
         SignalEvidence(
             source_id="mqtt-lab",
             source_type="mqtt",
             mqtt_topic="govee/lamp/state",
             mqtt_payload_keys={"temp"},
             timestamp=1710000000.0,
-        )
-    )
+        ),
+    ])
 
     assert window._evidence_page._tables["mqtt"].rowCount() == 1
     assert window._evidence_page._tables["mqtt"].item(0, 1).text() == "mqtt-lab"
