@@ -286,6 +286,7 @@ class Worker(QObject):
                                 capability.topic,
                                 capability.accepted_values,
                                 list(data_sensors.keys()),
+                                capability.sensor_key,
                             ),
                         }
                     )
@@ -307,13 +308,14 @@ class Worker(QObject):
         return profiles
 
 
-def _infer_operation_args(topic: str, accepted_values: list[str], data_keys: list[str] | None = None) -> list[dict]:
-    sensor_keys = (data_keys or [])
+def _infer_operation_args(topic: str, accepted_values: list[str], data_keys: list[str] | None = None, sensor_key: str | None = None) -> list[dict]:
+    # If sensor_key is specified, only generate args for that key
+    keys_to_use = [sensor_key] if sensor_key else (data_keys or [])
+    keys_to_use = [k for k in keys_to_use if k]
 
-    # DataSnapshot sensor keys are the best signal — use them directly
-    if sensor_keys:
+    if keys_to_use:
         args = []
-        for key in sensor_keys:
+        for key in keys_to_use:
             if key == "power":
                 args.append({"key": "power", "type": "string", "example": "ON"})
             elif key in ("brightness", "level"):
