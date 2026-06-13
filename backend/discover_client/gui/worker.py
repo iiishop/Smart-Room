@@ -241,18 +241,9 @@ class Worker(QObject):
 
 
 def _infer_operation_args(topic: str, accepted_values: list[str], data_keys: list[str] | None = None) -> list[dict]:
-    if accepted_values:
-        return []
-
     sensor_keys = (data_keys or [])
 
-    lowered = topic.lower()
-    if any(token in lowered for token in {"brightness", "level", "dimmer"}):
-        if "brightness" in sensor_keys:
-            return [{"key": "brightness", "type": "number", "example": "50"}]
-        return [{"key": "value", "type": "number", "example": "50"}]
-
-    # Power/set topics: return inputs for all known sensor keys on this device
+    # DataSnapshot sensor keys are the best signal — use them directly
     if sensor_keys:
         args = []
         for key in sensor_keys:
@@ -260,8 +251,16 @@ def _infer_operation_args(topic: str, accepted_values: list[str], data_keys: lis
                 args.append({"key": "power", "type": "string", "example": "ON"})
             elif key in ("brightness", "level"):
                 args.append({"key": key, "type": "number", "example": "50"})
+            elif key == "color":
+                args.append({"key": "color", "type": "string", "example": "#ffffff"})
             else:
                 args.append({"key": key, "type": "string", "example": ""})
         return args if args else [{"key": "value", "type": "string", "example": ""}]
 
+    # No DataSnapshot keys — fall back to topic heuristics
+    if accepted_values:
+        return []
+    lowered = topic.lower()
+    if any(token in lowered for token in {"brightness", "level", "dimmer"}):
+        return [{"key": "value", "type": "number", "example": "50"}]
     return [{"key": "value", "type": "string", "example": ""}]
