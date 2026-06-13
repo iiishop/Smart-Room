@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from discover_client.identification.evidence import SignalEvidence
@@ -35,15 +35,16 @@ class OperationCapability:
     device_id: str
     topic: str
     action: str
-    accepted_values: list[str]
-    confidence: float
-    first_seen: float
-    last_seen: float
+    sensor_key: str | None = None
+    accepted_values: list[str] = field(default_factory=list)
+    confidence: float = 0.0
+    first_seen: float = 0.0
+    last_seen: float = 0.0
 
 
 class OperationsTracker:
     def __init__(self) -> None:
-        self._capabilities: dict[str, dict[str, OperationCapability]] = {}
+        self._capabilities: dict[str, dict[tuple[str, str], OperationCapability]] = {}
 
     def ingest(self, device_id: str, evidence: SignalEvidence) -> OperationCapability | None:
         if evidence.source_type != "mqtt" or not evidence.mqtt_topic:
@@ -56,7 +57,8 @@ class OperationsTracker:
         action = _extract_action(evidence.mqtt_topic)
         values = _extract_values(evidence.mqtt_payload)
         by_topic = self._capabilities.setdefault(device_id, {})
-        existing = by_topic.get(evidence.mqtt_topic)
+        key = (evidence.mqtt_topic, action)
+        existing = by_topic.get(key)
 
         if existing is None:
             capability = OperationCapability(
@@ -68,7 +70,7 @@ class OperationsTracker:
                 first_seen=evidence.timestamp,
                 last_seen=evidence.timestamp,
             )
-            by_topic[evidence.mqtt_topic] = capability
+            by_topic[key] = capability
             return replace(capability)
 
         merged_values = sorted(set(existing.accepted_values).union(values))
@@ -88,9 +90,41 @@ class OperationsTracker:
 
         return replace(existing) if changed else None
 
+    def ingest_structured(self, device_id: str, op: RecognizedOperation) -> list[OperationCapability] | None:
+        """Ingest a pre-parsed operation from a dialect recognizer."""
+        from discover_client.dialect.recognizer import RecognizedOperation as _ROP  # noqa: F811
+
+        by_topic = self._capabilities.setdefault(device_id, {})
+        key = (op.topic, op.sensor_key or op.action)
+        existing = by_topic.get(key)
+        values = set(op.accepted_values)
+        ts = time.time()
+
+        if existing is None:
+            capability = OperationCapability(
+                device_id=device_id,
+                topic=op.topic,
+                action=op.action,
+                sensor_key=op.sensor_key,
+                accepted_values=sorted(values),
+                confidence=0.95,
+                first_seen=ts,
+                last_seen=ts,
+            )
+            by_topic[key] = capability
+            return [replace(capability)]
+
+        merged = sorted(set(existing.accepted_values).union(values))
+        existing.accepted_values = merged
+        existing.last_seen = ts
+        return [replace(existing)]
+
     def get_capabilities(self, device_id: str) -> list[OperationCapability]:
         caps = self._capabilities.get(device_id, {})
-        return [replace(capability) for _, capability in sorted(caps.items())]
+        return sorted(
+            [replace(c) for c in caps.values()],
+            key=lambda c: (c.topic, c.sensor_key or "", c.action),
+        )
 
     def get_all(self) -> dict[str, list[OperationCapability]]:
         return {
