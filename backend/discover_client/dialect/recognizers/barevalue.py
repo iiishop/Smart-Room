@@ -1,15 +1,36 @@
-"""Recognizer for bare value format — TODO."""
+"""Recognizer for bare value format — universal fallback."""
 
 from typing import Any
 
-from discover_client.dialect.recognizer import DialectRecognizer, RecognizerOutput
+from discover_client.dialect.recognizer import (
+    DialectRecognizer,
+    RecognizedOperation,
+    RecognizedSensor,
+    RecognizerOutput,
+)
+from discover_client.dialect.utils import _bare_value_confidence, _coerce_value
 
 
 class BareValueRecognizer(DialectRecognizer):
-    SPECIFICITY = 10
+    SPECIFICITY = 10  # lowest — always loses to specialized recognizers
 
     def match(self, topic: str, payload: Any) -> float:
-        return 0.0  # stub
+        return min(0.50, _bare_value_confidence(topic, payload))
 
     def extract(self, topic: str, payload: Any) -> RecognizerOutput:
-        return RecognizerOutput()
+        return RecognizerOutput(
+            operations=[
+                RecognizedOperation(
+                    topic=topic,
+                    action="command",
+                    sensor_key=None,
+                )
+            ],
+            sensor_readings=[
+                RecognizedSensor(
+                    sensor_type="value",
+                    value=_coerce_value(payload),
+                )
+            ],
+            dialect_hint="barevalue",
+        )
