@@ -8,6 +8,7 @@ from discover_client.dialect.recognizer import (
     RecognizedSensor,
     RecognizerOutput,
 )
+from discover_client.dialect.registry import register_recognizer
 from discover_client.dialect.utils import (
     COMMAND_SUFFIXES,
     _coerce_value,
@@ -15,6 +16,7 @@ from discover_client.dialect.utils import (
 )
 
 
+@register_recognizer("subtopic")
 class SubTopicRecognizer(DialectRecognizer):
     SPECIFICITY = 50
 

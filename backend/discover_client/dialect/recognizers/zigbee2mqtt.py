@@ -8,9 +8,11 @@ from discover_client.dialect.recognizer import (
     RecognizedSensor,
     RecognizerOutput,
 )
+from discover_client.dialect.registry import register_recognizer
 from discover_client.dialect.utils import _coerce_value, _extract_accepted_values
 
 
+@register_recognizer("zigbee2mqtt")
 class Zigbee2MQTTRecognizer(DialectRecognizer):
     SPECIFICITY = 80
 

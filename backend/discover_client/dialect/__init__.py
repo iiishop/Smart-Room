@@ -1,4 +1,9 @@
-"""MQTT dialect recognition — pluggable recognizer registry."""
+"""MQTT dialect recognition — pluggable recognizer registry.
+
+Each dialect is a DialectRecognizer subclass registered via @register_recognizer.
+The aggregator scores all, normalizes keys, deduplicates, fans out to
+OperationsTracker and DataSnapshot.
+"""
 
 from discover_client.dialect.recognizer import (
     DialectRecognizer,
@@ -6,16 +11,7 @@ from discover_client.dialect.recognizer import (
     RecognizedSensor,
     RecognizerOutput,
 )
-
-RECOGNIZERS: dict[str, type[DialectRecognizer]] = {}
-
-
-def register_recognizer(name: str):
-    def decorator(cls: type[DialectRecognizer]):
-        RECOGNIZERS[name] = cls
-        return cls
-    return decorator
-
+from discover_client.dialect.registry import RECOGNIZERS, register_recognizer
 
 # Auto-load all recognizers on import (resilient to incremental builds)
 import importlib as _importlib

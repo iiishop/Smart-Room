@@ -3,12 +3,14 @@
 from typing import Any
 
 from discover_client.dialect.recognizer import DialectRecognizer, RecognizerOutput, RecognizedOperation, RecognizedSensor
+from discover_client.dialect.registry import register_recognizer
 from discover_client.dialect.utils import _extract_accepted_values, _coerce_value, _topic_suffix, COMMAND_SUFFIXES
 
 _SERVICE_PREFIXES = {"cmnd/", "stat/", "tele/", "zigbee2mqtt/", "homeassistant/"}
 _METADATA_KEYS = {"_announce", "timestamp", "device", "type", "mac", "event"}
 
 
+@register_recognizer("flatdict")
 class FlatDictRecognizer(DialectRecognizer):
     SPECIFICITY = 40
 

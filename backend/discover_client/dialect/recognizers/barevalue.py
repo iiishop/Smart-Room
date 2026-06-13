@@ -8,9 +8,11 @@ from discover_client.dialect.recognizer import (
     RecognizedSensor,
     RecognizerOutput,
 )
+from discover_client.dialect.registry import register_recognizer
 from discover_client.dialect.utils import _bare_value_confidence, _coerce_value
 
 
+@register_recognizer("barevalue")
 class BareValueRecognizer(DialectRecognizer):
     SPECIFICITY = 10  # lowest — always loses to specialized recognizers
 
