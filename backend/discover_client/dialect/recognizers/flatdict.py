@@ -8,6 +8,7 @@ from discover_client.dialect.utils import _extract_accepted_values, _coerce_valu
 
 _SERVICE_PREFIXES = {"cmnd/", "stat/", "tele/", "zigbee2mqtt/", "homeassistant/"}
 _METADATA_KEYS = {"_announce", "timestamp", "device", "type", "mac", "event"}
+_ENVELOPE_METADATA = {"unit", "timestamp", "device", "type", "mac", "event", "_announce"}
 
 
 @register_recognizer("flatdict")
@@ -25,16 +26,32 @@ class FlatDictRecognizer(DialectRecognizer):
         operations = []
         sensors = []
         suffix = _topic_suffix(topic)
-        action = COMMAND_SUFFIXES.get(suffix, "set")
         is_command = suffix in COMMAND_SUFFIXES
 
+        # Detect envelope format: {"value": 23.5, "unit": "C"}
+        # → use topic suffix as sensor_type, NOT "value"/"unit"
+        if _is_envelope(payload):
+            val = payload.get("value")
+            if val is not None:
+                sensors.append(RecognizedSensor(
+                    sensor_type=suffix,
+                    value=_coerce_value(val),
+                ))
+            # Envelope payloads never produce operations
+            return RecognizerOutput(
+                operations=[],
+                sensor_readings=sensors,
+                dialect_hint="flatdict",
+            )
+
+        # Flat dict format: {"power": "OFF", "brightness": 100}
+        action = COMMAND_SUFFIXES.get(suffix, "set")
         for key, val in payload.items():
             if key in _METADATA_KEYS:
                 continue
             if isinstance(val, bool):
                 continue
 
-            # Only create operations for command topics (set/toggle/switch etc.)
             if is_command:
                 operations.append(RecognizedOperation(
                     topic=topic,
@@ -54,3 +71,13 @@ class FlatDictRecognizer(DialectRecognizer):
             sensor_readings=sensors,
             dialect_hint="flatdict",
         )
+
+
+def _is_envelope(payload: dict) -> bool:
+    """Payload has 'value' key and all other keys are metadata → envelope format."""
+    if "value" not in payload:
+        return False
+    for key in payload:
+        if key.lower() not in _ENVELOPE_METADATA and key != "value":
+            return False
+    return True

@@ -47,3 +47,22 @@ def test_flatdict_skips_metadata_keys() -> None:
     sensor_keys = {s.sensor_type for s in result.sensor_readings}
     assert "_announce" not in sensor_keys
     assert "power" in sensor_keys
+
+
+def test_flatdict_envelope_uses_topic_suffix_as_sensor_type() -> None:
+    """Govee format: {"unit": "C", "value": 23.5} → sensor_type from topic suffix."""
+    rec = FlatDictRecognizer()
+    result = rec.extract("govee/H5179/a1b2c3d4e5f6/temperature", {"unit": "C", "value": 23.5})
+    assert len(result.sensor_readings) == 1
+    assert result.sensor_readings[0].sensor_type == "temperature"
+    assert result.sensor_readings[0].value == 23.5
+    assert len(result.operations) == 0
+
+
+def test_flatdict_envelope_does_not_mistake_flat_dict() -> None:
+    """A dict without 'value' key OR with non-metadata sibling keys is NOT an envelope."""
+    rec = FlatDictRecognizer()
+    # This has 'value' but also 'power' → not envelope
+    result = rec.extract("mock/light-1/set", {"value": 50, "power": "ON"})
+    sensor_types = {s.sensor_type for s in result.sensor_readings}
+    assert sensor_types == {"value", "power"}
