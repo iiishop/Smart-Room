@@ -147,6 +147,7 @@ class Worker(QObject):
                         if self.data_snapshot is not None:
                             for sensor in aggregated.sensor_readings:
                                 self.data_snapshot.ingest_structured(device_id, sensor, timestamp=event.timestamp)
+                            self.data_updated.emit(self.data_snapshot.get_all())
 
                         # Update classification state for device profile
                         state = self._classification_state.setdefault(device_id, _DeviceClassificationState())
