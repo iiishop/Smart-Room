@@ -21,6 +21,22 @@ namespace SmartRoom.Capture
     /// </summary>
     public sealed class Quest3RgbdCaptureFinal : MonoBehaviour
     {
+        public sealed class CapturePayload
+        {
+            public byte[] rgbJpegBytes;
+            public byte[] depthRawBytes;
+            public string metaJson;
+            public int rgbWidth;
+            public int rgbHeight;
+            public int depthWidth;
+            public int depthHeight;
+            public long timestampUnixMs;
+            public int unityFrame;
+            public bool rgbOk;
+            public bool depthOk;
+            public bool descriptorOk;
+        }
+
         [Header("Capture")]
         [SerializeField] private string outputDirectory = "";
         [SerializeField] private int rgbOutputWidth = 1280;
@@ -91,24 +107,42 @@ namespace SmartRoom.Capture
                 return false;
             }
 
+            bool ok = CaptureOnceToPayload(out CapturePayload payload);
+            if (payload == null)
+                return false;
+
             Directory.CreateDirectory(directory);
+            if (!string.IsNullOrEmpty(payload.metaJson))
+                File.WriteAllText(Path.Combine(directory, "meta.json"), payload.metaJson);
+            if (payload.rgbOk && payload.rgbJpegBytes != null)
+                File.WriteAllBytes(Path.Combine(directory, "rgb.jpg"), payload.rgbJpegBytes);
+            if (payload.depthOk && payload.depthRawBytes != null)
+                File.WriteAllBytes(Path.Combine(directory, "depth.raw"), payload.depthRawBytes);
+
+            Debug.Log($"[Quest3RgbdCaptureFinal] saved rgb={payload.rgbOk} depth={payload.depthOk} descriptor={payload.descriptorOk} dir={directory}");
+            return ok;
+        }
+
+        public bool CaptureOnceToPayload(out CapturePayload payload)
+        {
+            payload = null;
 
             bool rgbOk = TryCaptureRgb(out byte[] jpegBytes, out RgbMeta rgbMeta);
             bool depthOk = TryCaptureDepthRaw(out byte[] depthRaw);
             bool descriptorOk = TryGetCurrentDepthDescriptor(out DepthDescriptorData descriptor);
-
             int selectedEye = GetSelectedDepthEyeIndex();
             Matrix4x4[] reprojectionMatrices = GetEnvironmentDepthReprojectionMatrices();
             Matrix4x4 trackingSpaceWorldToLocal = GetTrackingSpaceWorldToLocalMatrix();
             Matrix4x4 descriptorReprojection = descriptorOk
                 ? CalculateDescriptorReprojection(descriptor)
                 : Matrix4x4.identity;
+            long timestampUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
             CaptureMeta meta = new CaptureMeta
             {
                 capture_index = 0,
                 unity_frame = Time.frameCount,
-                timestamp_unix_ms = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                timestamp_unix_ms = timestampUnixMs,
                 rgb = rgbMeta,
                 depth = new DepthMeta
                 {
@@ -148,13 +182,23 @@ namespace SmartRoom.Capture
                 }
             };
 
-            File.WriteAllText(Path.Combine(directory, "meta.json"), JsonUtility.ToJson(meta, true));
-            if (rgbOk && jpegBytes != null)
-                File.WriteAllBytes(Path.Combine(directory, "rgb.jpg"), jpegBytes);
-            if (depthOk && depthRaw != null)
-                File.WriteAllBytes(Path.Combine(directory, "depth.raw"), depthRaw);
+            payload = new CapturePayload
+            {
+                rgbJpegBytes = jpegBytes,
+                depthRawBytes = depthRaw,
+                metaJson = JsonUtility.ToJson(meta, true),
+                rgbWidth = rgbMeta.resolution_w,
+                rgbHeight = rgbMeta.resolution_h,
+                depthWidth = meta.depth.resolution_w,
+                depthHeight = meta.depth.resolution_h,
+                timestampUnixMs = timestampUnixMs,
+                unityFrame = Time.frameCount,
+                rgbOk = rgbOk,
+                depthOk = depthOk,
+                descriptorOk = descriptorOk,
+            };
 
-            Debug.Log($"[Quest3RgbdCaptureFinal] saved rgb={rgbOk} depth={depthOk} descriptor={descriptorOk} dir={directory}");
+            Debug.Log($"[Quest3RgbdCaptureFinal] captured rgb={rgbOk} depth={depthOk} descriptor={descriptorOk} rgb={payload.rgbWidth}x{payload.rgbHeight} depth={payload.depthWidth}x{payload.depthHeight}");
             return rgbOk && depthOk && descriptorOk;
         }
 
@@ -298,8 +342,10 @@ namespace SmartRoom.Capture
                 farZ = float.PositiveInfinity,
             };
 
-            if (depthManager == null)
-                return false;
+            try
+            {
+                if (depthManager == null)
+                    return false;
 
             FieldInfo field = typeof(EnvironmentDepthManager).GetField(
                 "frameDescriptors",
@@ -318,8 +364,12 @@ namespace SmartRoom.Capture
                 return false;
 
             Type type = desc.GetType();
-            Vector3 pos = (Vector3)type.GetField("createPoseLocation").GetValue(desc);
-            Quaternion rot = (Quaternion)type.GetField("createPoseRotation").GetValue(desc);
+            var posField = type.GetField("createPoseLocation", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            var rotField = type.GetField("createPoseRotation", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (posField == null || rotField == null)
+                return false;
+            Vector3 pos = (Vector3)posField.GetValue(desc);
+            Quaternion rot = (Quaternion)rotField.GetValue(desc);
 
             descriptor.pose = new Pose(pos, rot);
             descriptor.fovLeft = ReadFloatField(type, desc, "fovLeftAngleTangent");
@@ -329,6 +379,11 @@ namespace SmartRoom.Capture
             descriptor.nearZ = ReadFloatField(type, desc, "nearZ");
             descriptor.farZ = ReadFloatField(type, desc, "farZ");
             return true;
+        }
+        catch
+        {
+            return false;
+        }
         }
 
         private static float ReadFloatField(Type type, object obj, string fieldName)
