@@ -5,6 +5,7 @@ import base64
 import json
 import struct
 from datetime import datetime, timezone
+from pathlib import Path
 from threading import Lock
 from typing import Any
 
@@ -15,6 +16,12 @@ from fastapi.responses import Response
 
 from .log_manager import add_log, add_python_log, install_python_logging_bridge, list_logs
 from .tracking import TrackingEngine, TrackState
+from .tracking.rgbd_final_alignment import (
+    align_final_rgbd_capture_dir,
+    align_final_rgbd_payload,
+    decode_rgb_jpeg,
+)
+from .rgbd_stream_align import align_streaming_rgbd, make_overlay_jpeg
 
 
 app = FastAPI(title="Smart Room Receiver Backend")
@@ -52,6 +59,9 @@ _next_raycast_query_id = 1
 _latest_raycast_result: dict = {}
 _camera_intrinsics: dict = {}
 _depth_source_meta: dict = {}
+_depth_descriptor: dict = {}
+_rgbd_overlay_clients: set[WebSocket] = set()
+_latest_overlay_jpeg: bytes | None = None
 
 _tracking_engine: TrackingEngine | None = None
 _tracking_clients: set[WebSocket] = set()
@@ -237,6 +247,20 @@ async def rgb_preview_raw_socket(websocket: WebSocket) -> None:
         _rgb_raw_preview_clients.discard(websocket)
 
 
+@app.websocket("/ws/rgbd-overlay")
+async def rgbd_overlay_socket(websocket: WebSocket) -> None:
+    await websocket.accept()
+    _rgbd_overlay_clients.add(websocket)
+    add_python_log("info", "RGB-D overlay client connected on /ws/rgbd-overlay")
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        _rgbd_overlay_clients.discard(websocket)
+
+
 # ═══════════════════ WebSocket: Depth stream ════════════════════════
 
 @app.websocket("/ws/depth")
@@ -377,6 +401,32 @@ async def heartbeat_socket(websocket: WebSocket) -> None:
                         "preprocessed": payload.get("preprocessed"),
                         "zbuffer_params": payload.get("zbuffer_params") or [],
                         "unity_frame_count": payload.get("unity_frame_count"),
+                        "timestamp_ms": payload.get("timestamp_ms"),
+                    }
+
+                elif payload_type == "depth_descriptor":
+                    global _depth_descriptor
+                    _depth_descriptor = {
+                        "pose_position_x": payload.get("pose_position_x"),
+                        "pose_position_y": payload.get("pose_position_y"),
+                        "pose_position_z": payload.get("pose_position_z"),
+                        "pose_rotation_x": payload.get("pose_rotation_x"),
+                        "pose_rotation_y": payload.get("pose_rotation_y"),
+                        "pose_rotation_z": payload.get("pose_rotation_z"),
+                        "pose_rotation_w": payload.get("pose_rotation_w"),
+                        "fov_left": payload.get("fov_left"),
+                        "fov_right": payload.get("fov_right"),
+                        "fov_top": payload.get("fov_top"),
+                        "fov_bottom": payload.get("fov_bottom"),
+                        "near_z": payload.get("near_z"),
+                        "far_z": payload.get("far_z"),
+                        "zbuffer_x": payload.get("zbuffer_x"),
+                        "zbuffer_y": payload.get("zbuffer_y"),
+                        "zbuffer_z": payload.get("zbuffer_z"),
+                        "zbuffer_w": payload.get("zbuffer_w"),
+                        "selected_eye": payload.get("selected_eye"),
+                        "depth_texture_width": payload.get("depth_texture_width"),
+                        "depth_texture_height": payload.get("depth_texture_height"),
                         "timestamp_ms": payload.get("timestamp_ms"),
                     }
 
@@ -530,6 +580,68 @@ async def _broadcast_depth_preview(packet_bytes: bytes) -> None:
         _depth_preview_clients.discard(client)
 
 
+async def _broadcast_rgbd_overlay(jpeg_bytes: bytes) -> None:
+    """Send aligned RGB-D overlay JPEG to all connected overlay clients."""
+    if not _rgbd_overlay_clients:
+        return
+    stale: list[WebSocket] = []
+    for client in list(_rgbd_overlay_clients):
+        try:
+            await asyncio.wait_for(client.send_bytes(jpeg_bytes), timeout=1.0)
+        except Exception:
+            stale.append(client)
+    for client in stale:
+        _rgbd_overlay_clients.discard(client)
+
+
+async def _maybe_compute_and_broadcast_overlay(rgb_jpeg: bytes) -> None:
+    """Compute streaming RGB-D alignment + overlay, broadcast if clients are connected."""
+    if not _rgbd_overlay_clients:
+        return
+
+    global _depth_descriptor, _camera_intrinsics, _latest_depth_packet
+    global _latest_overlay_jpeg
+
+    if not _depth_descriptor or not _camera_intrinsics:
+        return
+
+    # Decode RGB
+    rgb_raw = np.frombuffer(rgb_jpeg, dtype=np.uint8)
+    rgb_bgr = cv2.imdecode(rgb_raw, cv2.IMREAD_COLOR)
+    if rgb_bgr is None:
+        return
+
+    # Decode depth
+    depth_arr = _depth_packet_to_array(_latest_depth_packet) if _latest_depth_packet else None
+    if depth_arr is None:
+        return
+
+    # Compute alignment
+    try:
+        aligned = align_streaming_rgbd(
+            rgb_bgr,
+            depth_arr,
+            _camera_intrinsics,
+            _depth_descriptor,
+            min_depth=0.2,
+            max_depth=8.0,
+        )
+    except Exception:
+        return
+
+    if aligned is None or not np.any(aligned > 0):
+        return
+
+    # Generate overlay
+    rgb_rgb = cv2.cvtColor(rgb_bgr, cv2.COLOR_BGR2RGB)
+    overlay_jpeg = make_overlay_jpeg(rgb_rgb, aligned, min_depth=0.2, max_depth=8.0)
+    if overlay_jpeg is None:
+        return
+
+    _latest_overlay_jpeg = overlay_jpeg
+    await _broadcast_rgbd_overlay(overlay_jpeg)
+
+
 async def _broadcast_heartbeat_control(payload: dict) -> int:
     if not _heartbeat_clients:
         return 0
@@ -580,41 +692,165 @@ async def _ingest_rgb_frame(
     if raw_packet is not None:
         await _broadcast_rgb_raw_preview(raw_packet)
 
+    # Compute and broadcast RGB-D overlay if we have all streaming data
+    await _maybe_compute_and_broadcast_overlay(jpeg)
 
-# ═══════════════════════ Tracking API ════════════════════════════════
 
-@app.post("/api/track/start")
-async def track_start(body: dict) -> dict[str, Any]:
-    pixel_x = float(body.get("pixel_x", -1))
-    pixel_y = float(body.get("pixel_y", -1))
-    trigger_bundle_meta = body.get("trigger_bundle_meta")
-    if pixel_x < 0 or pixel_y < 0:
-        raise HTTPException(status_code=400, detail="pixel_x and pixel_y required")
-    if _latest_rgb_bgr is None:
+def _decode_base64_payload(body: dict[str, Any], *names: str) -> bytes:
+    for name in names:
+        value = body.get(name)
+        if isinstance(value, str) and value:
+            if "," in value and value.lstrip().startswith("data:"):
+                value = value.split(",", 1)[1]
+            return base64.b64decode(value)
+    joined = " or ".join(names)
+    raise HTTPException(status_code=400, detail=f"{joined} required")
+
+
+def _parse_final_rgbd_meta(body: dict[str, Any]) -> dict[str, Any]:
+    meta = body.get("meta")
+    if isinstance(meta, dict):
+        return meta
+    meta_json = body.get("meta_json")
+    if isinstance(meta_json, str) and meta_json.strip():
+        try:
+            parsed = json.loads(meta_json)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail=f"meta_json is invalid JSON: {exc}") from exc
+        if isinstance(parsed, dict):
+            return parsed
+    raise HTTPException(status_code=400, detail="meta or meta_json required")
+
+
+def _decode_final_depth_raw(body: dict[str, Any], meta: dict[str, Any]) -> np.ndarray:
+    depth_meta = meta.get("depth")
+    if not isinstance(depth_meta, dict):
+        raise HTTPException(status_code=400, detail="meta.depth required")
+    try:
+        depth_w = int(depth_meta["resolution_w"])
+        depth_h = int(depth_meta["resolution_h"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="meta.depth resolution_w/resolution_h required") from exc
+    if depth_w <= 0 or depth_h <= 0:
+        raise HTTPException(status_code=400, detail="meta.depth resolution must be positive")
+
+    depth_bytes = _decode_base64_payload(
+        body,
+        "depth_raw_f32_le_b64",
+        "depth_raw_b64",
+        "depth_raw",
+    )
+    expected = depth_w * depth_h * 4
+    if len(depth_bytes) != expected:
+        raise HTTPException(
+            status_code=400,
+            detail=f"depth raw length mismatch: expected {expected}, got {len(depth_bytes)}",
+        )
+    return np.frombuffer(depth_bytes, dtype="<f4").reshape((depth_h, depth_w)).copy()
+
+
+def _timestamp_from_final_meta(meta: dict[str, Any]) -> int:
+    value = meta.get("timestamp_unix_ms")
+    if isinstance(value, (int, float)):
+        return int(value)
+    return int(datetime.now(timezone.utc).timestamp() * 1000)
+
+
+def _resolve_pixel_for_frame(
+    *,
+    pixel_x: float,
+    pixel_y: float,
+    width: int,
+    height: int,
+    trigger_bundle_meta: dict[str, Any] | None = None,
+) -> tuple[int, int]:
+    viewport_xy = None
+    if isinstance(trigger_bundle_meta, dict):
+        viewport_xy = (
+            trigger_bundle_meta.get("cursor_viewport_xy")
+            or trigger_bundle_meta.get("viewport_xy")
+        )
+    if isinstance(viewport_xy, list) and len(viewport_xy) >= 2:
+        try:
+            vx = float(viewport_xy[0])
+            vy = float(viewport_xy[1])
+        except (TypeError, ValueError):
+            vx = vy = -1.0
+        if 0.0 <= vx <= 1.0 and 0.0 <= vy <= 1.0:
+            return (
+                int(np.clip(vx * width, 0, width - 1)),
+                int(np.clip((1.0 - vy) * height, 0, height - 1)),
+            )
+
+    return (
+        int(pixel_x * width) if pixel_x <= 1.0 else int(pixel_x),
+        int(pixel_y * height) if pixel_y <= 1.0 else int(pixel_y),
+    )
+
+
+def _cache_final_rgbd_alignment(
+    *,
+    alignment,
+    rgb_jpeg: bytes,
+    timestamp_ms: int,
+) -> None:
+    global _latest_rgb_jpeg, _latest_rgb_bgr, _latest_rgb_timestamp_ms
+    global _latest_aligned_depth, _latest_aligned_valid_mask
+    global _latest_debug_projection_meta, _last_rgb_intrinsics
+
+    rgb_h, rgb_w = alignment.rgb_bgr.shape[:2]
+    with _lock:
+        _latest_rgb_jpeg = rgb_jpeg
+        _latest_rgb_bgr = alignment.rgb_bgr
+        _latest_rgb_timestamp_ms = timestamp_ms
+        _latest_aligned_depth = alignment.aligned_depth_m.copy()
+        _latest_aligned_valid_mask = alignment.valid_mask.copy()
+        _latest_debug_projection_meta = dict(alignment.summary)
+        _last_rgb_intrinsics = alignment.rgb_intrinsics.copy()
+        _state["last_rgb_frame_id"] = int(_state.get("last_rgb_frame_id", 0)) + 1
+        _state["last_rgb_size"] = f"{rgb_w}x{rgb_h}"
+        _state["last_seen_utc"] = _utc_now_iso()
+
+
+async def _run_tracking_detection(
+    *,
+    pixel_x: float,
+    pixel_y: float,
+    rgb_bgr: np.ndarray,
+    rgb_jpeg: bytes | None,
+    aligned_depth: np.ndarray | None,
+    rgb_intrinsics: np.ndarray | None,
+    trigger_bundle_meta: dict[str, Any] | None,
+    alignment_summary: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if rgb_bgr is None:
         raise HTTPException(status_code=503, detail="No RGB frame available yet")
     if not _models_ready:
         raise HTTPException(status_code=503, detail="Tracking models not ready yet (still loading)")
 
-    # ── aligned depth is now sent by Unity via POST /api/depth/aligned ──
-    # (no more server-side matrix alignment)
-
     engine = _get_tracking_engine()
     engine.stop()
-    h, w = _latest_rgb_bgr.shape[:2]
-    px = int(pixel_x * w) if pixel_x <= 1.0 else int(pixel_x)
-    py = int(pixel_y * h) if pixel_y <= 1.0 else int(pixel_y)
+    h, w = rgb_bgr.shape[:2]
+    px, py = _resolve_pixel_for_frame(
+        pixel_x=pixel_x,
+        pixel_y=pixel_y,
+        width=w,
+        height=h,
+        trigger_bundle_meta=trigger_bundle_meta,
+    )
+    px = int(np.clip(px, 0, w - 1))
+    py = int(np.clip(py, 0, h - 1))
 
-    # Save the original frame + click pixel for dashboard preview
-    global _last_trigger_frame_jpeg, _last_trigger_pixel, _last_trigger_bundle_meta, _last_rgb_intrinsics
+    global _last_trigger_frame_jpeg, _last_trigger_pixel
+    global _last_trigger_bundle_meta, _last_rgb_intrinsics
     _last_trigger_pixel = (px, py)
     _last_trigger_bundle_meta = trigger_bundle_meta if isinstance(trigger_bundle_meta, dict) else None
-    if _latest_rgb_jpeg is not None:
-        _last_trigger_frame_jpeg = _latest_rgb_jpeg
+    if rgb_jpeg is not None:
+        _last_trigger_frame_jpeg = rgb_jpeg
+    if rgb_intrinsics is not None:
+        _last_rgb_intrinsics = rgb_intrinsics.copy()
 
     if isinstance(_last_trigger_bundle_meta, dict):
-        rgb_intrinsics9 = _last_trigger_bundle_meta.get("rgb_intrinsics9")
-        if isinstance(rgb_intrinsics9, list) and len(rgb_intrinsics9) == 9:
-            _last_rgb_intrinsics = np.array(rgb_intrinsics9, dtype=np.float32).reshape((3, 3))
         trigger_ts = _last_trigger_bundle_meta.get("trigger_timestamp_ms")
         rgb_delta = None
         if isinstance(trigger_ts, (int, float)) and _latest_rgb_timestamp_ms is not None:
@@ -625,10 +861,16 @@ async def track_start(body: dict) -> dict[str, Any]:
             f"rgb_frame_wh={_last_trigger_bundle_meta.get('rgb_frame_wh')}, depth_snapshot={(_last_trigger_bundle_meta.get('depth_snapshot') or {}).get('sampled_wh')}"
         )
 
-    result = engine.detect(px, py, _latest_rgb_bgr.copy())
-    add_python_log("info", f"Tracking detect at ({px},{py}) -> {result.label}")
+    result = engine.detect(
+        px,
+        py,
+        rgb_bgr.copy(),
+        aligned_depth_m=aligned_depth.copy() if aligned_depth is not None else None,
+        rgb_intrinsics=rgb_intrinsics.copy() if rgb_intrinsics is not None else None,
+    )
+    source = (alignment_summary or {}).get("source", "cached")
+    add_python_log("info", f"Tracking detect at ({px},{py}) source={source} -> {result.label}")
 
-    # Crop and store the detected bbox region for preview
     global _last_detection_crop_jpeg
     x0, y0, x1, y1 = result.box_xyxy
     x0_c = max(0, int(x0))
@@ -636,12 +878,125 @@ async def track_start(body: dict) -> dict[str, Any]:
     x1_c = min(w, int(x1))
     y1_c = min(h, int(y1))
     if x1_c > x0_c and y1_c > y0_c:
-        crop = _latest_rgb_bgr[y0_c:y1_c, x0_c:x1_c]
+        crop = rgb_bgr[y0_c:y1_c, x0_c:x1_c]
         ok, buf = cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, 90])
         if ok:
             _last_detection_crop_jpeg = buf.tobytes()
 
-    return {"ok": True, "result": result.to_payload()}
+    payload = result.to_payload()
+    if alignment_summary is not None:
+        payload.setdefault("diagnostics", {})["rgbd_alignment"] = alignment_summary
+    await _broadcast_tracking(payload)
+    response = {"ok": True, "result": payload}
+    if alignment_summary is not None:
+        response["alignment_summary"] = alignment_summary
+    return response
+
+
+# ═══════════════════════ Tracking API ════════════════════════════════
+
+@app.post("/api/track/start")
+async def track_start(body: dict) -> dict[str, Any]:
+    raise HTTPException(
+        status_code=410,
+        detail="Legacy tracking endpoint disabled. Use /api/track/start-final-rgbd.",
+    )
+
+
+@app.post("/api/track/start-final-rgbd")
+async def track_start_final_rgbd(body: dict) -> dict[str, Any]:
+    pixel_x = float(body.get("pixel_x", -1))
+    pixel_y = float(body.get("pixel_y", -1))
+    if pixel_x < 0 or pixel_y < 0:
+        raise HTTPException(status_code=400, detail="pixel_x and pixel_y required")
+
+    try:
+        meta = _parse_final_rgbd_meta(body)
+        rgb_jpeg = _decode_base64_payload(body, "rgb_jpeg_b64", "rgb_b64", "rgb_jpeg")
+        raw_depth = _decode_final_depth_raw(body, meta)
+        rgb_bgr = decode_rgb_jpeg(rgb_jpeg)
+        alignment = align_final_rgbd_payload(
+            rgb_bgr=rgb_bgr,
+            raw_depth=raw_depth,
+            meta=meta,
+            min_depth=float(body.get("min_depth", 0.2)),
+            max_depth=float(body.get("max_depth", 8.0)),
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        add_python_log("warning", f"Final RGB-D alignment failed: {exc}")
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    _cache_final_rgbd_alignment(
+        alignment=alignment,
+        rgb_jpeg=rgb_jpeg,
+        timestamp_ms=_timestamp_from_final_meta(meta),
+    )
+    await _broadcast_rgb_preview(rgb_jpeg)
+
+    trigger_bundle_meta = body.get("trigger_bundle_meta")
+    if not isinstance(trigger_bundle_meta, dict):
+        trigger_bundle_meta = None
+
+    return await _run_tracking_detection(
+        pixel_x=pixel_x,
+        pixel_y=pixel_y,
+        rgb_bgr=alignment.rgb_bgr,
+        rgb_jpeg=rgb_jpeg,
+        aligned_depth=alignment.aligned_depth_m,
+        rgb_intrinsics=alignment.rgb_intrinsics,
+        trigger_bundle_meta=trigger_bundle_meta,
+        alignment_summary=alignment.summary,
+    )
+
+
+@app.post("/api/track/start-final-rgbd-capture-dir")
+async def track_start_final_rgbd_capture_dir(body: dict) -> dict[str, Any]:
+    capture_dir_value = body.get("capture_dir")
+    if not isinstance(capture_dir_value, str) or not capture_dir_value.strip():
+        raise HTTPException(status_code=400, detail="capture_dir required")
+    pixel_x = float(body.get("pixel_x", -1))
+    pixel_y = float(body.get("pixel_y", -1))
+    if pixel_x < 0 or pixel_y < 0:
+        raise HTTPException(status_code=400, detail="pixel_x and pixel_y required")
+
+    capture_dir = Path(capture_dir_value)
+    try:
+        alignment = align_final_rgbd_capture_dir(
+            capture_dir,
+            output_dir=body.get("output_dir"),
+            min_depth=float(body.get("min_depth", 0.2)),
+            max_depth=float(body.get("max_depth", 8.0)),
+            write_outputs=bool(body.get("write_outputs", True)),
+        )
+        rgb_jpeg = (capture_dir / "rgb.jpg").read_bytes()
+        meta = json.loads((capture_dir / "meta.json").read_text(encoding="utf-8"))
+    except Exception as exc:
+        add_python_log("warning", f"Final RGB-D capture-dir alignment failed: {exc}")
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    _cache_final_rgbd_alignment(
+        alignment=alignment,
+        rgb_jpeg=rgb_jpeg,
+        timestamp_ms=_timestamp_from_final_meta(meta),
+    )
+    await _broadcast_rgb_preview(rgb_jpeg)
+
+    trigger_bundle_meta = body.get("trigger_bundle_meta")
+    if not isinstance(trigger_bundle_meta, dict):
+        trigger_bundle_meta = None
+
+    return await _run_tracking_detection(
+        pixel_x=pixel_x,
+        pixel_y=pixel_y,
+        rgb_bgr=alignment.rgb_bgr,
+        rgb_jpeg=rgb_jpeg,
+        aligned_depth=alignment.aligned_depth_m,
+        rgb_intrinsics=alignment.rgb_intrinsics,
+        trigger_bundle_meta=trigger_bundle_meta,
+        alignment_summary=alignment.summary,
+    )
 
 
 @app.post("/api/track/stop")
@@ -732,6 +1087,10 @@ async def track_last_original():
 @app.post("/api/depth/aligned")
 async def receive_aligned_depth(request: Request):
     """Receive strict sparse aligned depth from Unity as JSON + base64 payloads."""
+    raise HTTPException(
+        status_code=410,
+        detail="Legacy aligned-depth upload disabled. Use /api/track/start-final-rgbd.",
+    )
     global _latest_aligned_depth, _latest_aligned_valid_mask, _latest_debug_projection_meta, _last_rgb_intrinsics
     try:
         body = await request.json()
@@ -783,6 +1142,10 @@ async def receive_aligned_depth(request: Request):
 @app.post("/api/depth/aligned-v2")
 async def receive_aligned_depth_v2(request: Request):
     """Receive strict sparse aligned depth from Unity as JSON + base64 payloads."""
+    raise HTTPException(
+        status_code=410,
+        detail="Legacy aligned-depth v2 upload disabled. Use /api/track/start-final-rgbd.",
+    )
     global _latest_aligned_depth, _latest_aligned_valid_mask, _latest_debug_projection_meta, _last_rgb_intrinsics
     try:
         body = await request.json()
