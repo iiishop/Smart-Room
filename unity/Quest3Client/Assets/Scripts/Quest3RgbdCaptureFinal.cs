@@ -59,6 +59,8 @@ namespace SmartRoom.Capture
         private int _lastDepthTextureSlices;
         private string _lastDepthTextureDimension = "unknown";
 
+        private bool _ready;
+
         private void Awake()
         {
             if (passthroughCamera == null)
@@ -76,6 +78,28 @@ namespace SmartRoom.Capture
                 _depthShader = Resources.Load<Shader>("SmartRoomDepthArraySliceToFloat");
             if (_depthShader != null)
                 _depthMaterial = new Material(_depthShader);
+        }
+
+        private System.Collections.IEnumerator Start()
+        {
+            // Wait for PCA to start playing
+            if (passthroughCamera != null)
+            {
+                while (!passthroughCamera.IsPlaying)
+                    yield return null;
+            }
+
+            // Wait for depth to become available
+            if (depthManager != null)
+            {
+                while (!depthManager.IsDepthAvailable)
+                    yield return null;
+            }
+
+            // Give the SDK a moment to fill internal descriptor arrays
+            yield return new UnityEngine.WaitForSeconds(2.0f);
+
+            _ready = true;
         }
 
         private void OnDestroy()
@@ -101,6 +125,12 @@ namespace SmartRoom.Capture
 
         public bool CaptureOnce(string directory)
         {
+            if (!_ready)
+            {
+                Debug.LogWarning("[Quest3RgbdCaptureFinal] SDK not ready yet — rejecting capture");
+                return false;
+            }
+
             if (string.IsNullOrWhiteSpace(directory))
             {
                 Debug.LogError("[Quest3RgbdCaptureFinal] CaptureOnce directory is empty.");
