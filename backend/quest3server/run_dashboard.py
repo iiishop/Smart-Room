@@ -120,12 +120,6 @@ class DashboardWindow(QMainWindow):
 
         # ── WebSocket connections ──
 
-        self._rgb_socket = QWebSocket()
-        self._rgb_socket.binaryMessageReceived.connect(self._on_rgb_binary)
-
-        self._depth_socket = QWebSocket()
-        self._depth_socket.binaryMessageReceived.connect(self._on_depth_binary)
-
         self._rgbd_overlay_socket = QWebSocket()
         self._rgbd_overlay_socket.binaryMessageReceived.connect(
             self._on_rgbd_overlay_binary
@@ -918,16 +912,6 @@ class DashboardWindow(QMainWindow):
     # ═══════════════════════ WebSocket ════════════════════════════════
 
     def _ensure_sockets(self) -> None:
-        if self._rgb_socket.state() not in (
-            QAbstractSocket.SocketState.ConnectedState,
-            QAbstractSocket.SocketState.ConnectingState,
-        ):
-            self._rgb_socket.open(QUrl("ws://127.0.0.1:8500/ws/rgb-preview"))
-        if self._depth_socket.state() not in (
-            QAbstractSocket.SocketState.ConnectedState,
-            QAbstractSocket.SocketState.ConnectingState,
-        ):
-            self._depth_socket.open(QUrl("ws://127.0.0.1:8500/ws/depth-preview"))
         if self._rgbd_overlay_socket.state() not in (
             QAbstractSocket.SocketState.ConnectedState,
             QAbstractSocket.SocketState.ConnectingState,

@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-import struct
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
@@ -21,7 +20,7 @@ from .tracking.rgbd_final_alignment import (
     align_final_rgbd_payload,
     decode_rgb_jpeg,
 )
-from .rgbd_stream_align import align_streaming_rgbd, make_overlay_jpeg
+from .rgbd_stream_align import make_overlay_jpeg
 
 
 app = FastAPI(title="Smart Room Receiver Backend")
@@ -34,32 +33,21 @@ _state = {
     "last_seen_utc": None,
     "last_payload": {},
     "last_tick": 0,
-    "last_rgb_frame_id": 0,
-    "last_rgb_size": None,
-    "last_depth_frame_id": 0,
-    "last_depth_size": None,
 }
-_latest_rgb_jpeg: bytes | None = None
-_latest_rgb_bgr: Any = None  # decoded BGR numpy array for tracking engine
+# Trigger pipeline state (survives after streaming removal)
+_latest_rgb_bgr: Any = None
 _latest_rgb_timestamp_ms: int | None = None
-_latest_depth_packet: bytes | None = None
-_latest_aligned_depth: np.ndarray | None = None  # sparse depth aligned into RGB frame
+_latest_aligned_depth: np.ndarray | None = None
 _latest_aligned_valid_mask: np.ndarray | None = None
 _latest_debug_projection_meta: dict[str, Any] | None = None
-_last_trigger_frame_jpeg: bytes | None = None  # original RGB frame from last trigger
-_last_trigger_pixel: tuple[int, int] | None = None  # (px, py) from last trigger
-_last_rgb_intrinsics: np.ndarray | None = None  # 3×3 K from last trigger
+_last_trigger_frame_jpeg: bytes | None = None
+_last_trigger_pixel: tuple[int, int] | None = None
+_last_rgb_intrinsics: np.ndarray | None = None
 _last_trigger_bundle_meta: dict[str, Any] | None = None
-_latest_rgb_packet: bytes | None = None
-_rgb_preview_clients: set[WebSocket] = set()
-_rgb_raw_preview_clients: set[WebSocket] = set()
-_depth_preview_clients: set[WebSocket] = set()
 _heartbeat_clients: set[WebSocket] = set()
 _next_raycast_query_id = 1
 _latest_raycast_result: dict = {}
 _camera_intrinsics: dict = {}
-_depth_source_meta: dict = {}
-_depth_descriptor: dict = {}
 _rgbd_overlay_clients: set[WebSocket] = set()
 _latest_overlay_jpeg: bytes | None = None
 
@@ -122,7 +110,6 @@ async def status() -> dict:
     with _lock:
         snapshot = dict(_state)
         snapshot["camera_intrinsics"] = dict(_camera_intrinsics)
-        snapshot["depth_source_meta"] = dict(_depth_source_meta)
         snapshot["aligned_depth_meta"] = dict(_latest_debug_projection_meta or {})
     snapshot["latest_rgb_timestamp_ms"] = _latest_rgb_timestamp_ms
     snapshot["trigger_bundle"] = _summarize_trigger_bundle(_last_trigger_bundle_meta)
@@ -132,16 +119,6 @@ async def status() -> dict:
         "label": _tracking_engine.label if _tracking_engine else "",
     }
     return snapshot
-
-
-@app.get("/api/latest-rgb")
-async def latest_rgb():
-    from fastapi import Response
-
-    with _lock:
-        if _latest_rgb_jpeg is None:
-            return Response(status_code=204)
-        return Response(content=_latest_rgb_jpeg, media_type="image/jpeg")
 
 
 @app.get("/api/logs")
@@ -181,71 +158,7 @@ async def raycast_query(body: dict) -> dict:
     return {"ok": True, "query_id": query_id, "dispatched": sent}
 
 
-# ═══════════════════════ WebSocket: RGB stream ═══════════════════════
-
-@app.websocket("/ws/rgb")
-async def rgb_socket(websocket: WebSocket) -> None:
-    await websocket.accept()
-    add_python_log("info", "RGB websocket connected on /ws/rgb")
-
-    try:
-        while True:
-            message = await websocket.receive()
-            data = message.get("bytes")
-            if not data:
-                continue
-
-            parsed = _parse_rgb_packet(data)
-            if parsed is None:
-                add_python_log(
-                    "warning", f"Invalid rgb packet received (size={len(data)})"
-                )
-                continue
-
-            frame_id, timestamp_ms, width, height, jpeg = parsed
-            await _ingest_rgb_frame(
-                frame_id=frame_id,
-                timestamp_ms=timestamp_ms,
-                width=width,
-                height=height,
-                jpeg=jpeg,
-                raw_packet=data,
-            )
-    except WebSocketDisconnect:
-        add_python_log("warning", "RGB websocket disconnected")
-    except Exception as ex:
-        add_python_log("error", f"RGB websocket processing failed: {ex}")
-
-
-# ═══════════════════ WebSocket: Dashboard previews ══════════════════
-
-@app.websocket("/ws/rgb-preview")
-async def rgb_preview_socket(websocket: WebSocket) -> None:
-    await websocket.accept()
-    _rgb_preview_clients.add(websocket)
-    add_python_log("info", "Dashboard preview client connected on /ws/rgb-preview")
-    try:
-        while True:
-            await websocket.receive_text()
-    except WebSocketDisconnect:
-        pass
-    finally:
-        _rgb_preview_clients.discard(websocket)
-
-
-@app.websocket("/ws/rgb-preview-raw")
-async def rgb_preview_raw_socket(websocket: WebSocket) -> None:
-    await websocket.accept()
-    _rgb_raw_preview_clients.add(websocket)
-    add_python_log("info", "Raw preview client connected on /ws/rgb-preview-raw")
-    try:
-        while True:
-            await websocket.receive_text()
-    except WebSocketDisconnect:
-        pass
-    finally:
-        _rgb_raw_preview_clients.discard(websocket)
-
+# ═══════════════════════ WebSocket: Trigger-only overlay ════════════
 
 @app.websocket("/ws/rgbd-overlay")
 async def rgbd_overlay_socket(websocket: WebSocket) -> None:
@@ -261,60 +174,7 @@ async def rgbd_overlay_socket(websocket: WebSocket) -> None:
         _rgbd_overlay_clients.discard(websocket)
 
 
-# ═══════════════════ WebSocket: Depth stream ════════════════════════
-
-@app.websocket("/ws/depth")
-async def depth_socket(websocket: WebSocket) -> None:
-    await websocket.accept()
-    add_python_log("info", "Depth websocket connected on /ws/depth")
-
-    try:
-        while True:
-            message = await websocket.receive()
-            data = message.get("bytes")
-            if not data:
-                continue
-
-            parsed = _parse_depth_packet(data)
-            if parsed is None:
-                add_python_log(
-                    "warning", f"Invalid depth packet received (size={len(data)})"
-                )
-                continue
-
-            frame_id, timestamp_ms, width, height, row_stride, pixel_stride, payload = (
-                parsed
-            )
-
-            with _lock:
-                global _latest_depth_packet
-                _latest_depth_packet = data
-                _state["last_depth_frame_id"] = frame_id
-                _state["last_depth_size"] = f"{width}x{height}"
-                _state["last_seen_utc"] = _utc_now_iso()
-
-            await _broadcast_depth_preview(data)
-    except WebSocketDisconnect:
-        add_python_log("warning", "Depth websocket disconnected")
-    except Exception as ex:
-        add_python_log("error", f"Depth websocket processing failed: {ex}")
-
-
-@app.websocket("/ws/depth-preview")
-async def depth_preview_socket(websocket: WebSocket) -> None:
-    await websocket.accept()
-    _depth_preview_clients.add(websocket)
-    add_python_log("info", "Dashboard preview client connected on /ws/depth-preview")
-    try:
-        while True:
-            await websocket.receive_text()
-    except WebSocketDisconnect:
-        pass
-    finally:
-        _depth_preview_clients.discard(websocket)
-
-
-# ═══════════════════ WebSocket: Heartbeat / control ═════════════════
+# ═══════════════════════ WebSocket: Heartbeat ════════════════════════
 
 @app.websocket("/ws/heartbeat")
 async def heartbeat_socket(websocket: WebSocket) -> None:
@@ -351,23 +211,7 @@ async def heartbeat_socket(websocket: WebSocket) -> None:
                 if "tick" in payload and payload.get("tick") is not None:
                     _state["last_tick"] = int(payload["tick"])
 
-                if payload_type == "rgb_frame":
-                    payload_b64 = payload.get("payload_b64")
-                    if payload_b64:
-                        jpeg = base64.b64decode(payload_b64)
-                        frame_id = int(payload.get("frame_id", _state["last_rgb_frame_id"]))
-                        timestamp_ms = int(
-                            payload.get(
-                                "timestamp_ms",
-                                int(datetime.now(timezone.utc).timestamp() * 1000),
-                            )
-                        )
-                        width = int(payload.get("width", 0))
-                        height = int(payload.get("height", 0))
-                    else:
-                        jpeg = None
-
-                elif payload_type == "camera_intrinsics":
+                if payload_type == "camera_intrinsics":
                     global _camera_intrinsics
                     _camera_intrinsics = {
                         "fx": payload.get("fx"),
@@ -386,47 +230,6 @@ async def heartbeat_socket(websocket: WebSocket) -> None:
                         "preferred_width": payload.get("preferred_width"),
                         "preferred_height": payload.get("preferred_height"),
                         "supported_resolutions": payload.get("supported_resolutions") or [],
-                        "timestamp_ms": payload.get("timestamp_ms"),
-                    }
-
-                elif payload_type == "depth_source_meta":
-                    global _depth_source_meta
-                    _depth_source_meta = {
-                        "source_width": payload.get("source_width"),
-                        "source_height": payload.get("source_height"),
-                        "sampled_width": payload.get("sampled_width"),
-                        "sampled_height": payload.get("sampled_height"),
-                        "stride": payload.get("stride"),
-                        "flip_vertical": payload.get("flip_vertical"),
-                        "preprocessed": payload.get("preprocessed"),
-                        "zbuffer_params": payload.get("zbuffer_params") or [],
-                        "unity_frame_count": payload.get("unity_frame_count"),
-                        "timestamp_ms": payload.get("timestamp_ms"),
-                    }
-
-                elif payload_type == "depth_descriptor":
-                    global _depth_descriptor
-                    _depth_descriptor = {
-                        "pose_position_x": payload.get("pose_position_x"),
-                        "pose_position_y": payload.get("pose_position_y"),
-                        "pose_position_z": payload.get("pose_position_z"),
-                        "pose_rotation_x": payload.get("pose_rotation_x"),
-                        "pose_rotation_y": payload.get("pose_rotation_y"),
-                        "pose_rotation_z": payload.get("pose_rotation_z"),
-                        "pose_rotation_w": payload.get("pose_rotation_w"),
-                        "fov_left": payload.get("fov_left"),
-                        "fov_right": payload.get("fov_right"),
-                        "fov_top": payload.get("fov_top"),
-                        "fov_bottom": payload.get("fov_bottom"),
-                        "near_z": payload.get("near_z"),
-                        "far_z": payload.get("far_z"),
-                        "zbuffer_x": payload.get("zbuffer_x"),
-                        "zbuffer_y": payload.get("zbuffer_y"),
-                        "zbuffer_z": payload.get("zbuffer_z"),
-                        "zbuffer_w": payload.get("zbuffer_w"),
-                        "selected_eye": payload.get("selected_eye"),
-                        "depth_texture_width": payload.get("depth_texture_width"),
-                        "depth_texture_height": payload.get("depth_texture_height"),
                         "timestamp_ms": payload.get("timestamp_ms"),
                     }
 
@@ -457,16 +260,6 @@ async def heartbeat_socket(websocket: WebSocket) -> None:
                         "hit": payload.get("hit", False),
                     }
 
-            if payload_type == "rgb_frame" and jpeg is not None:
-                await _ingest_rgb_frame(
-                    frame_id=frame_id,
-                    timestamp_ms=timestamp_ms,
-                    width=width,
-                    height=height,
-                    jpeg=jpeg,
-                    raw_packet=None,
-                )
-
             await websocket.send_text("ack")
     except WebSocketDisconnect:
         add_python_log("warning", "WebSocket client disconnected")
@@ -481,104 +274,8 @@ async def heartbeat_socket(websocket: WebSocket) -> None:
 
 # ═══════════════════════ Packet parsers ═════════════════════════════
 
-def _parse_rgb_packet(data: bytes):
-    if len(data) < 28:
-        return None
-    try:
-        magic, frame_id, timestamp_ms, width, height, payload_len = struct.unpack_from(
-            "<4sI q I I I", data, 0
-        )
-    except struct.error:
-        return None
-    if magic != b"RGB1":
-        return None
-    if payload_len <= 0:
-        return None
-    if len(data) < 28 + payload_len:
-        return None
-    payload = data[28 : 28 + payload_len]
-    return frame_id, timestamp_ms, width, height, payload
-
-
-def _parse_depth_packet(data: bytes):
-    if len(data) < 36:
-        return None
-    try:
-        (
-            magic,
-            frame_id,
-            timestamp_ms,
-            width,
-            height,
-            row_stride,
-            pixel_stride,
-            payload_len,
-        ) = struct.unpack_from("<4sI q I I I I I", data, 0)
-    except struct.error:
-        return None
-    if magic != b"DEP1":
-        return None
-    if payload_len <= 0:
-        return None
-    if len(data) < 36 + payload_len:
-        return None
-    payload = data[36 : 36 + payload_len]
-    return frame_id, timestamp_ms, width, height, row_stride, pixel_stride, payload
-
-
-def _depth_packet_to_array(packet: bytes) -> np.ndarray | None:
-    """Parse a binary DEP1 packet into a float32 depth array (metres)."""
-    parsed = _parse_depth_packet(packet)
-    if parsed is None:
-        return None
-    _, _, width, height, _, _, payload = parsed
-    expected = width * height * 4
-    if len(payload) != expected:
-        return None
-    arr = np.frombuffer(payload, dtype=np.float32).reshape((height, width)).copy()
-    return arr
-
 
 # ═══════════════════════ Broadcasting helpers ════════════════════════
-
-async def _broadcast_rgb_preview(jpeg_bytes: bytes) -> None:
-    if not _rgb_preview_clients:
-        return
-    stale: list[WebSocket] = []
-    for client in list(_rgb_preview_clients):
-        try:
-            await asyncio.wait_for(client.send_bytes(jpeg_bytes), timeout=1.0)
-        except Exception:
-            stale.append(client)
-    for client in stale:
-        _rgb_preview_clients.discard(client)
-
-
-async def _broadcast_rgb_raw_preview(packet_bytes: bytes) -> None:
-    if not _rgb_raw_preview_clients:
-        return
-    stale: list[WebSocket] = []
-    for client in list(_rgb_raw_preview_clients):
-        try:
-            await asyncio.wait_for(client.send_bytes(packet_bytes), timeout=1.0)
-        except Exception:
-            stale.append(client)
-    for client in stale:
-        _rgb_raw_preview_clients.discard(client)
-
-
-async def _broadcast_depth_preview(packet_bytes: bytes) -> None:
-    if not _depth_preview_clients:
-        return
-    stale: list[WebSocket] = []
-    for client in list(_depth_preview_clients):
-        try:
-            await asyncio.wait_for(client.send_bytes(packet_bytes), timeout=1.0)
-        except Exception:
-            stale.append(client)
-    for client in stale:
-        _depth_preview_clients.discard(client)
-
 
 async def _broadcast_rgbd_overlay(jpeg_bytes: bytes) -> None:
     """Send aligned RGB-D overlay JPEG to all connected overlay clients."""
@@ -592,62 +289,6 @@ async def _broadcast_rgbd_overlay(jpeg_bytes: bytes) -> None:
             stale.append(client)
     for client in stale:
         _rgbd_overlay_clients.discard(client)
-
-
-async def _maybe_compute_and_broadcast_overlay(rgb_jpeg: bytes) -> None:
-    """Compute streaming RGB-D alignment + overlay, broadcast if clients are connected."""
-    if not _rgbd_overlay_clients:
-        return
-
-    global _depth_descriptor, _camera_intrinsics, _latest_depth_packet
-    global _latest_overlay_jpeg
-
-    if not _depth_descriptor or not _camera_intrinsics:
-        return
-
-    # Decode RGB
-    rgb_raw = np.frombuffer(rgb_jpeg, dtype=np.uint8)
-    rgb_bgr = cv2.imdecode(rgb_raw, cv2.IMREAD_COLOR)
-    if rgb_bgr is None:
-        return
-
-    # Decode depth
-    depth_arr = _depth_packet_to_array(_latest_depth_packet) if _latest_depth_packet else None
-    if depth_arr is None:
-        return
-
-    # Compute alignment
-    try:
-        aligned = align_streaming_rgbd(
-            rgb_bgr,
-            depth_arr,
-            _camera_intrinsics,
-            _depth_descriptor,
-            min_depth=0.2,
-            max_depth=8.0,
-        )
-    except Exception:
-        return
-
-    if aligned is None or not np.any(aligned > 0):
-        return
-
-    # Generate overlay
-    rgb_rgb = cv2.cvtColor(rgb_bgr, cv2.COLOR_BGR2RGB)
-    overlay_jpeg = make_overlay_jpeg(rgb_rgb, aligned, min_depth=0.2, max_depth=8.0)
-    if overlay_jpeg is None:
-        return
-
-    _latest_overlay_jpeg = overlay_jpeg
-    await _broadcast_rgbd_overlay(overlay_jpeg)
-
-
-async def _maybe_compute_and_broadcast_overlay_from_latest() -> None:
-    """Compute overlay from latest cached RGB frame, broadcast if clients connected."""
-    global _latest_rgb_jpeg
-    if _latest_rgb_jpeg is None:
-        return
-    await _maybe_compute_and_broadcast_overlay(_latest_rgb_jpeg)
 
 
 async def _broadcast_heartbeat_control(payload: dict) -> int:
@@ -667,38 +308,6 @@ async def _broadcast_heartbeat_control(payload: dict) -> int:
     return sent
 
 
-# ═══════════════════════ RGB frame ingestion ═════════════════════════
-
-async def _ingest_rgb_frame(
-    *,
-    frame_id: int,
-    timestamp_ms: int,
-    width: int,
-    height: int,
-    jpeg: bytes,
-    raw_packet: bytes | None,
-) -> None:
-    with _lock:
-        global _latest_rgb_jpeg
-        global _latest_rgb_packet
-        global _latest_rgb_bgr
-        global _latest_rgb_timestamp_ms
-        _latest_rgb_jpeg = jpeg
-        _latest_rgb_timestamp_ms = timestamp_ms
-        if raw_packet is not None:
-            _latest_rgb_packet = raw_packet
-        _state["last_rgb_frame_id"] = frame_id
-        _state["last_rgb_size"] = f"{width}x{height}"
-        _state["last_seen_utc"] = _utc_now_iso()
-
-    # Decode BGR for tracking engine (lightweight, ~3ms)
-    decoded = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
-    if decoded is not None:
-        _latest_rgb_bgr = decoded
-
-    await _broadcast_rgb_preview(jpeg)
-    if raw_packet is not None:
-        await _broadcast_rgb_raw_preview(raw_packet)
 
 
 def _decode_base64_payload(body: dict[str, Any], *names: str) -> bytes:
@@ -892,8 +501,6 @@ async def _run_tracking_detection(
     if alignment_summary is not None:
         payload.setdefault("diagnostics", {})["rgbd_alignment"] = alignment_summary
     await _broadcast_tracking(payload)
-    # Compute streaming overlay on trigger for RGB-D preview
-    await _maybe_compute_and_broadcast_overlay_from_latest()
     response = {"ok": True, "result": payload}
     if alignment_summary is not None:
         response["alignment_summary"] = alignment_summary
@@ -940,7 +547,13 @@ async def track_start_final_rgbd(body: dict) -> dict[str, Any]:
         rgb_jpeg=rgb_jpeg,
         timestamp_ms=_timestamp_from_final_meta(meta),
     )
-    await _broadcast_rgb_preview(rgb_jpeg)
+
+    # Generate and broadcast RGB-D overlay from trigger's own aligned data
+    rgb_rgb = cv2.cvtColor(alignment.rgb_bgr, cv2.COLOR_BGR2RGB)
+    overlay_jpeg = make_overlay_jpeg(rgb_rgb, alignment.aligned_depth_m)
+    if overlay_jpeg:
+        _latest_overlay_jpeg = overlay_jpeg
+        await _broadcast_rgbd_overlay(overlay_jpeg)
 
     trigger_bundle_meta = body.get("trigger_bundle_meta")
     if not isinstance(trigger_bundle_meta, dict):
@@ -988,7 +601,13 @@ async def track_start_final_rgbd_capture_dir(body: dict) -> dict[str, Any]:
         rgb_jpeg=rgb_jpeg,
         timestamp_ms=_timestamp_from_final_meta(meta),
     )
-    await _broadcast_rgb_preview(rgb_jpeg)
+
+    # Generate and broadcast RGB-D overlay from trigger's own aligned data
+    rgb_rgb = cv2.cvtColor(alignment.rgb_bgr, cv2.COLOR_BGR2RGB)
+    overlay_jpeg = make_overlay_jpeg(rgb_rgb, alignment.aligned_depth_m)
+    if overlay_jpeg:
+        _latest_overlay_jpeg = overlay_jpeg
+        await _broadcast_rgbd_overlay(overlay_jpeg)
 
     trigger_bundle_meta = body.get("trigger_bundle_meta")
     if not isinstance(trigger_bundle_meta, dict):
