@@ -3,10 +3,46 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import subprocess
+import sys
 from pathlib import Path
 
 import cv2
 import numpy as np
+
+
+class Any2FullConfigurationError(RuntimeError):
+    pass
+
+
+ANY2FULL_SETUP_MESSAGE = """\
+Any2Full depth completion was requested, but Any2Full is not configured.
+
+This repository does not vendor Any2Full or its model weights. Configure it explicitly:
+
+1. Clone/install Any2Full separately.
+   Example:
+     git clone <ANY2FULL_REPO_URL> /path/to/Any2Full
+
+2. Create an Any2Full-compatible Python environment and install its dependencies.
+   Use the instructions from the Any2Full project. Keep it separate from this RGB-D
+   alignment environment if Any2Full requires a different torch/CUDA version.
+
+3. Download the required checkpoint, for example:
+     /path/to/Any2Full/checkpoints/Any2Full_vitl.pth.tar
+
+4. Run this script with explicit paths:
+     python quest3_rgbd_align_final.py <capture_dir> --complete-depth ^
+       --any2full-dir /path/to/Any2Full ^
+       --any2full-venv-python /path/to/Any2Full/.venv/Scripts/python.exe ^
+       --any2full-checkpoint /path/to/Any2Full/checkpoints/Any2Full_vitl.pth.tar
+
+Expected Any2Full entry point:
+  <any2full-dir>/any2full_infer.py
+
+Expected interface:
+  any2full_infer.py --rgb <rgb.jpg> --depth <aligned_depth_m.npy> --out <dense_depth_any2full.npy> --checkpoint <ckpt> --encoder <vits|vitb|vitl>
+"""
 
 
 def load_meta(capture_dir: Path) -> dict:
@@ -201,6 +237,57 @@ def make_overlay(rgb: np.ndarray, aligned_depth: np.ndarray, min_depth: float, m
     return cv2.addWeighted(overlay, 0.38, rgb, 0.62, 0.0)
 
 
+def run_any2full_completion(
+    rgb_path: Path,
+    sparse_depth_path: Path,
+    output_path: Path,
+    any2full_dir: Path,
+    any2full_venv_python: str,
+    checkpoint_path: str | None = None,
+    encoder: str = "vitl",
+) -> None:
+    """Run Any2Full dense depth completion on an RGB + sparse depth pair.
+
+    Calls any2full_infer.py as a subprocess in its own Python environment.
+    """
+    if any2full_venv_python is None:
+        raise Any2FullConfigurationError(ANY2FULL_SETUP_MESSAGE)
+    if not any2full_dir.exists():
+        raise Any2FullConfigurationError(
+            f"Any2Full directory does not exist: {any2full_dir}\n\n{ANY2FULL_SETUP_MESSAGE}"
+        )
+    python_path = Path(any2full_venv_python)
+    if not python_path.exists():
+        raise Any2FullConfigurationError(
+            f"Any2Full Python executable does not exist: {python_path}\n\n{ANY2FULL_SETUP_MESSAGE}"
+        )
+    infer_script = any2full_dir / "any2full_infer.py"
+    if not infer_script.exists():
+        raise Any2FullConfigurationError(
+            f"Any2Full inference script not found: {infer_script}\n\n{ANY2FULL_SETUP_MESSAGE}"
+        )
+
+    ckpt = checkpoint_path or str(any2full_dir / "checkpoints" / "Any2Full_vitl.pth.tar")
+    if not Path(ckpt).exists():
+        raise Any2FullConfigurationError(
+            f"Any2Full checkpoint does not exist: {ckpt}\n\n{ANY2FULL_SETUP_MESSAGE}"
+        )
+
+    cmd = [
+        str(python_path),
+        str(infer_script),
+        "--rgb", str(rgb_path),
+        "--depth", str(sparse_depth_path),
+        "--out", str(output_path),
+        "--checkpoint", ckpt,
+        "--encoder", encoder,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(any2full_dir), timeout=300)
+    if result.returncode != 0:
+        raise RuntimeError(f"Any2Full failed (exit {result.returncode}):\nSTDERR: {result.stderr}\nSTDOUT: {result.stdout}")
+    print(f"  Any2Full: {result.stdout.strip()}")
+
+
 def write_ascii_ply(path: Path, points: np.ndarray, colors: np.ndarray) -> None:
     with path.open("w", encoding="ascii", newline="\n") as f:
         f.write("ply\nformat ascii 1.0\n")
@@ -217,6 +304,11 @@ def align_rgbd_capture(
     output_dir: str | Path | None = None,
     min_depth: float = 0.2,
     max_depth: float = 8.0,
+    complete_depth: bool = False,
+    any2full_dir: str | Path | None = None,
+    any2full_venv_python: str | None = None,
+    any2full_checkpoint: str | None = None,
+    any2full_encoder: str = "vitl",
 ) -> dict:
     capture_dir = Path(capture_dir)
     output_dir = Path(output_dir) if output_dir is not None else capture_dir / "aligned"
@@ -279,6 +371,28 @@ def align_rgbd_capture(
         "depth_units": "metres",
         "point_cloud_coordinates": "RGB camera space: x right, y up, z forward, units metres",
     }
+
+    # ── Dense depth completion (optional) ────────────────────
+    completed_depth_path = output_dir / "dense_depth_any2full.npy"
+    if complete_depth:
+        if any2full_dir is None or any2full_venv_python is None:
+            raise Any2FullConfigurationError(ANY2FULL_SETUP_MESSAGE)
+        print("Running Any2Full depth completion...", flush=True)
+        run_any2full_completion(
+            rgb_path=capture_dir / "rgb.jpg",
+            sparse_depth_path=output_dir / "aligned_depth_m.npy",
+            output_path=completed_depth_path,
+            any2full_dir=Path(any2full_dir),
+            any2full_venv_python=str(any2full_venv_python),
+            checkpoint_path=any2full_checkpoint,
+            encoder=any2full_encoder,
+        )
+        dense = np.load(completed_depth_path)
+        summary["dense_depth_completion"] = {
+            "method": f"Any2Full-{any2full_encoder}",
+            "resolution": list(dense.shape),
+            "depth_range": [float(np.min(dense)), float(np.max(dense))],
+        }
     (output_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     return summary
 
@@ -289,12 +403,36 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--min-depth", type=float, default=0.2)
     parser.add_argument("--max-depth", type=float, default=8.0)
+    parser.add_argument("--complete-depth", action="store_true",
+                        help="Run Any2Full dense depth completion after alignment")
+    parser.add_argument("--any2full-dir", type=Path,
+                        default=None,
+                        help="Path to Any2Full repo directory (required with --complete-depth)")
+    parser.add_argument("--any2full-venv-python", type=Path,
+                        default=None,
+                        help="Path to Any2Full Python executable (required with --complete-depth)")
+    parser.add_argument("--any2full-checkpoint", type=str, default=None,
+                        help="Any2Full checkpoint path (default: <any2full-dir>/checkpoints/Any2Full_vitl.pth.tar)")
+    parser.add_argument("--any2full-encoder", type=str, default="vitl",
+                        choices=["vits", "vitb", "vitl"],
+                        help="Any2Full encoder variant")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    summary = align_rgbd_capture(args.capture_dir, args.output_dir, args.min_depth, args.max_depth)
+    try:
+        summary = align_rgbd_capture(
+            args.capture_dir, args.output_dir, args.min_depth, args.max_depth,
+            complete_depth=args.complete_depth,
+            any2full_dir=args.any2full_dir,
+            any2full_venv_python=args.any2full_venv_python,
+            any2full_checkpoint=args.any2full_checkpoint,
+            any2full_encoder=args.any2full_encoder,
+        )
+    except Any2FullConfigurationError as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(2) from None
     print(json.dumps(summary, indent=2))
 
 

@@ -9,6 +9,11 @@ import numpy as np
 import torch
 from PIL import Image
 
+from quest3server.vision.rle import encode_binary_mask
+
+from .device_evidence import OpenAICompatibleVlmEvidenceProvider, build_local_visual_evidence
+from .part_proposal import DevicePartProposalGenerator
+from .rgbd_proposal import CursorRGBDDeviceProposer, DeviceProposal
 from .types import TrackState, TrackingResult
 
 logger = logging.getLogger(__name__)
@@ -76,6 +81,11 @@ class TrackingEngine:
         self._florence2_proc: Any = None
         self._clip_model: Any = None
         self._clip_proc: Any = None
+        self._rgbd_proposer = CursorRGBDDeviceProposer()
+        self._part_generator = DevicePartProposalGenerator()
+        self._vlm_provider = OpenAICompatibleVlmEvidenceProvider()
+        self._last_mask: np.ndarray | None = None
+        self._last_visual_evidence: dict[str, Any] = {}
 
     # ── public API ────────────────────────────────────────────────────
 
@@ -89,7 +99,9 @@ class TrackingEngine:
 
     _CROP_MASK_IOU_THRESHOLD = 0.3  # min IoU for bbox→mask match
 
-    def detect(self, pixel_x: float, pixel_y: float, rgb_bgr: np.ndarray) -> TrackingResult:
+    def _legacy_detect_detector_first(
+        self, pixel_x: float, pixel_y: float, rgb_bgr: np.ndarray
+    ) -> TrackingResult:
         """Detect and describe the object at (pixel_x, pixel_y) in rgb_bgr.
 
         Pipeline:
@@ -225,12 +237,285 @@ class TrackingEngine:
                 ),
             )
 
+    def detect(
+        self,
+        pixel_x: float,
+        pixel_y: float,
+        rgb_bgr: np.ndarray,
+        *,
+        aligned_depth_m: np.ndarray | None = None,
+        rgb_intrinsics: np.ndarray | None = None,
+    ) -> TrackingResult:
+        """Cursor-first RGB-D device segmentation and visual evidence pipeline.
+
+        This definition intentionally overrides the legacy detector-first
+        implementation above. Florence-2/SigLIP remain available as semantic
+        evidence providers, but they no longer decide the device boundary.
+        """
+        self._ensure_models()
+
+        h, w = rgb_bgr.shape[:2]
+        px = int(np.clip(pixel_x, 0, w - 1))
+        py = int(np.clip(pixel_y, 0, h - 1))
+        rgb_rgb = cv2.cvtColor(rgb_bgr, cv2.COLOR_BGR2RGB)
+
+        cursor_mask = self._segment_at_point(rgb_rgb, px, py)
+        if cursor_mask is None or not cursor_mask.any():
+            logger.warning("SAM2 point prompt produced empty mask")
+            self._state = TrackState.IDLE
+            return TrackingResult(
+                object_id=0,
+                state=TrackState.IDLE,
+                label="",
+                score=0.0,
+                box_xyxy=(0, 0, 0, 0),
+            )
+
+        proposal = self._rgbd_proposer.propose(
+            rgb_shape=(h, w),
+            cursor_xy=(px, py),
+            sam_mask=cursor_mask,
+            aligned_depth_m=aligned_depth_m,
+            rgb_intrinsics=rgb_intrinsics,
+        )
+        sam_device_mask = self._refine_device_mask_with_sam2(
+            proposal=proposal,
+            cursor_xy=(px, py),
+        )
+        if sam_device_mask is not None and sam_device_mask.any():
+            proposal = self._rgbd_proposer.refine_with_sam_mask(
+                proposal=proposal,
+                sam_refined_mask=sam_device_mask,
+                aligned_depth_m=aligned_depth_m,
+                cursor_xy=(px, py),
+                rgb_intrinsics=rgb_intrinsics,
+            )
+
+        final_mask = proposal.whole_mask
+        bbox = proposal.bbox_xyxy
+        parts = self._part_generator.generate(
+            rgb_rgb,
+            final_mask,
+            depth_m=aligned_depth_m,
+        )
+        label, semantic_score = self._describe_device_locally(rgb_rgb, proposal)
+        geometry = self._geometry_payload(proposal, final_mask)
+        visual_evidence = build_local_visual_evidence(
+            label=label,
+            label_score=semantic_score,
+            parts=parts,
+            geometry=geometry,
+            segmentation_source=proposal.source,
+            segmentation_confidence=proposal.segmentation_confidence,
+        )
+        vlm_evidence = self._vlm_provider.describe_device(
+            rgb=rgb_rgb,
+            device_mask=final_mask,
+            parts=parts,
+            geometry=geometry,
+            local_hint=label,
+        )
+        if vlm_evidence.get("enabled", True) is not False:
+            visual_evidence["vlm"] = vlm_evidence
+            vlm_label = self._label_from_vlm_evidence(vlm_evidence)
+            if vlm_label and (label == "object" or semantic_score < 0.35):
+                label = vlm_label
+                semantic_score = max(
+                    semantic_score,
+                    float(vlm_evidence.get("confidence", 0.55) or 0.55),
+                )
+
+        self._label = label
+        self._score = semantic_score
+        self._box_xyxy = bbox
+        self._state = TrackState.TRACKING
+        self._last_mask = final_mask
+        self._last_visual_evidence = visual_evidence
+
+        logger.info(
+            "Segmented device: %s (seg=%.3f, depth=%.3f, bbox=%s, source=%s)",
+            label,
+            proposal.segmentation_confidence,
+            proposal.depth_confidence,
+            bbox,
+            proposal.source,
+        )
+
+        return TrackingResult(
+            object_id=1,
+            state=TrackState.TRACKING,
+            label=label,
+            score=semantic_score,
+            box_xyxy=bbox,
+            center_pixel=proposal.center_pixel,
+            mask_rle=encode_binary_mask(final_mask),
+            mask_area=int(final_mask.sum()),
+            center_3d_m=proposal.center_3d_m,
+            depth_median_m=proposal.depth_median_m,
+            depth_confidence=proposal.depth_confidence,
+            segmentation_source=proposal.source,
+            segmentation_confidence=proposal.segmentation_confidence,
+            parts=[part.to_payload() for part in parts],
+            visual_evidence=visual_evidence,
+            diagnostics=proposal.diagnostics,
+        )
+
     def stop(self) -> None:
         self._state = TrackState.IDLE
         self._label = ""
         self._box_xyxy = (0, 0, 0, 0)
+        self._last_mask = None
+        self._last_visual_evidence = {}
 
     # ══════ Stage 1: Florence-2 multi-task ensemble detection ══════
+
+    def _refine_device_mask_with_sam2(
+        self,
+        *,
+        proposal: DeviceProposal,
+        cursor_xy: tuple[int, int],
+    ) -> np.ndarray | None:
+        """Use the RGB-D proposal as a SAM2 prompt for whole-device cleanup."""
+        if self._sam2_image is None:
+            return None
+        x0, y0, x1, y1 = proposal.bbox_xyxy
+        if x1 <= x0 or y1 <= y0:
+            return proposal.whole_mask
+
+        input_box = np.array([[x0, y0, x1, y1]], dtype=np.float32)
+        pos_points = self._sample_points_from_mask(
+            proposal.primary_mask | proposal.whole_mask,
+            max_points=12,
+            include=cursor_xy,
+        )
+        neg_source = np.zeros_like(proposal.whole_mask, dtype=bool)
+        if proposal.support_plane_mask is not None:
+            neg_source |= proposal.support_plane_mask & ~_dilate_mask_local(
+                proposal.primary_mask, radius=8,
+            )
+        neg_source |= _dilate_mask_local(proposal.whole_mask, radius=12) & ~_dilate_mask_local(
+            proposal.whole_mask, radius=3,
+        )
+        neg_points = self._sample_points_from_mask(
+            neg_source,
+            max_points=8,
+            fallback_to_center=False,
+        )
+
+        all_points = pos_points
+        all_labels = np.ones(len(pos_points), dtype=np.int32)
+        if len(neg_points) > 0:
+            all_points = np.concatenate([pos_points, neg_points], axis=0)
+            all_labels = np.concatenate(
+                [all_labels, np.zeros(len(neg_points), dtype=np.int32)],
+                axis=0,
+            )
+
+        try:
+            with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
+                masks, _, _ = self._sam2_image.predict(
+                    point_coords=all_points,
+                    point_labels=all_labels,
+                    box=input_box,
+                    multimask_output=False,
+                )
+            mask = np.asarray(masks[0], dtype=bool)
+            return mask if mask.any() else None
+        except Exception as exc:
+            logger.warning("SAM2 device proposal refinement failed: %s", exc)
+            return None
+
+    @staticmethod
+    def _sample_points_from_mask(
+        mask: np.ndarray,
+        *,
+        max_points: int,
+        include: tuple[int, int] | None = None,
+        fallback_to_center: bool = True,
+    ) -> np.ndarray:
+        points: list[list[float]] = []
+        h, w = mask.shape
+        if include is not None:
+            points.append([
+                float(np.clip(include[0], 0, w - 1)),
+                float(np.clip(include[1], 0, h - 1)),
+            ])
+        ys, xs = np.where(mask)
+        remaining = max(0, max_points - len(points))
+        if remaining > 0 and xs.size > 0:
+            if xs.size <= remaining:
+                chosen = np.arange(xs.size)
+            else:
+                chosen = np.linspace(0, xs.size - 1, remaining).astype(np.int64)
+            for idx in chosen:
+                points.append([float(xs[idx]), float(ys[idx])])
+        if not points and fallback_to_center:
+            points.append([float(w / 2.0), float(h / 2.0)])
+        return np.array(points, dtype=np.float32)
+
+    def _describe_device_locally(
+        self,
+        rgb: np.ndarray,
+        proposal: DeviceProposal,
+    ) -> tuple[str, float]:
+        """Generate a local semantic hint for a segmented device crop."""
+        x0, y0, x1, y1 = proposal.bbox_xyxy
+        label = self._caption_crop(rgb, x0, y0, x1, y1, pad_ratio=0.18)
+        label = _clean_label(label)
+        score = 0.45
+        if label and label != "object":
+            try:
+                _, clip_score = self._verify_label_with_clip(
+                    rgb,
+                    [x0, y0, x1, y1],
+                    label,
+                )
+                score = max(score, float(clip_score))
+            except Exception as exc:
+                logger.debug("Local label verification skipped: %s", exc)
+        if label == "object":
+            label = self._describe_region(rgb, x0, y0, x1, y1)
+            score = max(score, 0.35 if label != "object" else 0.25)
+        return _clean_label(label), float(np.clip(score, 0.0, 1.0))
+
+    @staticmethod
+    def _geometry_payload(
+        proposal: DeviceProposal,
+        mask: np.ndarray,
+    ) -> dict[str, Any]:
+        x0, y0, x1, y1 = proposal.bbox_xyxy
+        payload: dict[str, Any] = {
+            "box_xyxy": [int(x0), int(y0), int(x1), int(y1)],
+            "center_pixel": [
+                round(float(proposal.center_pixel[0]), 2),
+                round(float(proposal.center_pixel[1]), 2),
+            ],
+            "mask_area_px": int(mask.sum()),
+            "depth_median_m": None
+            if proposal.depth_median_m is None
+            else round(float(proposal.depth_median_m), 4),
+            "depth_confidence": round(float(proposal.depth_confidence), 4),
+        }
+        if proposal.center_3d_m is not None:
+            payload["center_3d_m"] = [
+                round(float(value), 4) for value in proposal.center_3d_m
+            ]
+        return payload
+
+    @staticmethod
+    def _label_from_vlm_evidence(evidence: dict[str, Any]) -> str:
+        for key in ("device_category", "possible_device_types"):
+            values = evidence.get(key)
+            if isinstance(values, list):
+                for value in values:
+                    label = _clean_label(str(value))
+                    if label and label != "object":
+                        return label
+            elif isinstance(values, str):
+                label = _clean_label(values)
+                if label and label != "object":
+                    return label
+        return ""
 
     _DETECTION_IOU_THRESHOLD = 0.5
     _DRC_MIN_BBOX_AREA = 400  # filter tiny regions from dense captioning
@@ -945,6 +1230,16 @@ class TrackingEngine:
             "TrackingEngine models loaded (SAM2-tiny + Florence-2-large + SigLIP2-B/16, %.1f GB VRAM)",
             torch.cuda.memory_allocated() / 1024 ** 3,
         )
+
+
+def _dilate_mask_local(mask: np.ndarray, radius: int) -> np.ndarray:
+    if radius <= 0 or not mask.any():
+        return np.asarray(mask, dtype=bool)
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE,
+        (radius * 2 + 1, radius * 2 + 1),
+    )
+    return cv2.dilate(mask.astype(np.uint8), kernel, iterations=1).astype(bool)
 
 
 def _clean_label(text: str) -> str:

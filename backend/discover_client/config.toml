@@ -7,9 +7,9 @@ source_type = "mqtt"
 enabled = true
 
 [sources.settings]
-host = "localhost"
-password = ""
-port = 1883
+host = "mqtt.cetools.org"
+password = "ce2021-mqtt-forget-whale"
+port = 1884
 topic_blacklist = []
 topic_whitelist = []
-username = ""
+username = "student"

@@ -43,7 +43,7 @@ API_BASE = "http://127.0.0.1:8500"
 
 
 def start_server() -> None:
-    uvicorn.run("quest3server.main:app", host="0.0.0.0", port=8500, log_level="info")
+    uvicorn.run("quest3server.main:app", host="0.0.0.0", port=8500, log_level="info", ws_ping_interval=0)
 
 
 def fetch_json(path: str) -> dict:

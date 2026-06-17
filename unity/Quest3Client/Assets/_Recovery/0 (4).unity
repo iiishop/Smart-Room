@@ -372,7 +372,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: meta.xr.mrutilitykit::Meta.XR.PassthroughCameraAccess
   CameraPosition: 0
-  RequestedResolution: {x: 1280, y: 1280}
+  RequestedResolution: {x: 640, y: 360}
   _maxFramerate: 60
   TargetMaterial: {fileID: 0}
   _texturePropertyName: 
@@ -441,78 +441,6 @@ Transform:
   - {fileID: 1259527969}
   m_Father: {fileID: 1751828753}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
---- !u!1 &534877054
-GameObject:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  serializedVersion: 6
-  m_Component:
-  - component: {fileID: 534877056}
-  - component: {fileID: 534877055}
-  - component: {fileID: 534877057}
-  m_Layer: 0
-  m_Name: RGBDCaptureTest
-  m_TagString: Untagged
-  m_Icon: {fileID: 0}
-  m_NavMeshLayer: 0
-  m_StaticEditorFlags: 0
-  m_IsActive: 0
---- !u!114 &534877055
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 534877054}
-  m_Enabled: 0
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 07c761fc04ad21e438bbfb97120129c1, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: Assembly-CSharp::SmartRoom.Testing.RGBDCaptureTest
-  captureMode: 0
-  frameCount: 5
-  frameInterval: 0.5
-  jpegQuality: 95
-  rgbOutputWidth: 1280
-  rgbOutputHeight: 1280
-  hudDistance: 1.5
-  hudFontSize: 48
---- !u!4 &534877056
-Transform:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 534877054}
-  serializedVersion: 2
-  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: -0.02568, y: 0.21586, z: -0.24558}
-  m_LocalScale: {x: 1, y: 1, z: 1}
-  m_ConstrainProportionsScale: 0
-  m_Children: []
-  m_Father: {fileID: 0}
-  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
---- !u!114 &534877057
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 534877054}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: a3b7c9d1e2f4567890abcdef12345678, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: Assembly-CSharp::SmartRoom.Testing.DepthPoseSaturationTest
-  captureFrames: 5
-  frameInterval: 0.5
-  jpegQuality: 95
-  rgbOutputWidth: 1280
-  rgbOutputHeight: 1280
-  hudDistance: 1.5
-  hudFontSize: 48
 --- !u!1 &545444341
 GameObject:
   m_ObjectHideFlags: 0
@@ -750,132 +678,6 @@ MonoBehaviour:
   _removeHands: 0
   CustomTrackingSpace: {fileID: 0}
   <MaskMeshFilters>k__BackingField: []
---- !u!1 &656412596
-GameObject:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  serializedVersion: 6
-  m_Component:
-  - component: {fileID: 656412602}
-  - component: {fileID: 656412601}
-  - component: {fileID: 656412600}
-  - component: {fileID: 656412599}
-  - component: {fileID: 656412598}
-  - component: {fileID: 656412597}
-  m_Layer: 0
-  m_Name: '[BuildingBlock] Object Detection'
-  m_TagString: Untagged
-  m_Icon: {fileID: 0}
-  m_NavMeshLayer: 0
-  m_StaticEditorFlags: 0
-  m_IsActive: 1
---- !u!114 &656412597
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 656412596}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: d6b96759ad368794da78dff0b7f67f0e, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: 
---- !u!114 &656412598
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 656412596}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 71a155ece80369d4e99bdaf5e59169b5, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: 
-  _occlusionShadersMode: 2
-  _removeHands: 0
-  CustomTrackingSpace: {fileID: 0}
-  <MaskMeshFilters>k__BackingField: []
---- !u!114 &656412599
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 656412596}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: b48c38ab0b17f4243a02271e64b25ccd, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: 
-  boundingBoxPrefab: {fileID: 8066889808755201971, guid: 46d0b28dd34412b4c90c82205d36db4f, type: 3}
-  showBoundingBoxes: 1
---- !u!114 &656412600
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 656412596}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 95c190a9246005a43a268bc4dc0564da, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: 
-  providerAsset: {fileID: 11400000, guid: 0e5d322f845920849880427e0863ac5c, type: 2}
-  minConfidence: 0.5
-  detectEveryNFrames: 1
-  onDetectionResponseReceived:
-    m_PersistentCalls:
-      m_Calls: []
---- !u!114 &656412601
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 656412596}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 5b023183069df224080314a560e6e1ff, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: Meta.XR.BuildingBlocks::Meta.XR.BuildingBlocks.BuildingBlock
-  blockId: 6fe30b32-9c96-40d7-bf3b-17df4f960bf4
-  instanceId: c3f88165-551e-4637-895b-2f62f30e3fe1
-  version: 1
-  installationRoutineCheckpoint:
-    _installationRoutineId: 7123b6da-f85f-47f4-be89-4f000efc24e8
-    _installationVariants:
-    - _memberName: providerAssetSelection
-      _value: 
-    - _memberName: inferenceType
-      _value: '{"value__":4}'
-    - _memberName: modelProvider
-      _value: UnityInferenceEngine
-    - _memberName: includeVisualization
-      _value: '{}'
-    - _memberName: includePassthrough
-      _value: '{}'
-    - _memberName: includeDebuggingTools
-      _value: '{}'
---- !u!4 &656412602
-Transform:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 656412596}
-  serializedVersion: 2
-  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 0, y: 0, z: 0}
-  m_LocalScale: {x: 1, y: 1, z: 1}
-  m_ConstrainProportionsScale: 0
-  m_Children: []
-  m_Father: {fileID: 0}
-  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1 &736496065
 GameObject:
   m_ObjectHideFlags: 0
@@ -2256,7 +2058,6 @@ GameObject:
   m_Component:
   - component: {fileID: 1711561615}
   - component: {fileID: 1711561614}
-  - component: {fileID: 1711561616}
   m_Layer: 0
   m_Name: TrackingManager
   m_TagString: Untagged
@@ -2280,11 +2081,8 @@ MonoBehaviour:
   controllerRaycaster: {fileID: 736496067}
   pixelProjector: {fileID: 1313628479}
   depthStream: {fileID: 1313628476}
-  finalRgbdCapture: {fileID: 0}
   xrCamera: {fileID: 1000850322}
   backendBaseUrl: http://localhost:8500
-  useFinalRgbdCapturePipeline: 1
-  fallbackToLegacyDepthPipeline: 1
   bboxLineMaterial: {fileID: 0}
   bboxLineWidth: 0.005
   bboxColor: {r: 0, g: 1, b: 0.5, a: 1}
@@ -2303,24 +2101,6 @@ Transform:
   m_Children: []
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
---- !u!114 &1711561616
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 1711561613}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 0640b91f9e9487e47a7c04df3dbaa7bd, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: Assembly-CSharp::SmartRoom.Capture.Quest3RgbdCaptureFinal
-  outputDirectory: 
-  rgbOutputWidth: 1280
-  rgbOutputHeight: 1280
-  jpegQuality: 95
-  passthroughCamera: {fileID: 462733173}
-  depthManager: {fileID: 570327737}
 --- !u!1 &1751828752
 GameObject:
   m_ObjectHideFlags: 0
@@ -3044,5 +2824,3 @@ SceneRoots:
   - {fileID: 1964602103}
   - {fileID: 888868698}
   - {fileID: 1711561615}
-  - {fileID: 534877056}
-  - {fileID: 656412602}

@@ -642,6 +642,14 @@ async def _maybe_compute_and_broadcast_overlay(rgb_jpeg: bytes) -> None:
     await _broadcast_rgbd_overlay(overlay_jpeg)
 
 
+async def _maybe_compute_and_broadcast_overlay_from_latest() -> None:
+    """Compute overlay from latest cached RGB frame, broadcast if clients connected."""
+    global _latest_rgb_jpeg
+    if _latest_rgb_jpeg is None:
+        return
+    await _maybe_compute_and_broadcast_overlay(_latest_rgb_jpeg)
+
+
 async def _broadcast_heartbeat_control(payload: dict) -> int:
     if not _heartbeat_clients:
         return 0
@@ -691,9 +699,6 @@ async def _ingest_rgb_frame(
     await _broadcast_rgb_preview(jpeg)
     if raw_packet is not None:
         await _broadcast_rgb_raw_preview(raw_packet)
-
-    # Compute and broadcast RGB-D overlay if we have all streaming data
-    await _maybe_compute_and_broadcast_overlay(jpeg)
 
 
 def _decode_base64_payload(body: dict[str, Any], *names: str) -> bytes:
@@ -887,6 +892,8 @@ async def _run_tracking_detection(
     if alignment_summary is not None:
         payload.setdefault("diagnostics", {})["rgbd_alignment"] = alignment_summary
     await _broadcast_tracking(payload)
+    # Compute streaming overlay on trigger for RGB-D preview
+    await _maybe_compute_and_broadcast_overlay_from_latest()
     response = {"ok": True, "result": payload}
     if alignment_summary is not None:
         response["alignment_summary"] = alignment_summary

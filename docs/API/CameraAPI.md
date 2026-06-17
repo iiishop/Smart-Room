@@ -85,10 +85,10 @@ MRUK v81+ 组件，挂到 Unity GameObject 上使用。需要 `horizonos.permiss
    | `createPoseRotation` | `Vector4` | **深度帧创建时的摄像头朝向（四元数）** |
    | `width` | `int` | 深度帧宽度（像素）。⚠️ 官方 API 文档未列出此字段，来自 SDK 源码 `EnvironmentDepthApi.cs`，使用前在 v85 实测确认 |
    | `height` | `int` | 深度帧高度（像素）。⚠️ 官方 API 文档未列出，同上，在 v85 实测确认 |
-   | `fovLeftAngle` | `float` | 光轴到左边缘的视场角（**弧度**） |
-   | `fovRightAngle` | `float` | 光轴到右边缘的视场角（弧度） |
-   | `fovTopAngle` | `float` | 光轴到上边缘的视场角（弧度） | 
-   | `fovDownAngle` | `float` | 光轴到下边缘的视场角（弧度） |
+   | `fovLeftAngle` | `float` | 光轴到左边缘的视场角**半角正切值**（tangent，⚠️ 非弧度）。值域通常在 0.8–1.5，对应 ~40–55° 半角。已通过数学验证（tangent假设误差0°，弧度假设误差41°）和 t-34400/QuestRealityCapture CSV 列名 `fov_left_angle_tangent` 双重确认。**不要对其调 `tan()`** |
+   | `fovRightAngle` | `float` | 光轴到右边缘的半角正切值（同上） |
+   | `fovTopAngle` | `float` | 光轴到上边缘的半角正切值（同上） | 
+   | `fovDownAngle` | `float` | 光轴到下边缘的半角正切值（同上） |
    | `nearZ` | `float` | 深度相机近裁剪面（米） |
    | `farZ` | `float` | 深度相机远裁剪面（米） |
    | `minDepth` | `float` | 当前帧最小深度值（米） |
@@ -127,15 +127,16 @@ MRUK v81+ 组件，挂到 Unity GameObject 上使用。需要 `horizonos.permiss
 
    ---
 
-   ### 从 FOV Angle 推算 K_depth
+   ### 从 FOV Tangents 推算 K_depth
 
-   FOV Angle 就是投影矩阵的正切参数来源：
+   这些字段存储的是半角正切值（tangent，⚠️ 非弧度）。反算内参时直接使用原始值，不要对其调 `tan()`。
 
    ```python
-   tan_right = tan(fovRightAngle)
-   tan_left  = tan(fovLeftAngle)
-   tan_top   = tan(fovTopAngle)
-   tan_down  = tan(fovDownAngle)
+   # fovLeftAngle 等字段已经是 tangent 值，直接使用
+   tan_right = fovRightAngle    # 已经是 tan(half_angle_right)
+   tan_left  = fovLeftAngle     # 已经是 tan(half_angle_left)
+   tan_top   = fovTopAngle      # 已经是 tan(half_angle_top)
+   tan_down  = fovDownAngle     # 已经是 tan(half_angle_down)
    
    K_depth:
      fx = depth_width  / (tan_right + tan_left)

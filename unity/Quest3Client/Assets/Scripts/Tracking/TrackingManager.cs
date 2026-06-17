@@ -3,6 +3,7 @@ using System.Text;
 using System.Threading.Tasks;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using SmartRoom.Capture;
 using UnityEngine;
 
 namespace SmartRoom.Tracking
@@ -12,8 +13,8 @@ namespace SmartRoom.Tracking
     ///
     /// Flow:
     ///   1. User aims green depth cursor at object
-    ///   2. Presses trigger → WorldToPixel → POST /api/track/start
-    ///   3. Backend returns {label, bbox, center_pixel} (one-shot, no streaming)
+    ///   2. Presses trigger -> Quest3RgbdCaptureFinal -> POST /api/track/start-final-rgbd
+    ///   3. Backend aligns final RGB-D and returns {label, bbox, center_pixel}
     ///   4. Bbox anchored at 3D world position from depth cursor → stays on object
     ///
     /// References:
@@ -35,6 +36,8 @@ namespace SmartRoom.Tracking
             public float hitZ;
             public float pixelX;
             public float pixelY;
+            public float viewportX;
+            public float viewportY;
             public int rgbFrameWidth;
             public int rgbFrameHeight;
             public int rgbRequestedWidth;
@@ -43,14 +46,13 @@ namespace SmartRoom.Tracking
             public int rgbCurrentHeight;
             public float[] rgbIntrinsics9;
             public float[] rgbPose7;
-            public Networking.DepthStreamModule.DepthFrameSnapshot depthSnapshot;
         }
 
         [Header("References")]
         [SerializeField] private Interaction.DepthCursor depthCursor;
         [SerializeField] private Interaction.ControllerRaycaster controllerRaycaster;
         [SerializeField] private Networking.PixelProjector pixelProjector;
-        [SerializeField] private Networking.DepthStreamModule depthStream;
+        [SerializeField] private Quest3RgbdCaptureFinal finalRgbdCapture;
         [SerializeField] private Camera xrCamera;
 
         [Header("Backend")]
@@ -85,6 +87,9 @@ namespace SmartRoom.Tracking
             depthCursor ??= FindFirstObjectByType<Interaction.DepthCursor>();
             controllerRaycaster ??= FindFirstObjectByType<Interaction.ControllerRaycaster>();
             pixelProjector ??= FindFirstObjectByType<Networking.PixelProjector>();
+            finalRgbdCapture ??= FindFirstObjectByType<Quest3RgbdCaptureFinal>();
+            if (finalRgbdCapture == null)
+                finalRgbdCapture = gameObject.AddComponent<Quest3RgbdCaptureFinal>();
             xrCamera ??= Camera.main;
         }
 
@@ -189,7 +194,8 @@ namespace SmartRoom.Tracking
                     triggerTimestampMs,
                     triggerPose,
                     hitPoint,
-                    pixel
+                    pixel,
+                    viewport
                 );
                 Debug.Log(
                     $"[TrackingManager] Trigger bundle seed: ts_ms={triggerTimestampMs}, " +
@@ -201,7 +207,7 @@ namespace SmartRoom.Tracking
             }
             else if (pixelProjector != null && pixelProjector.IsReady)
             {
-                // Fallback: manual PCA intrinsics projection
+                // Backup pixel projection when the Meta viewport projection path is unavailable.
                 var projPixel = pixelProjector.WorldToPixel(hitPoint);
                 pixel = projPixel ?? WorldToScreenPoint(hitPoint);
             }
@@ -242,74 +248,17 @@ namespace SmartRoom.Tracking
             };
         }
 
-        private async Task UploadAlignedDepthAsync(
-            Networking.DepthStreamModule.AlignedDepthProjectionResult projection,
-            TriggerCaptureBundle bundle)
-        {
-            try
-            {
-                using var http = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(5) };
-                byte[] sparseBytes = new byte[projection.sparseAlignedDepth.Length * sizeof(float)];
-                System.Buffer.BlockCopy(projection.sparseAlignedDepth, 0, sparseBytes, 0, sparseBytes.Length);
-                var payload = JsonConvert.SerializeObject(new
-                {
-                    width = projection.rgbWidth,
-                    height = projection.rgbHeight,
-                    sparse_depth_f32_le = System.Convert.ToBase64String(sparseBytes),
-                    valid_mask_u8 = System.Convert.ToBase64String(projection.validMask),
-                    rgb_intrinsics9 = bundle?.rgbIntrinsics9,
-                    rgb_pose7 = bundle?.rgbPose7,
-                    trigger_timestamp_ms = bundle?.triggerTimestampMs,
-                    debug_projection_meta = projection.debugProjectionMeta == null ? null : new
-                    {
-                        depth_width = projection.debugProjectionMeta.depthWidth,
-                        depth_height = projection.debugProjectionMeta.depthHeight,
-                        rgb_width = projection.debugProjectionMeta.rgbWidth,
-                        rgb_height = projection.debugProjectionMeta.rgbHeight,
-                        source_width = projection.debugProjectionMeta.sourceWidth,
-                        source_height = projection.debugProjectionMeta.sourceHeight,
-                        attempted_points = projection.debugProjectionMeta.attemptedPoints,
-                        valid_points = projection.debugProjectionMeta.validPoints,
-                        clipped_points = projection.debugProjectionMeta.clippedPoints,
-                        points_behind_camera = projection.debugProjectionMeta.pointsBehindCamera,
-                        collided_pixels = projection.debugProjectionMeta.collidedPixels,
-                        min_pixel_x = projection.debugProjectionMeta.minPixelX,
-                        max_pixel_x = projection.debugProjectionMeta.maxPixelX,
-                        min_pixel_y = projection.debugProjectionMeta.minPixelY,
-                        max_pixel_y = projection.debugProjectionMeta.maxPixelY,
-                        avg_pixel_x = projection.debugProjectionMeta.avgPixelX,
-                        avg_pixel_y = projection.debugProjectionMeta.avgPixelY,
-                        min_rgb_camera_z = projection.debugProjectionMeta.minRgbCameraZ,
-                        max_rgb_camera_z = projection.debugProjectionMeta.maxRgbCameraZ,
-                        avg_rgb_camera_z = projection.debugProjectionMeta.avgRgbCameraZ,
-                        used_flip_vertical = projection.debugProjectionMeta.usedFlipVertical,
-                        used_preprocessed_depth_texture = projection.debugProjectionMeta.usedPreprocessedDepthTexture,
-                        captured_at_unix_ms = projection.debugProjectionMeta.capturedAtUnixMs,
-                        depth_value_semantics = projection.debugProjectionMeta.depthValueSemantics,
-                    },
-                });
-                var content = new System.Net.Http.StringContent(payload, Encoding.UTF8, "application/json");
-                var resp = await http.PostAsync($"{backendBaseUrl}/api/depth/aligned-v2", content);
-                if (!resp.IsSuccessStatusCode)
-                    Debug.LogWarning($"[TrackingManager] Aligned depth upload failed: {resp.StatusCode}");
-            }
-            catch (System.Exception ex)
-            {
-                Debug.LogWarning($"[TrackingManager] Aligned depth upload error: {ex.Message}");
-            }
-        }
-
         private TriggerCaptureBundle CreateTriggerCaptureBundle(
             long triggerTimestampMs,
             Pose triggerPose,
             Vector3 hitPoint,
-            Vector2 pixel)
+            Vector2 pixel,
+            Vector2 viewport)
         {
             if (pixelProjector == null || pixelProjector.CameraAccess == null)
                 return null;
 
             var pca = pixelProjector.CameraAccess;
-            var depthSnapshot = depthStream != null ? depthStream.CaptureSnapshot() : null;
             var bundle = new TriggerCaptureBundle
             {
                 triggerTimestampMs = triggerTimestampMs,
@@ -320,6 +269,8 @@ namespace SmartRoom.Tracking
                 hitZ = hitPoint.z,
                 pixelX = pixel.x,
                 pixelY = pixel.y,
+                viewportX = viewport.x,
+                viewportY = viewport.y,
                 rgbFrameWidth = pixelProjector.ImageWidth,
                 rgbFrameHeight = pixelProjector.ImageHeight,
                 rgbRequestedWidth = pca.RequestedResolution.x,
@@ -332,110 +283,163 @@ namespace SmartRoom.Tracking
                     triggerPose.position.x, triggerPose.position.y, triggerPose.position.z,
                     triggerPose.rotation.x, triggerPose.rotation.y, triggerPose.rotation.z, triggerPose.rotation.w,
                 },
-                depthSnapshot = depthSnapshot,
             };
 
             Debug.Log(
                 $"[TrackingManager] Trigger bundle frozen: ts_ms={bundle.triggerTimestampMs}, " +
                 $"pca_ts_ms={bundle.pcaTimestampMs}, " +
                 $"unity_frame={bundle.unityFrameCount}, rgb={bundle.rgbFrameWidth}x{bundle.rgbFrameHeight}, " +
-                $"pca_current={bundle.rgbCurrentWidth}x{bundle.rgbCurrentHeight}, " +
-                $"depth_sampled={(depthSnapshot != null ? depthSnapshot.sampledWidth.ToString() : "none")}x{(depthSnapshot != null ? depthSnapshot.sampledHeight.ToString() : "none")}, " +
-                $"depth_source={(depthSnapshot != null ? depthSnapshot.sourceWidth.ToString() : "none")}x{(depthSnapshot != null ? depthSnapshot.sourceHeight.ToString() : "none")}"
+                $"pca_current={bundle.rgbCurrentWidth}x{bundle.rgbCurrentHeight}"
             );
 
             return bundle;
+        }
+
+        private object BuildTriggerBundleMetaPayload(TriggerCaptureBundle bundle)
+        {
+            if (bundle == null)
+                return null;
+
+            return new
+            {
+                trigger_timestamp_ms = bundle.triggerTimestampMs,
+                unity_frame_count = bundle.unityFrameCount,
+                hit_xyz = new[] { bundle.hitX, bundle.hitY, bundle.hitZ },
+                pixel_xy = new[] { bundle.pixelX, bundle.pixelY },
+                cursor_viewport_xy = new[] { bundle.viewportX, bundle.viewportY },
+                rgb_frame_wh = new[] { bundle.rgbFrameWidth, bundle.rgbFrameHeight },
+                rgb_requested_wh = new[] { bundle.rgbRequestedWidth, bundle.rgbRequestedHeight },
+                rgb_current_wh = new[] { bundle.rgbCurrentWidth, bundle.rgbCurrentHeight },
+                rgb_intrinsics9 = bundle.rgbIntrinsics9,
+                rgb_pose7 = bundle.rgbPose7,
+            };
+        }
+
+        private Vector2 MapPixelToFinalCapture(
+            Vector2 streamPixel,
+            TriggerCaptureBundle bundle,
+            Quest3RgbdCaptureFinal.CapturePayload capture)
+        {
+            if (bundle != null
+                && capture != null
+                && capture.rgbWidth > 0
+                && capture.rgbHeight > 0
+                && bundle.viewportX >= 0f
+                && bundle.viewportX <= 1f
+                && bundle.viewportY >= 0f
+                && bundle.viewportY <= 1f)
+            {
+                return new Vector2(
+                    Mathf.Clamp(bundle.viewportX * capture.rgbWidth, 0, capture.rgbWidth - 1),
+                    Mathf.Clamp((1f - bundle.viewportY) * capture.rgbHeight, 0, capture.rgbHeight - 1)
+                );
+            }
+
+            if (bundle != null
+                && capture != null
+                && bundle.rgbFrameWidth > 0
+                && bundle.rgbFrameHeight > 0
+                && capture.rgbWidth > 0
+                && capture.rgbHeight > 0)
+            {
+                return new Vector2(
+                    Mathf.Clamp(streamPixel.x * capture.rgbWidth / bundle.rgbFrameWidth, 0, capture.rgbWidth - 1),
+                    Mathf.Clamp(streamPixel.y * capture.rgbHeight / bundle.rgbFrameHeight, 0, capture.rgbHeight - 1)
+                );
+            }
+
+            return streamPixel;
+        }
+
+        private bool ApplyTrackingResultJson(string responseJson)
+        {
+            var result = JObject.Parse(responseJson);
+
+            if (result["ok"]?.Value<bool>() == true)
+            {
+                var trackResult = result["result"];
+                _currentLabel = trackResult["label"]?.Value<string>() ?? "object";
+                _isTracking = true;
+
+                var box = trackResult["box_xyxy"];
+                if (box != null && box.HasValues)
+                {
+                    float bw = box[2]?.Value<float>() ?? 100 - (box[0]?.Value<float>() ?? 0);
+                    float bh = box[3]?.Value<float>() ?? 100 - (box[1]?.Value<float>() ?? 0);
+                    float dist = depthCursor.HitDistance;
+                    float fovScale = dist / 500f;
+                    _bboxWorldHalfSize = Mathf.Max(bw, bh) * fovScale * 0.5f;
+                    _bboxWorldHalfSize = Mathf.Clamp(_bboxWorldHalfSize, 0.05f, 1.0f);
+                }
+
+                HideStatus();
+                Debug.Log($"[TrackingManager] Detected: {_currentLabel}");
+                return true;
+            }
+
+            ShowStatus("Detection returned no result");
+            return false;
+        }
+
+        private async Task<bool> DetectWithFinalRgbdAsync(Vector2 streamPixel, TriggerCaptureBundle bundle)
+        {
+            if (finalRgbdCapture == null)
+                return false;
+
+            try
+            {
+                if (!finalRgbdCapture.CaptureOnceToPayload(out var capture) || capture == null)
+                {
+                    Debug.LogWarning("[TrackingManager] Final RGB-D capture unavailable");
+                    return false;
+                }
+
+                Vector2 finalPixel = MapPixelToFinalCapture(streamPixel, bundle, capture);
+                var payload = JsonConvert.SerializeObject(new
+                {
+                    pixel_x = finalPixel.x,
+                    pixel_y = finalPixel.y,
+                    rgb_jpeg_b64 = System.Convert.ToBase64String(capture.rgbJpegBytes),
+                    depth_raw_f32_le_b64 = System.Convert.ToBase64String(capture.depthRawBytes),
+                    meta_json = capture.metaJson,
+                    trigger_bundle_meta = BuildTriggerBundleMetaPayload(bundle),
+                    final_capture_meta = new
+                    {
+                        rgb_wh = new[] { capture.rgbWidth, capture.rgbHeight },
+                        depth_wh = new[] { capture.depthWidth, capture.depthHeight },
+                        unity_frame_count = capture.unityFrame,
+                        timestamp_unix_ms = capture.timestampUnixMs,
+                    },
+                });
+
+                using var http = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(30) };
+                var content = new System.Net.Http.StringContent(payload, Encoding.UTF8, "application/json");
+                var response = await http.PostAsync($"{backendBaseUrl}/api/track/start-final-rgbd", content);
+                if (!response.IsSuccessStatusCode)
+                {
+                    string errBody = await response.Content.ReadAsStringAsync();
+                    Debug.LogWarning($"[TrackingManager] Final RGB-D detect failed ({response.StatusCode}): {errBody}");
+                    return false;
+                }
+
+                string responseJson = await response.Content.ReadAsStringAsync();
+                return ApplyTrackingResultJson(responseJson);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[TrackingManager] Final RGB-D detect error: {ex.Message}");
+                return false;
+            }
         }
 
         private async Task DetectAsync(Vector2 pixel, TriggerCaptureBundle bundle)
         {
             try
             {
-                // Build aligned depth on Unity side using Meta's APIs
-                if (bundle != null && bundle.depthSnapshot != null && pixelProjector != null)
+                bool finalOk = await DetectWithFinalRgbdAsync(pixel, bundle);
+                if (!finalOk)
                 {
-                    var pca = pixelProjector.CameraAccess;
-                    if (pca != null && pca.isActiveAndEnabled)
-                    {
-                        var projection = depthStream.BuildAlignedDepth(
-                            bundle.depthSnapshot,
-                            bundle.rgbFrameWidth, bundle.rgbFrameHeight,
-                            bundle.rgbPose7,
-                            pca);
-                        if (projection != null)
-                            await UploadAlignedDepthAsync(projection, bundle);
-                    }
-                }
-
-                var payload = JsonConvert.SerializeObject(new
-                {
-                    pixel_x = pixel.x,
-                    pixel_y = pixel.y,
-                    trigger_bundle_meta = bundle == null ? null : new
-                    {
-                        trigger_timestamp_ms = bundle.triggerTimestampMs,
-                        unity_frame_count = bundle.unityFrameCount,
-                        hit_xyz = new[] { bundle.hitX, bundle.hitY, bundle.hitZ },
-                        pixel_xy = new[] { bundle.pixelX, bundle.pixelY },
-                        rgb_frame_wh = new[] { bundle.rgbFrameWidth, bundle.rgbFrameHeight },
-                        rgb_requested_wh = new[] { bundle.rgbRequestedWidth, bundle.rgbRequestedHeight },
-                        rgb_current_wh = new[] { bundle.rgbCurrentWidth, bundle.rgbCurrentHeight },
-                        rgb_intrinsics9 = bundle.rgbIntrinsics9,
-                        rgb_pose7 = bundle.rgbPose7,
-                        depth_snapshot = bundle.depthSnapshot == null ? null : new
-                        {
-                            sampled_wh = new[] { bundle.depthSnapshot.sampledWidth, bundle.depthSnapshot.sampledHeight },
-                            source_wh = new[] { bundle.depthSnapshot.sourceWidth, bundle.depthSnapshot.sourceHeight },
-                            z_buffer_params = bundle.depthSnapshot.zBufferParams,
-                            reprojection_matrix = bundle.depthSnapshot.reprojectionMatrix,
-                            used_preprocessed_depth_texture = bundle.depthSnapshot.usedPreprocessedDepthTexture,
-                            used_flip_vertical = bundle.depthSnapshot.usedFlipVertical,
-                            unity_frame_count = bundle.depthSnapshot.unityFrameCount,
-                            captured_at_unix_ms = bundle.depthSnapshot.capturedAtUnixMs,
-                        },
-                    },
-                });
-
-                using var http = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(15) };
-                var content = new System.Net.Http.StringContent(payload, Encoding.UTF8, "application/json");
-                var response = await http.PostAsync($"{backendBaseUrl}/api/track/start", content);
-
-                if (!response.IsSuccessStatusCode)
-                {
-                    string errBody = await response.Content.ReadAsStringAsync();
-                    Debug.LogError($"[TrackingManager] Detect failed ({response.StatusCode}): {errBody}");
-                    ShowStatus($"Error: {response.StatusCode}");
-                    return;
-                }
-
-                var responseJson = await response.Content.ReadAsStringAsync();
-                var result = JObject.Parse(responseJson);
-
-                if (result["ok"]?.Value<bool>() == true)
-                {
-                    var trackResult = result["result"];
-                    _currentLabel = trackResult["label"]?.Value<string>() ?? "object";
-                    _isTracking = true;
-
-                    // Update bbox size from detection result
-                    var box = trackResult["box_xyxy"];
-                    if (box != null && box.HasValues)
-                    {
-                        float bw = box[2]?.Value<float>() ?? 100 - (box[0]?.Value<float>() ?? 0);
-                        float bh = box[3]?.Value<float>() ?? 100 - (box[1]?.Value<float>() ?? 0);
-                        // Convert pixel bbox to rough world size based on depth distance
-                        float dist = depthCursor.HitDistance;
-                        float fovScale = dist / 500f; // rough: 500px ~= 1m at 1m distance
-                        _bboxWorldHalfSize = Mathf.Max(bw, bh) * fovScale * 0.5f;
-                        _bboxWorldHalfSize = Mathf.Clamp(_bboxWorldHalfSize, 0.05f, 1.0f);
-                    }
-
-                    HideStatus();
-                    Debug.Log($"[TrackingManager] Detected: {_currentLabel}");
-                }
-                else
-                {
-                    ShowStatus("Detection returned no result");
+                    ShowStatus("Final RGB-D failed");
                 }
             }
             catch (System.Net.Http.HttpRequestException)
