@@ -1,8 +1,8 @@
 using System;
-using System.Diagnostics;
 using System.IO;
 using Meta.XR.EnvironmentDepth;
 using Meta.XR;
+using SmartRoom.Capture;
 using Unity.Collections;
 using UnityEngine;
 using UnityEngine.Rendering;
@@ -67,6 +67,20 @@ namespace SmartRoom.Networking
         }
 
         [Serializable]
+        private sealed class DepthDescriptorPayload
+        {
+            public string type = "depth_descriptor";
+            public float pose_position_x, pose_position_y, pose_position_z;
+            public float pose_rotation_x, pose_rotation_y, pose_rotation_z, pose_rotation_w;
+            public float fov_left, fov_right, fov_top, fov_bottom;
+            public float near_z, far_z;
+            public float zbuffer_x, zbuffer_y, zbuffer_z, zbuffer_w;
+            public int selected_eye;
+            public int depth_texture_width, depth_texture_height;
+            public long timestamp_ms;
+        }
+
+        [Serializable]
         public sealed class DepthFrameSnapshot
         {
             public float[] depthMeters;
@@ -121,17 +135,30 @@ namespace SmartRoom.Networking
         private bool _loggedFirstLocalFrame;
         private bool _loggedDepthSourceMeta;
         private bool _loggedReprojectionMeta;
+        private bool _loggedDualEyeComparison;
         private int _lastSourceDepthWidth;
         private int _lastSourceDepthHeight;
         private bool _depthSourceMetaSent;
+        private bool _depthDescriptorSent;
         private int _lastSentSourceWidth = -1;
         private int _lastSentSourceHeight = -1;
         private int _lastSentSampledWidth = -1;
         private int _lastSentSampledHeight = -1;
 
-        // Cached per-frame depth frame desc (populated each successful readback)
-        private UnityEngine.XR.Oculus.Utils.EnvironmentalDepthFrameDesc _cachedDepthFrameDesc;
+        // Cached per-frame depth frame desc fields (extracted via reflection
+        // to avoid compile-time dependency on UnityEngine.XR.Oculus namespace)
+        private object _cachedDepthDescObj;   // boxed struct from GetEnvironmentalDepthFrameDesc
         private bool _cachedDepthFrameDescValid;
+        // Individual cached fields (populated on successful readback)
+        private double _cachedDepthCreateTime;
+        private double _cachedDepthPredictedDisplayTime;
+        private float _cachedDepthNearZ;
+        private float _cachedDepthFarZ;
+        private float _cachedDepthMinD;
+        private float _cachedDepthMaxD;
+        private float _cachedDepthFovL, _cachedDepthFovR, _cachedDepthFovT, _cachedDepthFovD;
+        private Vector3 _cachedDepthCreatePos;
+        private Quaternion _cachedDepthCreateRot;
 
         // ReadPixels timing (one-shot per-frame diagnostic, summary every 100 reads)
         private int _readbackCount;
@@ -321,7 +348,7 @@ namespace SmartRoom.Networking
 
             RenderTexture previous = RenderTexture.active;
             RenderTexture.active = _depthRt;
-            var sw = Stopwatch.StartNew();
+            var sw = System.Diagnostics.Stopwatch.StartNew();
             try
             {
                 _depthReadbackTexture.ReadPixels(new Rect(0, 0, _depthRt.width, _depthRt.height), 0, 0, false);
@@ -405,11 +432,10 @@ namespace SmartRoom.Networking
             _latestDepthMeters = meters;
             _lastStatusMessage = "OK";
 
-            // Cache per-frame depth metadata for CaptureSnapshot
+            // Cache per-frame depth metadata via reflection
             try
             {
-                _cachedDepthFrameDesc = UnityEngine.XR.Oculus.Utils.GetEnvironmentalDepthFrameDesc(0);
-                _cachedDepthFrameDescValid = true;
+                _cachedDepthFrameDescValid = _TryCacheDepthDescReflected();
             }
             catch (System.Exception)
             {
@@ -433,6 +459,7 @@ namespace SmartRoom.Networking
             }
 
             MaybeSendDepthSourceMetadata(sourceWidth, sourceHeight, sampleWidth, sampleHeight, stride, zbp);
+            MaybeSendDepthDescriptor(sourceWidth, sourceHeight);
 
             if (!_loggedDualEyeComparison)
             {
@@ -467,35 +494,49 @@ namespace SmartRoom.Networking
             Texture sourceDepth, int sampleWidth, int sampleHeight, int stride, Vector4 zbp)
         {
             // ── Per-eye metadata ──
-            // Left desc reused from _cachedDepthFrameDesc (already populated in TryReadbackDepthFrame)
+            // Left desc from cached fields (already populated in TryReadbackDepthFrame)
             try
             {
-                var leftDesc = _cachedDepthFrameDescValid
-                    ? _cachedDepthFrameDesc
-                    : UnityEngine.XR.Oculus.Utils.GetEnvironmentalDepthFrameDesc(0);
-                var rightDesc = UnityEngine.XR.Oculus.Utils.GetEnvironmentalDepthFrameDesc(1);
+                float leftFovL = _cachedDepthFovL, leftFovR = _cachedDepthFovR;
+                float leftFovT = _cachedDepthFovT, leftFovD = _cachedDepthFovD;
+                float leftNear = _cachedDepthNearZ, leftFar = _cachedDepthFarZ;
+                float leftMinD = _cachedDepthMinD, leftMaxD = _cachedDepthMaxD;
+                double leftCreateT = _cachedDepthCreateTime;
+                Vector3 leftPos = _cachedDepthCreatePos;
+                Quaternion leftRot = _cachedDepthCreateRot;
+                if (!_cachedDepthFrameDescValid)
+                    _TryReadDepthDescFieldsReflected(0, out leftCreateT, out _, out leftPos, out leftRot,
+                        out leftFovL, out leftFovR, out leftFovT, out leftFovD,
+                        out leftNear, out leftFar, out leftMinD, out leftMaxD);
+
+                double rightCreateT; double _unused; Vector3 rightPos; Quaternion rightRot;
+                float rightFovL, rightFovR, rightFovT, rightFovD;
+                float rightNear, rightFar, rightMinD, rightMaxD;
+                _TryReadDepthDescFieldsReflected(1, out rightCreateT, out _unused, out rightPos, out rightRot,
+                    out rightFovL, out rightFovR, out rightFovT, out rightFovD,
+                    out rightNear, out rightFar, out rightMinD, out rightMaxD);
                 Debug.Log(
                     "[DepthDualEye] Metadata — " +
-                    $"L: createTime={leftDesc.createTime}, " +
-                    $"createPose=({leftDesc.createPoseLocation.x:F3},{leftDesc.createPoseLocation.y:F3},{leftDesc.createPoseLocation.z:F3}) " +
-                    $"rot=({leftDesc.createPoseRotation.x:F4},{leftDesc.createPoseRotation.y:F4},{leftDesc.createPoseRotation.z:F4},{leftDesc.createPoseRotation.w:F4}), " +
-                    $"fovL={leftDesc.fovLeft:F1} fovR={leftDesc.fovRight:F1} fovT={leftDesc.fovTop:F1} fovD={leftDesc.fovDown:F1}, " +
-                    $"near={leftDesc.nearZ:F3} far={leftDesc.farZ:F3}, " +
-                    $"depthRange=[{leftDesc.minDepth:F3},{leftDesc.maxDepth:F3}]"
+                    $"L: createTime={leftCreateT}, " +
+                    $"createPose=({leftPos.x:F3},{leftPos.y:F3},{leftPos.z:F3}) " +
+                    $"rot=({leftRot.x:F4},{leftRot.y:F4},{leftRot.z:F4},{leftRot.w:F4}), " +
+                    $"fovL={leftFovL:F1} fovR={leftFovR:F1} fovT={leftFovT:F1} fovD={leftFovD:F1}, " +
+                    $"near={leftNear:F3} far={leftFar:F3}, " +
+                    $"depthRange=[{leftMinD:F3},{leftMaxD:F3}]"
                 );
                 Debug.Log(
                     "[DepthDualEye] Metadata — " +
-                    $"R: createTime={rightDesc.createTime}, " +
-                    $"createPose=({rightDesc.createPoseLocation.x:F3},{rightDesc.createPoseLocation.y:F3},{rightDesc.createPoseLocation.z:F3}) " +
-                    $"rot=({rightDesc.createPoseRotation.x:F4},{rightDesc.createPoseRotation.y:F4},{rightDesc.createPoseRotation.z:F4},{rightDesc.createPoseRotation.w:F4}), " +
-                    $"fovL={rightDesc.fovLeft:F1} fovR={rightDesc.fovRight:F1} fovT={rightDesc.fovTop:F1} fovD={rightDesc.fovDown:F1}, " +
-                    $"near={rightDesc.nearZ:F3} far={rightDesc.farZ:F3}, " +
-                    $"depthRange=[{rightDesc.minDepth:F3},{rightDesc.maxDepth:F3}]"
+                    $"R: createTime={rightCreateT}, " +
+                    $"createPose=({rightPos.x:F3},{rightPos.y:F3},{rightPos.z:F3}) " +
+                    $"rot=({rightRot.x:F4},{rightRot.y:F4},{rightRot.z:F4},{rightRot.w:F4}), " +
+                    $"fovL={rightFovL:F1} fovR={rightFovR:F1} fovT={rightFovT:F1} fovD={rightFovD:F1}, " +
+                    $"near={rightNear:F3} far={rightFar:F3}, " +
+                    $"depthRange=[{rightMinD:F3},{rightMaxD:F3}]"
                 );
                 Debug.Log(
                     "[DepthDualEye] Pose delta: " +
-                    $"pos=({(leftDesc.createPoseLocation - rightDesc.createPoseLocation).magnitude * 1000f:F1}mm), " +
-                    $"time={(leftDesc.createTime - rightDesc.createTime):F3}s"
+                    $"pos={(leftPos - rightPos).magnitude * 1000f:F1}mm, " +
+                    $"time={(leftCreateT - rightCreateT):F3}s"
                 );
             }
             catch (System.Exception ex)
@@ -629,29 +670,29 @@ namespace SmartRoom.Networking
                 unityFrameCount = Time.frameCount,
                 capturedAtUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
 
-                // Per-frame depth metadata (from Utils.GetEnvironmentalDepthFrameDesc)
-                depthCreateTime = _cachedDepthFrameDescValid ? _cachedDepthFrameDesc.createTime : 0.0,
-                depthPredictedDisplayTime = _cachedDepthFrameDescValid ? _cachedDepthFrameDesc.predictedDisplayTime : 0.0,
+                // Per-frame depth metadata (cached fields from GetEnvironmentalDepthFrameDesc via reflection)
+                depthCreateTime = _cachedDepthFrameDescValid ? _cachedDepthCreateTime : 0.0,
+                depthPredictedDisplayTime = _cachedDepthFrameDescValid ? _cachedDepthPredictedDisplayTime : 0.0,
                 depthIsValid = _cachedDepthFrameDescValid,
                 depthCreatePose7 = _cachedDepthFrameDescValid ? new[]
                 {
-                    _cachedDepthFrameDesc.createPoseLocation.x,
-                    _cachedDepthFrameDesc.createPoseLocation.y,
-                    _cachedDepthFrameDesc.createPoseLocation.z,
-                    _cachedDepthFrameDesc.createPoseRotation.x,
-                    _cachedDepthFrameDesc.createPoseRotation.y,
-                    _cachedDepthFrameDesc.createPoseRotation.z,
-                    _cachedDepthFrameDesc.createPoseRotation.w,
+                    _cachedDepthCreatePos.x,
+                    _cachedDepthCreatePos.y,
+                    _cachedDepthCreatePos.z,
+                    _cachedDepthCreateRot.x,
+                    _cachedDepthCreateRot.y,
+                    _cachedDepthCreateRot.z,
+                    _cachedDepthCreateRot.w,
                 } : null,
                 fovAngles = _cachedDepthFrameDescValid ? new[]
                 {
-                    _cachedDepthFrameDesc.fovLeft, _cachedDepthFrameDesc.fovRight,
-                    _cachedDepthFrameDesc.fovTop, _cachedDepthFrameDesc.fovDown,
+                    _cachedDepthFovL, _cachedDepthFovR,
+                    _cachedDepthFovT, _cachedDepthFovD,
                 } : null,
-                nearZ = _cachedDepthFrameDescValid ? _cachedDepthFrameDesc.nearZ : 0f,
-                farZ = _cachedDepthFrameDescValid ? _cachedDepthFrameDesc.farZ : 0f,
-                minDepth = _cachedDepthFrameDescValid ? _cachedDepthFrameDesc.minDepth : 0f,
-                maxDepth = _cachedDepthFrameDescValid ? _cachedDepthFrameDesc.maxDepth : 0f,
+                nearZ = _cachedDepthFrameDescValid ? _cachedDepthNearZ : 0f,
+                farZ = _cachedDepthFrameDescValid ? _cachedDepthFarZ : 0f,
+                minDepth = _cachedDepthFrameDescValid ? _cachedDepthMinD : 0f,
+                maxDepth = _cachedDepthFrameDescValid ? _cachedDepthMaxD : 0f,
             };
         }
 
@@ -714,6 +755,55 @@ namespace SmartRoom.Networking
             _lastSentSourceHeight = sourceHeight;
             _lastSentSampledWidth = sampleWidth;
             _lastSentSampledHeight = sampleHeight;
+        }
+
+        private void MaybeSendDepthDescriptor(int sourceWidth, int sourceHeight)
+        {
+            if (manager == null || environmentDepthManager == null)
+                return;
+
+            if (_depthDescriptorSent)
+                return;
+
+            int selectedEye = 0;
+            var passthroughCamera = FindFirstObjectByType<PassthroughCameraAccess>();
+            if (passthroughCamera != null
+                && string.Equals(passthroughCamera.CameraPosition.ToString(), "Right", StringComparison.OrdinalIgnoreCase))
+            {
+                selectedEye = 1;
+            }
+
+            var desc = DepthDescriptorHelper.TryGetDescriptor(environmentDepthManager, selectedEye, sourceWidth, sourceHeight);
+            if (desc == null)
+                return;
+
+            var payload = new DepthDescriptorPayload
+            {
+                pose_position_x = desc.pose_position_x,
+                pose_position_y = desc.pose_position_y,
+                pose_position_z = desc.pose_position_z,
+                pose_rotation_x = desc.pose_rotation_x,
+                pose_rotation_y = desc.pose_rotation_y,
+                pose_rotation_z = desc.pose_rotation_z,
+                pose_rotation_w = desc.pose_rotation_w,
+                fov_left = desc.fov_left,
+                fov_right = desc.fov_right,
+                fov_top = desc.fov_top,
+                fov_bottom = desc.fov_bottom,
+                near_z = desc.near_z,
+                far_z = desc.far_z,
+                zbuffer_x = desc.zbuffer_x,
+                zbuffer_y = desc.zbuffer_y,
+                zbuffer_z = desc.zbuffer_z,
+                zbuffer_w = desc.zbuffer_w,
+                selected_eye = desc.selected_eye,
+                depth_texture_width = desc.depth_texture_width,
+                depth_texture_height = desc.depth_texture_height,
+                timestamp_ms = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            };
+
+            manager.QueueControlJson(JsonUtility.ToJson(payload));
+            _depthDescriptorSent = true;
         }
 
         private static bool HasScenePermission()
@@ -949,6 +1039,75 @@ namespace SmartRoom.Networking
             mat.m20 = values[8]; mat.m21 = values[9]; mat.m22 = values[10]; mat.m23 = values[11];
             mat.m30 = values[12]; mat.m31 = values[13]; mat.m32 = values[14]; mat.m33 = values[15];
             return mat;
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        //  Reflection helpers — avoid compile-time dependency on
+        //  UnityEngine.XR.Oculus (conflicts with OpenXR in v85)
+        // ═══════════════════════════════════════════════════════════════
+
+        private bool _TryCacheDepthDescReflected()
+        {
+            return _TryReadDepthDescFieldsReflected(0,
+                out _cachedDepthCreateTime,
+                out _cachedDepthPredictedDisplayTime,
+                out _cachedDepthCreatePos,
+                out _cachedDepthCreateRot,
+                out _cachedDepthFovL, out _cachedDepthFovR, out _cachedDepthFovT, out _cachedDepthFovD,
+                out _cachedDepthNearZ, out _cachedDepthFarZ,
+                out _cachedDepthMinD, out _cachedDepthMaxD);
+        }
+
+        private static bool _TryReadDepthDescFieldsReflected(int eye,
+            out double createTime, out double predictedDisplayTime,
+            out Vector3 createPos, out Quaternion createRot,
+            out float fovL, out float fovR, out float fovT, out float fovD,
+            out float nearZ, out float farZ, out float minDepth, out float maxDepth)
+        {
+            createTime = predictedDisplayTime = 0;
+            createPos = Vector3.zero;
+            createRot = Quaternion.identity;
+            fovL = fovR = fovT = fovD = 0;
+            nearZ = farZ = minDepth = maxDepth = 0;
+
+            try
+            {
+                // Search all loaded assemblies
+                System.Type utilsType = null;
+                foreach (var asm in System.AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    utilsType = asm.GetType("UnityEngine.XR.Oculus.Utils");
+                    if (utilsType != null) break;
+                }
+
+                if (utilsType == null) return false;
+
+                var method = utilsType.GetMethod("GetEnvironmentalDepthFrameDesc",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+                if (method == null) return false;
+
+                object desc = method.Invoke(null, new object[] { eye });
+                if (desc == null) return false;
+
+                var t = desc.GetType();
+                createTime = (double)t.GetField("createTime").GetValue(desc);
+                predictedDisplayTime = (double)t.GetField("predictedDisplayTime").GetValue(desc);
+                createPos = (Vector3)t.GetField("createPoseLocation").GetValue(desc);
+                createRot = (Quaternion)t.GetField("createPoseRotation").GetValue(desc);
+                fovL = (float)t.GetField("fovLeftAngle").GetValue(desc);
+                fovR = (float)t.GetField("fovRightAngle").GetValue(desc);
+                fovT = (float)t.GetField("fovTopAngle").GetValue(desc);
+                fovD = (float)t.GetField("fovDownAngle").GetValue(desc);
+                nearZ = (float)t.GetField("nearZ").GetValue(desc);
+                farZ = (float)t.GetField("farZ").GetValue(desc);
+                minDepth = (float)t.GetField("minDepth").GetValue(desc);
+                maxDepth = (float)t.GetField("maxDepth").GetValue(desc);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
         }
     }
 }

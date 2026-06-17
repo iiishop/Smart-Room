@@ -31,6 +31,9 @@ namespace SmartRoom.Networking
             public int preferred_height;
             public string[] supported_resolutions;
             public long timestamp_ms;
+            // RGB camera world pose
+            public float pose_position_x, pose_position_y, pose_position_z;
+            public float pose_rotation_x, pose_rotation_y, pose_rotation_z, pose_rotation_w;
         }
 
         [SerializeField] private BackendCommunicationManager manager;
@@ -279,6 +282,7 @@ namespace SmartRoom.Networking
             }
 
             var intrinsics = passthroughCameraAccess.Intrinsics;
+            Pose camPose = passthroughCameraAccess.GetCameraPose();
             var payload = new CameraIntrinsicsPayload
             {
                 fx = intrinsics.FocalLength.x,
@@ -297,6 +301,13 @@ namespace SmartRoom.Networking
                 preferred_height = _preferredResolution.y,
                 supported_resolutions = _supportedResolutionStrings,
                 timestamp_ms = timestampMs,
+                pose_position_x = camPose.position.x,
+                pose_position_y = camPose.position.y,
+                pose_position_z = camPose.position.z,
+                pose_rotation_x = camPose.rotation.x,
+                pose_rotation_y = camPose.rotation.y,
+                pose_rotation_z = camPose.rotation.z,
+                pose_rotation_w = camPose.rotation.w,
             };
 
             manager.QueueControlJson(JsonUtility.ToJson(payload));
