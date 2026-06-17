@@ -899,73 +899,6 @@ class DashboardWindow(QMainWindow):
         ]
         self._lbl_preview_meta.setText("\n".join(lines))
 
-    def _refresh_combined_preview(self) -> None:
-        """Draw trigger-frame RGB with depth heatmap overlaid (trigger-only mode)."""
-        # Fetch the trigger-saved RGB frame from backend
-        try:
-            req = urllib.request.Request(f"{API_BASE}/api/track/last-original", method="GET")
-            with urllib.request.urlopen(req, timeout=1.0) as res:
-                if res.status == 204:
-                    return  # no trigger yet, blank preview
-                trigger_rgb = res.read()
-        except urllib.error.HTTPError as e:
-            if e.code == 404:
-                return  # no trigger yet
-            raise
-        except Exception:
-            return
-
-        rgb_pix = QPixmap()
-        if not rgb_pix.loadFromData(trigger_rgb):
-            return
-
-        self._latest_rgb_width = rgb_pix.width()
-        self._latest_rgb_height = rgb_pix.height()
-
-        # Start with the RGB image as base canvas
-        canvas = QPixmap(rgb_pix.size())
-        canvas.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(canvas)
-        try:
-            painter.drawPixmap(0, 0, rgb_pix)
-
-            # Draw tracking bbox if we have one
-            if self._track_bbox_pixel is not None:
-                x0, y0, x1, y1 = self._track_bbox_pixel
-                pen = QPen(QColor(0, 255, 128, 255), 3)
-                painter.setPen(pen)
-                painter.drawRect(x0, y0, max(1, x1 - x0), max(1, y1 - y0))
-                if self._track_label:
-                    painter.setPen(QPen(QColor(0, 0, 0, 200)))
-                    font = painter.font()
-                    font.setPointSize(12)
-                    font.setBold(True)
-                    painter.setFont(font)
-                    painter.drawText(x0, max(0, y0 - 6), self._track_label)
-
-            # Overlay aligned-depth heatmap at 40% opacity
-            # Uses /api/depth/aligned-heatmap which is pre-aligned to RGB resolution.
-            if self._aligned_depth_pixmap is not None:
-                painter.setOpacity(0.4)
-                painter.drawPixmap(0, 0, self._aligned_depth_pixmap)
-                painter.setOpacity(1.0)
-        finally:
-            painter.end()
-
-        # Scale to fit the label
-        scaled = canvas.scaled(
-            self._preview_label.width(), self._preview_label.height(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        self._preview_label.setPixmap(scaled)
-
-        # Cache draw rect for hover coordinate mapping
-        contents = self._preview_label.contentsRect()
-        rx = contents.x() + max(0, (contents.width() - scaled.width()) // 2)
-        ry = contents.y() + max(0, (contents.height() - scaled.height()) // 2)
-        self._preview_draw_rect = (rx, ry, scaled.width(), scaled.height())
-
     # ── old _refresh_rgb and _refresh_depth removed; replaced above ──
 
     def _refresh_logs(self) -> None:
@@ -1108,7 +1041,7 @@ class DashboardWindow(QMainWindow):
     # ═══════════════════════ RGB click-to-detect ═════════════════════
 
     def eventFilter(self, watched, event) -> bool:
-        if watched is self._preview_label:
+        if watched is self._lbl_rgbd_overlay:
             etype = event.type()
             if etype == QEvent.Type.MouseMove:
                 pos = event.position().toPoint()
