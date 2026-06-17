@@ -154,6 +154,18 @@ def align_final_rgbd_payload(
     valid_mask = (aligned_depth > 0).astype(np.uint8)
     point_colors = rgb_rgb[v, u].astype(np.uint8) if u.size else np.empty((0, 3), dtype=np.uint8)
 
+    projected = int(np.count_nonzero(valid_mask))
+    if projected == 0:
+        logger.warning(
+            "align_final_rgbd_payload: zero projected pixels. "
+            "valid_depth_samples=%d, world_points=%d, rgb_points_in_front=%d, "
+            "in_bounds=%d",
+            int(np.count_nonzero(valid)),
+            int(np.count_nonzero(valid)),
+            int(points_rgb.shape[0]),
+            int(u.size) if u.size else 0,
+        )
+
     intrinsics = rgb_intrinsics_from_meta(rgb_meta)
     summary = {
         "source": "quest3_rgbd_capture_final",

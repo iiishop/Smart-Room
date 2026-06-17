@@ -32,7 +32,6 @@ class FrameData:
     cloud_colors: np.ndarray
     projected_depth_count: int
     any2full_depth_count: int
-    alignment_mode: str
 
 
 def parse_args() -> argparse.Namespace:
@@ -51,14 +50,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--view-size", type=int, default=960, help="Square RGB display size in pixels.")
     parser.add_argument("--cloud-width", type=int, default=980, help="Point-cloud canvas width.")
     parser.add_argument("--cloud-height", type=int, default=760, help="Point-cloud canvas height.")
-    parser.add_argument(
-        "--mode",
-        choices=("sdk_reprojection", "legacy_pinhole", "screen_space"),
-        default="sdk_reprojection",
-        help="Alignment model. sdk_reprojection reproduces Meta EnvironmentDepthUtils.",
-    )
-    parser.add_argument(
-        "--depth-origin",
+    parser.add_argument("--depth-origin",
         choices=("raw", "flip_y"),
         default="raw",
         help="Depth row order. Use flip_y if the saved RenderTexture readback is vertically inverted.",
@@ -120,31 +112,6 @@ def ndc_to_linear_depth(depth_ndc: np.ndarray, near: float, far: float) -> np.nd
     )
 
 
-def depth_intrinsics_from_fov(depth_meta: dict) -> np.ndarray:
-    width = float(depth_meta["resolution_w"])
-    height = float(depth_meta["resolution_h"])
-    left = float(depth_meta["fov_left"])
-    right = float(depth_meta["fov_right"])
-    top = float(depth_meta["fov_top"])
-    bottom = float(depth_meta["fov_bottom"])
-    fx = width / (left + right)
-    fy = height / (top + bottom)
-    cx = width * right / (left + right)
-    cy = height * top / (top + bottom)
-    return np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]], dtype=np.float32)
-
-
-def rgb_intrinsics(rgb_meta: dict) -> np.ndarray:
-    return np.array(
-        [
-            [float(rgb_meta["focal_length_x"]), 0.0, float(rgb_meta["principal_point_x"])],
-            [0.0, float(rgb_meta["focal_length_y"]), float(rgb_meta["principal_point_y"])],
-            [0.0, 0.0, 1.0],
-        ],
-        dtype=np.float32,
-    )
-
-
 def quaternion_to_matrix(q_xyzw: np.ndarray) -> np.ndarray:
     q = q_xyzw.astype(np.float64)
     norm = np.linalg.norm(q)
@@ -159,36 +126,6 @@ def quaternion_to_matrix(q_xyzw: np.ndarray) -> np.ndarray:
         ],
         dtype=np.float32,
     )
-
-
-def pose_matrix(section: dict, prefix: str) -> np.ndarray:
-    pos = np.array(
-        [
-            float(section[f"{prefix}_position_x"]),
-            float(section[f"{prefix}_position_y"]),
-            float(section[f"{prefix}_position_z"]),
-        ],
-        dtype=np.float32,
-    )
-    quat = np.array(
-        [
-            float(section[f"{prefix}_rotation_x"]),
-            float(section[f"{prefix}_rotation_y"]),
-            float(section[f"{prefix}_rotation_z"]),
-            float(section[f"{prefix}_rotation_w"]),
-        ],
-        dtype=np.float32,
-    )
-    mat = np.eye(4, dtype=np.float32)
-    mat[:3, :3] = quaternion_to_matrix(quat)
-    mat[:3, 3] = pos
-    return mat
-
-
-def depth_to_rgb_transform(meta: dict) -> np.ndarray:
-    world_rgb = pose_matrix(meta["rgb"], "pose")
-    world_depth = pose_matrix(meta["depth"], "pose")
-    return np.linalg.inv(world_rgb) @ world_depth
 
 
 def projection_from_depth_fov(depth_meta: dict) -> np.ndarray:
@@ -312,65 +249,17 @@ def world_to_rgb_camera(points_world: np.ndarray, rgb_meta: dict) -> np.ndarray:
     return (points_world - rgb_pos[None, :]) @ rgb_rot
 
 
-def unproject_depth(depth_m: np.ndarray, k_depth: np.ndarray, valid: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    ys, xs = np.where(valid)
-    z = depth_m[ys, xs].astype(np.float32)
-    x = (xs.astype(np.float32) - k_depth[0, 2]) * z / k_depth[0, 0]
-    y = (ys.astype(np.float32) - k_depth[1, 2]) * z / k_depth[1, 1]
-    return np.stack([x, y, z], axis=1), xs, ys
-
-
-def transform_points(points: np.ndarray, transform: np.ndarray) -> np.ndarray:
-    points_h = np.concatenate([points, np.ones((points.shape[0], 1), dtype=np.float32)], axis=1)
-    return (points_h @ transform.T)[:, :3]
-
-
-def project_points(points_rgb: np.ndarray, k_rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    z = np.maximum(points_rgb[:, 2], 1e-6)
-    u = points_rgb[:, 0] * k_rgb[0, 0] / z + k_rgb[0, 2]
-    v = points_rgb[:, 1] * k_rgb[1, 1] / z + k_rgb[1, 2]
-    return np.rint(u).astype(np.int32), np.rint(v).astype(np.int32)
-
-
 def project_rgb_camera_points(points_rgb: np.ndarray, rgb_meta: dict) -> tuple[np.ndarray, np.ndarray]:
-    k_rgb = rgb_intrinsics(rgb_meta)
-    z = np.maximum(points_rgb[:, 2], 1e-6)
-    u = points_rgb[:, 0] * k_rgb[0, 0] / z + k_rgb[0, 2]
-    sensor_y = points_rgb[:, 1] * k_rgb[1, 1] / z + k_rgb[1, 2]
+    fx = float(rgb_meta["focal_length_x"])
+    fy = float(rgb_meta["focal_length_y"])
+    cx = float(rgb_meta["principal_point_x"])
+    cy = float(rgb_meta["principal_point_y"])
     height = int(rgb_meta["resolution_h"])
+    z = np.maximum(points_rgb[:, 2], 1e-6)
+    u = points_rgb[:, 0] * fx / z + cx
+    sensor_y = points_rgb[:, 1] * fy / z + cy
     v = (height - 1) - sensor_y
     return np.rint(u).astype(np.int32), np.rint(v).astype(np.int32)
-
-
-def align_depth_to_rgb(
-    depth_m: np.ndarray,
-    rgb_shape: tuple[int, int],
-    k_depth: np.ndarray,
-    k_rgb: np.ndarray,
-    t_depth_to_rgb: np.ndarray,
-    min_depth: float,
-    max_depth: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    rgb_h, rgb_w = rgb_shape
-    valid = np.isfinite(depth_m) & (depth_m >= min_depth) & (depth_m <= max_depth)
-    depth_points, _, _ = unproject_depth(depth_m, k_depth, valid)
-    if depth_points.size == 0:
-        empty = np.zeros((rgb_h, rgb_w), dtype=np.float32)
-        return empty, np.empty((0, 3), dtype=np.float32), np.empty((0,), dtype=np.int32), np.empty((0,), dtype=np.int32), valid
-
-    points_rgb = transform_points(depth_points, t_depth_to_rgb)
-    in_front = points_rgb[:, 2] > 0.01
-    points_rgb = points_rgb[in_front]
-    u, v = project_points(points_rgb, k_rgb)
-    in_bounds = (u >= 0) & (u < rgb_w) & (v >= 0) & (v < rgb_h)
-    points_rgb = points_rgb[in_bounds]
-    u = u[in_bounds]
-    v = v[in_bounds]
-
-    aligned = np.full((rgb_h, rgb_w), np.inf, dtype=np.float32)
-    np.minimum.at(aligned, (v, u), points_rgb[:, 2].astype(np.float32))
-    aligned[~np.isfinite(aligned)] = 0.0
-    return aligned, points_rgb.astype(np.float32), u, v, valid
 
 
 def align_depth_to_rgb_sdk(
@@ -401,31 +290,6 @@ def align_depth_to_rgb_sdk(
     np.minimum.at(aligned, (v, u), points_rgb[:, 2].astype(np.float32))
     aligned[~np.isfinite(aligned)] = 0.0
     return aligned, points_rgb.astype(np.float32), valid
-
-
-def align_depth_to_rgb_screen_space(
-    depth_m: np.ndarray,
-    meta: dict,
-    min_depth: float,
-    max_depth: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    rgb_meta = meta["rgb"]
-    rgb_h = int(rgb_meta["resolution_h"])
-    rgb_w = int(rgb_meta["resolution_w"])
-    filtered = np.where(
-        np.isfinite(depth_m) & (depth_m >= min_depth) & (depth_m <= max_depth),
-        depth_m,
-        0.0,
-    ).astype(np.float32)
-    aligned = cv2.resize(filtered, (rgb_w, rgb_h), interpolation=cv2.INTER_NEAREST)
-    k_rgb = rgb_intrinsics(rgb_meta)
-    ys, xs = np.where(aligned > 0)
-    z = aligned[ys, xs]
-    x = (xs.astype(np.float32) - k_rgb[0, 2]) * z / k_rgb[0, 0]
-    sensor_y = (rgb_h - 1 - ys).astype(np.float32)
-    y = (sensor_y - k_rgb[1, 2]) * z / k_rgb[1, 1]
-    points_rgb = np.stack([x, y, z], axis=1).astype(np.float32)
-    return aligned, points_rgb, filtered > 0
 
 
 def build_nearest_index(aligned_depth: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -554,7 +418,6 @@ def load_frame(
     frame_dir: Path,
     min_depth: float,
     max_depth: float,
-    mode: str = "sdk_reprojection",
     depth_origin: str = "raw",
 ) -> FrameData:
     meta = load_meta(frame_dir)
@@ -571,23 +434,10 @@ def load_frame(
         float(depth_meta.get("far_z", math.inf)),
     )
 
-    if mode == "sdk_reprojection":
-        aligned, points_rgb_all, _ = align_depth_to_rgb_sdk(depth_m, meta, min_depth, max_depth)
-    elif mode == "screen_space":
-        aligned, points_rgb_all, _ = align_depth_to_rgb_screen_space(depth_m, meta, min_depth, max_depth)
-    else:
-        k_depth = depth_intrinsics_from_fov(depth_meta)
-        k_rgb = rgb_intrinsics(meta["rgb"])
-        t_d2r = depth_to_rgb_transform(meta)
-        aligned, points_rgb_all, _, _, _ = align_depth_to_rgb(
-            depth_m,
-            rgb.shape[:2],
-            k_depth,
-            k_rgb,
-            t_d2r,
-            min_depth,
-            max_depth,
-        )
+    aligned, points_rgb_all, _ = align_depth_to_rgb_sdk(depth_m, meta, min_depth, max_depth)
+    if aligned is None or not np.any(aligned > 0):
+        print(f"  [WARN] {frame_dir.name}: alignment produced no valid depth pixels")
+
     overlay_rgb = make_depth_overlay(rgb, aligned, min_depth, max_depth)
     any2full_path = find_any2full_depth_path(frame_dir)
     any2full_depth = load_saved_depth_map(any2full_path, rgb.shape[:2]) if any2full_path is not None else None
@@ -613,7 +463,6 @@ def load_frame(
         cloud_colors=cloud_colors,
         projected_depth_count=int(np.count_nonzero(aligned > 0)),
         any2full_depth_count=int(np.count_nonzero(any2full_depth > 0)) if any2full_depth is not None else 0,
-        alignment_mode=mode,
     )
 
 
@@ -800,7 +649,7 @@ class RgbdViewer:
         any2full_note = self.frame.any2full_path.name if self.frame.any2full_path is not None else "missing"
         self.status_var.set(
             f"{self.frames[self.frame_index].name} | RGB {rgb['resolution_w']}x{rgb['resolution_h']} | "
-            f"depth {depth['resolution_w']}x{depth['resolution_h']} | mode {self.frame.alignment_mode} | "
+            f"depth {depth['resolution_w']}x{depth['resolution_h']} | "
             f"row-order {self.args.depth_origin} | preview {active_name} | origin ({origin_x}, {origin_y}) | "
             f"projected {exact} | cloud {cloud} | any2full {any2full_note}"
         )
@@ -1167,7 +1016,7 @@ def export_overlays(frames: list[Path], args: argparse.Namespace) -> None:
     assert args.export_dir is not None
     args.export_dir.mkdir(parents=True, exist_ok=True)
     for frame_dir in frames:
-        frame = load_frame(frame_dir, args.min_depth, args.max_depth, args.mode, args.depth_origin)
+        frame = load_frame(frame_dir, args.min_depth, args.max_depth, args.depth_origin)
         out = args.export_dir / f"{frame_dir.name}_aligned_overlay.png"
         cv2.imwrite(str(out), cv2.cvtColor(frame.overlay_rgb, cv2.COLOR_RGB2BGR))
 
@@ -1193,14 +1042,14 @@ def export_point_clouds(frames: list[Path], args: argparse.Namespace) -> None:
     assert args.export_ply_dir is not None
     args.export_ply_dir.mkdir(parents=True, exist_ok=True)
     for frame_dir in frames:
-        frame = load_frame(frame_dir, args.min_depth, args.max_depth, args.mode, args.depth_origin)
+        frame = load_frame(frame_dir, args.min_depth, args.max_depth, args.depth_origin)
         out = args.export_ply_dir / f"{frame_dir.name}_cloud_rgb_camera.ply"
         write_ascii_ply(out, frame.cloud_points, frame.cloud_colors)
 
 
 def print_stats(frames: list[Path], args: argparse.Namespace) -> None:
     for frame_dir in frames:
-        frame = load_frame(frame_dir, args.min_depth, args.max_depth, args.mode, args.depth_origin)
+        frame = load_frame(frame_dir, args.min_depth, args.max_depth, args.depth_origin)
         rgb = frame.meta["rgb"]
         depth = frame.meta["depth"]
         exact = int(np.count_nonzero(frame.aligned_depth > 0))
@@ -1211,7 +1060,6 @@ def print_stats(frames: list[Path], args: argparse.Namespace) -> None:
             f"depth={depth['resolution_w']}x{depth['resolution_h']} "
             f"valid_depth={depth_valid} projected_pixels={exact} "
             f"coverage={coverage:.3%} cloud_points={frame.cloud_points.shape[0]} "
-            f"mode={frame.alignment_mode} depth_origin={args.depth_origin} "
             f"pose_source={depth.get('pose_source', 'unknown')}"
         )
 
