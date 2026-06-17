@@ -99,6 +99,10 @@ class DashboardWindow(QMainWindow):
         self._aligned_depth_pixmap: QPixmap | None = None  # from /api/depth/aligned-heatmap
         self._depth_draw_rect: tuple[int, int, int, int] | None = None
 
+        # Overlay state
+        self._rgbd_overlay_bytes: bytes | None = None
+        self._rgbd_overlay_pixmap: QPixmap | None = None
+
         # Tracking state
         self._latest_track_result: dict | None = None
         self._track_bbox_pixel: tuple[int, int, int, int] | None = None  # (x0,y0,x1,y1)
@@ -121,6 +125,11 @@ class DashboardWindow(QMainWindow):
 
         self._depth_socket = QWebSocket()
         self._depth_socket.binaryMessageReceived.connect(self._on_depth_binary)
+
+        self._rgbd_overlay_socket = QWebSocket()
+        self._rgbd_overlay_socket.binaryMessageReceived.connect(
+            self._on_rgbd_overlay_binary
+        )
 
         # ── Build UI ──
 
@@ -428,47 +437,32 @@ class DashboardWindow(QMainWindow):
         self._lbl_preview_hover = QLabel("Hover over image for pixel coords and depth")
         layout.addWidget(self._lbl_preview_hover)
 
-        raw_row = QHBoxLayout()
+        # Unified RGB-D Overlay
+        overlay_group = QGroupBox("RGB-D Aligned Overlay")
+        overlay_layout = QVBoxLayout()
+        self._lbl_rgbd_overlay = QLabel("Waiting for RGB-D overlay...")
+        self._lbl_rgbd_overlay.setMinimumSize(640, 360)
+        self._lbl_rgbd_overlay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._lbl_rgbd_overlay.setMouseTracking(True)
+        self._lbl_rgbd_overlay.installEventFilter(self)
+        self._lbl_rgbd_overlay.setStyleSheet(
+            "background-color: #0a1322; border-radius: 8px;"
+        )
+        overlay_layout.addWidget(self._lbl_rgbd_overlay)
+        overlay_group.setLayout(overlay_layout)
+        layout.addWidget(overlay_group, stretch=1)
 
-        raw_rgb_group = QGroupBox("Raw RGB")
-        raw_rgb_layout = QVBoxLayout()
-        self._lbl_raw_rgb = QLabel("Waiting for RGB preview...")
-        self._lbl_raw_rgb.setMinimumSize(420, 240)
-        self._lbl_raw_rgb.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._lbl_raw_rgb.setStyleSheet("background-color: #0a1322; border-radius: 8px;")
-        raw_rgb_layout.addWidget(self._lbl_raw_rgb)
-        raw_rgb_group.setLayout(raw_rgb_layout)
-        raw_row.addWidget(raw_rgb_group)
-
-        raw_depth_group = QGroupBox("Raw Depth")
-        raw_depth_layout = QVBoxLayout()
-        self._lbl_raw_depth = QLabel("Waiting for depth preview...")
-        self._lbl_raw_depth.setMinimumSize(420, 240)
-        self._lbl_raw_depth.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._lbl_raw_depth.setStyleSheet("background-color: #0a1322; border-radius: 8px;")
-        raw_depth_layout.addWidget(self._lbl_raw_depth)
-        raw_depth_group.setLayout(raw_depth_layout)
-        raw_row.addWidget(raw_depth_group)
-        layout.addLayout(raw_row)
-
-        meta_group = QGroupBox("Raw Capture Metadata")
+        # Metadata
+        meta_group = QGroupBox("Stream Metadata")
         meta_layout = QVBoxLayout()
         self._lbl_preview_meta = QLabel("Waiting for runtime metadata...")
         self._lbl_preview_meta.setWordWrap(True)
-        self._lbl_preview_meta.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self._lbl_preview_meta.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
         meta_layout.addWidget(self._lbl_preview_meta)
         meta_group.setLayout(meta_layout)
         layout.addWidget(meta_group)
-
-        combined_group = QGroupBox("Trigger RGB + Aligned Depth Overlay")
-        combined_layout = QVBoxLayout()
-        self._preview_label = QLabel("RGB + Depth: waiting...")
-        self._preview_label.setMinimumSize(640, 360)
-        self._preview_label.setMouseTracking(True)
-        self._preview_label.installEventFilter(self)
-        combined_layout.addWidget(self._preview_label)
-        combined_group.setLayout(combined_layout)
-        layout.addWidget(combined_group)
 
         w.setLayout(layout)
         return w
@@ -830,32 +824,50 @@ class DashboardWindow(QMainWindow):
         except Exception:
             pass
 
+    def _compute_draw_rect(
+        self, label: QLabel, pixmap: QPixmap
+    ) -> tuple[int, int, int, int]:
+        """Compute the pixel rectangle of a scaled pixmap inside a QLabel."""
+        contents = label.contentsRect()
+        scaled = pixmap.scaled(
+            contents.width(),
+            contents.height(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+        )
+        rx = contents.x() + max(0, (contents.width() - scaled.width()) // 2)
+        ry = contents.y() + max(0, (contents.height() - scaled.height()) // 2)
+        return rx, ry, scaled.width(), scaled.height()
+
     def _refresh_previews(self) -> None:
         self._fetch_aligned_depth()
-        self._refresh_raw_preview_panel()
+        self._refresh_rgbd_overlay_panel()
         self._refresh_preview_metadata()
-        self._refresh_combined_preview()
 
-    def _refresh_raw_preview_panel(self) -> None:
-        if self._raw_rgb_pixmap is not None:
-            scaled_rgb = self._raw_rgb_pixmap.scaled(
-                self._lbl_raw_rgb.width(),
-                self._lbl_raw_rgb.height(),
+    def _refresh_rgbd_overlay_panel(self) -> None:
+        """Paint the streaming RGB-D overlay, falls back to aligned heatmap."""
+        pix = self._rgbd_overlay_pixmap
+        if pix is not None and not pix.isNull():
+            scaled = pix.scaled(
+                self._lbl_rgbd_overlay.width(),
+                self._lbl_rgbd_overlay.height(),
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
             )
-            self._lbl_raw_rgb.setPixmap(scaled_rgb)
-            self._lbl_raw_rgb.setText("")
-
-        if self._depth_preview_pixmap is not None:
-            scaled_depth = self._depth_preview_pixmap.scaled(
-                self._lbl_raw_depth.width(),
-                self._lbl_raw_depth.height(),
+            self._lbl_rgbd_overlay.setPixmap(scaled)
+            self._lbl_rgbd_overlay.setText("")
+            self._preview_draw_rect = self._compute_draw_rect(
+                self._lbl_rgbd_overlay, pix
+            )
+        elif self._aligned_depth_pixmap is not None:
+            # Fallback: show old aligned heatmap from tracking pipeline
+            scaled = self._aligned_depth_pixmap.scaled(
+                self._lbl_rgbd_overlay.width(),
+                self._lbl_rgbd_overlay.height(),
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
             )
-            self._lbl_raw_depth.setPixmap(scaled_depth)
-            self._lbl_raw_depth.setText("")
+            self._lbl_rgbd_overlay.setPixmap(scaled)
+            self._lbl_rgbd_overlay.setText("")
 
     def _refresh_preview_metadata(self) -> None:
         data = self._latest_status_snapshot or {}
@@ -983,6 +995,13 @@ class DashboardWindow(QMainWindow):
             QAbstractSocket.SocketState.ConnectingState,
         ):
             self._depth_socket.open(QUrl("ws://127.0.0.1:8500/ws/depth-preview"))
+        if self._rgbd_overlay_socket.state() not in (
+            QAbstractSocket.SocketState.ConnectedState,
+            QAbstractSocket.SocketState.ConnectingState,
+        ):
+            self._rgbd_overlay_socket.open(
+                QUrl("ws://127.0.0.1:8500/ws/rgbd-overlay")
+            )
 
     def _on_rgb_binary(self, payload) -> None:
         self._latest_rgb_bytes = bytes(payload)
@@ -1005,6 +1024,13 @@ class DashboardWindow(QMainWindow):
         image = self._depth_to_image(width, height, values)
         if image is not None:
             self._depth_preview_pixmap = QPixmap.fromImage(image)
+
+    def _on_rgbd_overlay_binary(self, payload: bytes) -> None:
+        """Receive aligned RGB-D overlay JPEG from streaming backend."""
+        self._rgbd_overlay_bytes = payload
+        pix = QPixmap()
+        if pix.loadFromData(payload):
+            self._rgbd_overlay_pixmap = pix
 
     # ═══════════════════════ Tracking actions ════════════════════════
 
