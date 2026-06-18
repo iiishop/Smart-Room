@@ -46,8 +46,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--data",
         type=Path,
-        default=DEFAULT_DATA_DIR,
-        help=f"Capture root containing capture_0000.. directories. Default: {DEFAULT_DATA_DIR}",
+        default=None,
+        help=f"Capture root containing capture_0000.. directories. Default: {DEFAULT_DATA_DIR}. Not required in --server mode.",
     )
     parser.add_argument("--frame", type=int, default=0, help="Initial capture index.")
     parser.add_argument("--min-depth", type=float, default=0.2, help="Minimum valid depth in metres.")
@@ -701,7 +701,7 @@ class RgbdViewer:
     def __init__(self, args: argparse.Namespace, frames: list[Path]) -> None:
         self.args = args
         self.frames = frames
-        self.frame_index = int(np.clip(args.frame, 0, len(frames) - 1))
+        self.frame_index = int(np.clip(args.frame, 0, len(frames) - 1)) if frames else 0
         self.frame: FrameData | None = None
         self.rgb_scale = 1.0
         self.rgb_photo: ImageTk.PhotoImage | None = None
@@ -717,7 +717,12 @@ class RgbdViewer:
         self.root.title("Quest 3 RGB-D Alignment Viewer")
         self.root.geometry(f"{max(args.view_size, args.cloud_width) + 80}x{args.cloud_height + 150}")
         self._build_ui()
-        self.load_current_frame()
+        if self.frames:
+            self.load_current_frame()
+        else:
+            self.update_rgb_image()
+            self.render_cloud()
+            self.update_status()
 
     def _build_ui(self) -> None:
         top = ttk.Frame(self.root, padding=8)
@@ -835,6 +840,15 @@ class RgbdViewer:
         ttk.Label(cloud_tab, textvariable=self.cloud_var).pack(side=tk.TOP, fill=tk.X, pady=(8, 0))
 
     def load_current_frame(self) -> None:
+        if not self.frames:
+            self.frame = None
+            self._nearest_cache = {}
+            self._last_hover_display_xy = None
+            self.frame_var.set("")
+            self.update_rgb_image()
+            self.render_cloud()
+            self.update_status()
+            return
         self.frame = load_frame(
             self.frames[self.frame_index],
             self.args.min_depth,
@@ -862,7 +876,12 @@ class RgbdViewer:
         self.update_status()
 
     def update_status(self) -> None:
-        assert self.frame is not None
+        if self.frame is None:
+            waiting = "Waiting for trigger payload..." if self.args.server else "No local frames found"
+            self.status_var.set(waiting)
+            self.cloud_var.set(waiting)
+            self.clear_hover_panel()
+            return
         rgb = self.frame.meta["rgb"]
         depth = self.frame.meta["depth"]
         active_name = self.get_active_depth_source_name()
@@ -965,7 +984,20 @@ class RgbdViewer:
         tooltip: str | None = None,
         tooltip_pos: tuple[int, int] | None = None,
     ) -> None:
-        assert self.frame is not None
+        if self.frame is None:
+            self.rgb_scale = 1.0
+            self.rgb_photo = None
+            self.rgb_canvas.config(width=self.args.view_size, height=self.args.view_size)
+            self.rgb_canvas.delete("all")
+            self.rgb_canvas.create_text(
+                self.args.view_size // 2,
+                self.args.view_size // 2,
+                text="Waiting for trigger payload...",
+                fill="#ffffff",
+                font=("Consolas", 18),
+                anchor=tk.CENTER,
+            )
+            return
         image = self.get_active_overlay_image().copy()
         if marker is not None:
             x, y = marker
@@ -1051,7 +1083,9 @@ class RgbdViewer:
         )
 
     def on_rgb_motion(self, event: tk.Event) -> None:
-        assert self.frame is not None
+        if self.frame is None:
+            self.depth_var.set("Waiting for trigger payload...")
+            return
         x = int(event.x / self.rgb_scale)
         y = int(event.y / self.rgb_scale)
         active_depth = self.get_active_depth_map()
@@ -1124,17 +1158,28 @@ class RgbdViewer:
             self.on_rgb_motion(_Event(*self._last_hover_display_xy))
 
     def render_cloud(self) -> None:
-        assert self.frame is not None
-        img = render_cloud_image(
-            self.frame.cloud_points,
-            self.frame.cloud_colors,
-            self.frame.meta["rgb"],
-            self.args.cloud_width,
-            self.args.cloud_height,
-            self.yaw,
-            self.pitch,
-            self.zoom,
-        )
+        if self.frame is None:
+            img = render_cloud_image(
+                np.empty((0, 3), dtype=np.float32),
+                np.empty((0, 3), dtype=np.uint8),
+                {},
+                self.args.cloud_width,
+                self.args.cloud_height,
+                self.yaw,
+                self.pitch,
+                self.zoom,
+            )
+        else:
+            img = render_cloud_image(
+                self.frame.cloud_points,
+                self.frame.cloud_colors,
+                self.frame.meta["rgb"],
+                self.args.cloud_width,
+                self.args.cloud_height,
+                self.yaw,
+                self.pitch,
+                self.zoom,
+            )
         self.cloud_photo = ImageTk.PhotoImage(Image.fromarray(img))
         self.cloud_canvas.config(width=self.args.cloud_width, height=self.args.cloud_height)
         self.cloud_canvas.delete("all")
@@ -1160,16 +1205,22 @@ class RgbdViewer:
         self.render_cloud()
 
     def on_frame_selected(self, _event: tk.Event) -> None:
+        if not self.frames:
+            return
         selected = self.frame_combo.current()
         if selected >= 0:
             self.frame_index = selected
             self.load_current_frame()
 
     def prev_frame(self) -> None:
+        if not self.frames:
+            return
         self.frame_index = (self.frame_index - 1) % len(self.frames)
         self.load_current_frame()
 
     def next_frame(self) -> None:
+        if not self.frames:
+            return
         self.frame_index = (self.frame_index + 1) % len(self.frames)
         self.load_current_frame()
 
@@ -1290,7 +1341,8 @@ def print_stats(frames: list[Path], args: argparse.Namespace) -> None:
 
 def main() -> None:
     args = parse_args()
-    frames = discover_frames(args.data)
+    data_root = args.data or DEFAULT_DATA_DIR
+    frames = [] if args.server else discover_frames(data_root)
     if args.export_dir is not None:
         export_overlays(frames, args)
     if args.export_ply_dir is not None:
