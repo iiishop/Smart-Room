@@ -24,6 +24,7 @@ namespace SmartRoom.Capture
         public sealed class CapturePayload
         {
             public byte[] rgbJpegBytes;
+            public byte[] rgbRawBytes;
             public byte[] depthRawBytes;
             public string metaJson;
             public int rgbWidth;
@@ -146,6 +147,8 @@ namespace SmartRoom.Capture
                 File.WriteAllText(Path.Combine(directory, "meta.json"), payload.metaJson);
             if (payload.rgbOk && payload.rgbJpegBytes != null)
                 File.WriteAllBytes(Path.Combine(directory, "rgb.jpg"), payload.rgbJpegBytes);
+            if (payload.rgbOk && payload.rgbRawBytes != null)
+                File.WriteAllBytes(Path.Combine(directory, "rgb.raw"), payload.rgbRawBytes);
             if (payload.depthOk && payload.depthRawBytes != null)
                 File.WriteAllBytes(Path.Combine(directory, "depth.raw"), payload.depthRawBytes);
 
@@ -157,7 +160,7 @@ namespace SmartRoom.Capture
         {
             payload = null;
 
-            bool rgbOk = TryCaptureRgb(out byte[] jpegBytes, out RgbMeta rgbMeta);
+            bool rgbOk = TryCaptureRgb(out byte[] jpegBytes, out byte[] rawRgbBytes, out RgbMeta rgbMeta);
             bool depthOk = TryCaptureDepthRaw(out byte[] depthRaw);
             bool descriptorOk = TryGetCurrentDepthDescriptor(out DepthDescriptorData descriptor);
             int selectedEye = GetSelectedDepthEyeIndex();
@@ -215,6 +218,7 @@ namespace SmartRoom.Capture
             payload = new CapturePayload
             {
                 rgbJpegBytes = jpegBytes,
+                rgbRawBytes = rawRgbBytes,
                 depthRawBytes = depthRaw,
                 metaJson = JsonUtility.ToJson(meta, true),
                 rgbWidth = rgbMeta.resolution_w,
@@ -232,9 +236,10 @@ namespace SmartRoom.Capture
             return rgbOk && depthOk && descriptorOk;
         }
 
-        private bool TryCaptureRgb(out byte[] jpegBytes, out RgbMeta meta)
+        private bool TryCaptureRgb(out byte[] jpegBytes, out byte[] rawRgbBytes, out RgbMeta meta)
         {
             jpegBytes = null;
+            rawRgbBytes = null;
             meta = new RgbMeta();
 
             if (passthroughCamera == null || !passthroughCamera.IsPlaying)
@@ -259,6 +264,12 @@ namespace SmartRoom.Capture
                 RenderTexture.active = _rgbRt;
                 _rgbReadback.ReadPixels(new Rect(0, 0, captureWidth, captureHeight), 0, 0, false);
                 _rgbReadback.Apply(false, false);
+                NativeArray<byte> raw = _rgbReadback.GetRawTextureData<byte>();
+                if (raw.IsCreated && raw.Length == captureWidth * captureHeight * 3)
+                {
+                    rawRgbBytes = new byte[raw.Length];
+                    raw.CopyTo(rawRgbBytes);
+                }
                 jpegBytes = _rgbReadback.EncodeToJPG(jpegQuality);
             }
             finally
@@ -282,6 +293,7 @@ namespace SmartRoom.Capture
                 current_resolution_h = currentResolution.y,
                 source_resolution_w = captureWidth,
                 source_resolution_h = captureHeight,
+                raw_format = "rgb24_interleaved",
                 camera_position = passthroughCamera.CameraPosition.ToString(),
                 selected_depth_eye = GetSelectedDepthEyeIndex(),
                 sensor_resolution_w = intrinsics.SensorResolution.x,
@@ -302,7 +314,7 @@ namespace SmartRoom.Capture
                 pose_rotation_z = camPose.rotation.z,
                 pose_rotation_w = camPose.rotation.w,
             };
-            return jpegBytes != null && jpegBytes.Length > 0;
+            return rawRgbBytes != null && rawRgbBytes.Length == captureWidth * captureHeight * 3;
         }
 
         private bool TryCaptureDepthRaw(out byte[] depthRaw)
@@ -574,6 +586,7 @@ namespace SmartRoom.Capture
             public int requested_resolution_w, requested_resolution_h;
             public int current_resolution_w, current_resolution_h;
             public int source_resolution_w, source_resolution_h;
+            public string raw_format;
             public string camera_position;
             public int selected_depth_eye;
             public int sensor_resolution_w, sensor_resolution_h;

@@ -53,4 +53,5 @@ unity/**/Assets/TextMesh Pro/Examples & Extras/
 # Keep legacy snapshots out of main history
 archive_code/
 backend/checkpoints/
+backend/viewer_any2full_cache/
 .codegraph/

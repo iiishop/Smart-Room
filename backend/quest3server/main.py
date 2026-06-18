@@ -50,6 +50,10 @@ _latest_raycast_result: dict = {}
 _camera_intrinsics: dict = {}
 _rgbd_overlay_clients: set[WebSocket] = set()
 _latest_overlay_jpeg: bytes | None = None
+# Nearest-depth index for hover queries (pre-built on each alignment cache)
+_latest_depth_nearest_x: np.ndarray | None = None
+_latest_depth_nearest_y: np.ndarray | None = None
+_latest_depth_nearest_dist: np.ndarray | None = None
 
 _tracking_engine: TrackingEngine | None = None
 _tracking_clients: set[WebSocket] = set()
@@ -424,6 +428,30 @@ def _cache_final_rgbd_alignment(
         _state["last_rgb_frame_id"] = int(_state.get("last_rgb_frame_id", 0)) + 1
         _state["last_rgb_size"] = f"{rgb_w}x{rgb_h}"
         _state["last_seen_utc"] = _utc_now_iso()
+
+    # Build nearest-depth index for hover queries (outside lock)
+    global _latest_depth_nearest_x, _latest_depth_nearest_y, _latest_depth_nearest_dist
+    _ad = alignment.aligned_depth_m
+    _valid = _ad > 0
+    if _valid.any():
+        _mask = np.where(_valid, 0, 255).astype(np.uint8)
+        _dist, _labels = cv2.distanceTransformWithLabels(
+            _mask, cv2.DIST_L2, cv2.DIST_MASK_3, labelType=cv2.DIST_LABEL_PIXEL,
+        )
+        _vy, _vx = np.where(_valid)
+        _max_lbl = int(_labels.max())
+        _lx = np.full(_max_lbl + 1, -1, dtype=np.int32)
+        _ly = np.full(_max_lbl + 1, -1, dtype=np.int32)
+        _vl = _labels[_vy, _vx]
+        _lx[_vl] = _vx
+        _ly[_vl] = _vy
+        _latest_depth_nearest_x = _lx[_labels]
+        _latest_depth_nearest_y = _ly[_labels]
+        _latest_depth_nearest_dist = _dist.astype(np.float32)
+    else:
+        _latest_depth_nearest_x = None
+        _latest_depth_nearest_y = None
+        _latest_depth_nearest_dist = None
 
 
 async def _run_tracking_detection(
@@ -825,18 +853,75 @@ async def receive_aligned_depth_v2(request: Request):
 
 @app.get("/api/depth/at")
 async def depth_at_pixel(px: int = Query(...), py: int = Query(...)):
-    """Return the strict sparse aligned depth (metres) at a given RGB pixel."""
-    if _latest_aligned_depth is None or _latest_aligned_valid_mask is None:
-        return {"depth_m": None, "valid": False, "source": "none"}
-    from .tracking.depth_alignment import query_depth_at_pixel
+    """Return aligned depth and RGB-camera XYZ (metres) at an RGB pixel.
 
-    d = query_depth_at_pixel(_latest_aligned_depth, px, py)
-    valid = bool(
-        0 <= py < _latest_aligned_valid_mask.shape[0]
-        and 0 <= px < _latest_aligned_valid_mask.shape[1]
-        and _latest_aligned_valid_mask[py, px] > 0
-    )
-    return {"depth_m": d, "valid": valid, "source": "sparse_aligned"}
+    Falls back to the nearest valid depth pixel when the exact pixel has no
+    depth, using a pre-built distance-transform index (updated every trigger).
+    """
+    if _latest_aligned_depth is None:
+        return {
+            "depth_m": None, "valid": False,
+            "sample_px": px, "sample_py": py, "source": "none",
+        }
+
+    h, w = _latest_aligned_depth.shape
+    if px < 0 or px >= w or py < 0 or py >= h:
+        return {
+            "depth_m": None, "valid": False,
+            "sample_px": px, "sample_py": py, "source": "out_of_bounds",
+        }
+
+    depth = float(_latest_aligned_depth[py, px])
+    sample_px, sample_py = px, py
+    source = "exact"
+    distance_px = 0.0
+
+    if depth <= 0 and _latest_depth_nearest_x is not None:
+        nx = int(_latest_depth_nearest_x[py, px])
+        ny = int(_latest_depth_nearest_y[py, px])
+        if nx >= 0 and ny >= 0:
+            nd = float(_latest_aligned_depth[ny, nx])
+            if nd > 0:
+                depth = nd
+                sample_px, sample_py = nx, ny
+                source = "nearest"
+                distance_px = round(float(_latest_depth_nearest_dist[py, px]), 1)
+
+    if depth <= 0:
+        return {
+            "depth_m": None, "valid": False,
+            "sample_px": px, "sample_py": py, "source": source,
+        }
+
+    # Compute RGB-camera XYZ (x→right, y→up, z→forward)
+    if _last_rgb_intrinsics is not None:
+        fx = float(_last_rgb_intrinsics[0, 0])
+        fy = float(_last_rgb_intrinsics[1, 1])
+        cx = float(_last_rgb_intrinsics[0, 2])
+        cy = float(_last_rgb_intrinsics[1, 2])
+        sensor_y = (h - 1) - float(sample_py)  # flip image→sensor
+        x_cam = (float(sample_px) - cx) * depth / max(fx, 1e-6)
+        y_cam = (sensor_y - cy) * depth / max(fy, 1e-6)
+        return {
+            "depth_m": round(depth, 4),
+            "valid": True,
+            "sample_px": sample_px,
+            "sample_py": sample_py,
+            "source": source,
+            "distance_px": distance_px,
+            "rgb_cam_x": round(x_cam, 4),
+            "rgb_cam_y": round(y_cam, 4),
+            "rgb_cam_z": round(depth, 4),
+        }
+
+    return {
+        "depth_m": round(depth, 4),
+        "valid": True,
+        "sample_px": sample_px,
+        "sample_py": sample_py,
+        "source": source,
+        "distance_px": distance_px,
+    }
 
 
 @app.get("/api/depth/topdown")
