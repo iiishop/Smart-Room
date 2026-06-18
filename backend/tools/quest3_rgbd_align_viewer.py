@@ -6,8 +6,6 @@ import json
 import math
 import threading
 from dataclasses import dataclass
-from email.parser import BytesParser
-from email.policy import default as default_email_policy
 from pathlib import Path
 
 import cv2
@@ -614,17 +612,53 @@ def resize_for_display(image: np.ndarray, max_size: int) -> tuple[Image.Image, f
 
 
 def _parse_multipart(body: bytes, content_type: str) -> dict[str, bytes]:
-    message = BytesParser(policy=default_email_policy).parsebytes(
-        f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("utf-8") + body
-    )
+    """Parse multipart/form-data body into {field_name: bytes}.
+    
+    Uses manual boundary parsing — no email.parser dependency.
+    Handles the exact format Unity's multipart POST sends.
+    """
+    # Extract boundary from Content-Type: multipart/form-data; boundary=----WebKit...
+    boundary = None
+    for part in content_type.split(";"):
+        part = part.strip()
+        if part.startswith("boundary="):
+            boundary = part[len("boundary="):].strip("\"'")
+            break
+    if not boundary:
+        raise ValueError("no boundary in Content-Type")
+    
+    sep = ("--" + boundary).encode()
+    term = ("--" + boundary + "--").encode()
     parts: dict[str, bytes] = {}
-    for part in message.iter_parts():
-        name = part.get_param("name", header="content-disposition")
-        if not name:
+    
+    # Split body by boundary separator
+    sections = body.split(sep)
+    for section in sections[1:]:  # skip preamble before first boundary
+        if section.startswith(b"--"):  # terminal boundary
+            break
+        # Each section: \r\n headers \r\n\r\n content \r\n
+        section = section.lstrip(b"\r\n")
+        header_end = section.find(b"\r\n\r\n")
+        if header_end < 0:
             continue
-        payload = part.get_payload(decode=True)
-        if payload is not None:
-            parts[name] = payload
+        header_bytes = section[:header_end]
+        content = section[header_end + 4:]
+        if content.endswith(b"\r\n"):
+            content = content[:-2]
+        
+        # Parse Content-Disposition header for field name
+        header_str = header_bytes.decode("utf-8", errors="replace")
+        name = None
+        for line in header_str.split("\r\n"):
+            if line.lower().startswith("content-disposition:"):
+                for token in line.split(";"):
+                    token = token.strip()
+                    if token.startswith("name="):
+                        name = token[5:].strip("\"'")
+                        break
+        if name and content:
+            parts[name] = content
+    
     return parts
 
 
