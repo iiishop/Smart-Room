@@ -674,8 +674,11 @@ class DashboardWindow(QMainWindow):
             )
 
             self._lbl_depth.setText(f"Depth: frame={data.get('last_depth_frame_id', 0)} size={depth_size}")
+            overlay_state = "idle"
+            if hasattr(self, "_rgbd_overlay_socket") and self._rgbd_overlay_socket is not None:
+                overlay_state = "active" if self._rgbd_overlay_socket.state() == QAbstractSocket.SocketState.ConnectedState else "idle"
             self._lbl_depth_stream.setText(
-                f"Source: websocket preview {'active' if self._depth_socket.state() == QAbstractSocket.SocketState.ConnectedState else 'idle'}"
+                f"Source: trigger-only (overlay WS: {overlay_state})"
             )
             self._lbl_depth_state.setText(
                 f"Availability: {'aligned uploaded' if aligned_ok else 'no aligned depth yet'}"
