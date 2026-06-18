@@ -446,9 +446,8 @@ class DashboardWindow(QMainWindow):
         self._hover_tooltip.setStyleSheet(
             """
             QLabel {
-                background-color: rgba(0, 0, 0, 200);
+                background-color: #cc222222;
                 color: #e0e0e0;
-                font-family: 'Consolas', 'Courier New', monospace;
                 font-size: 12px;
                 padding: 4px 8px;
                 border: 1px solid #444;
@@ -967,6 +966,8 @@ class DashboardWindow(QMainWindow):
         pix = QPixmap()
         if pix.loadFromData(payload):
             self._rgbd_overlay_pixmap = pix
+            self._latest_rgb_width = pix.width()
+            self._latest_rgb_height = pix.height()
 
     # ═══════════════════════ Tracking actions ════════════════════════
 
@@ -1114,6 +1115,8 @@ class DashboardWindow(QMainWindow):
                 if src == "nearest":
                     dist = d.get("distance_px", 0)
                     text += f"  (~{dist:.0f}px)"
+            else:
+                text = f"({px},{py})  no depth"
         except Exception:
             text = f"({px},{py})  (query failed)"
 
