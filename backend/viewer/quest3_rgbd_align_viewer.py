@@ -17,6 +17,21 @@ from PIL import Image, ImageTk
 import tkinter as tk
 from tkinter import ttk
 
+from cursor_prompt_projector import CursorPromptConfig, build_cursor_prompt
+from rgbd_device_mask_refine import (
+    RgbdMaskRefineConfig,
+    overlay_mask as overlay_device_mask,
+    refine_device_mask,
+    write_refine_outputs,
+)
+from rgbd_device_prompt_builder import RgbdPromptConfig, build_rgbd_device_prompt
+from sam2_device_segment import (
+    DEFAULT_SAM2_MODEL_ID,
+    Sam2DeviceSegmenter,
+    Sam2PromptConfig,
+    Sam2RuntimeConfig,
+    mask_overlay as overlay_sam2_mask,
+)
 from rgb_guided_depth_postprocess import RgbGuidedPostprocessConfig, confidence_overlay, postprocess_depth
 from rgb_edge_depth_refine import EdgeDepthRefineConfig, refine_depth_anchors
 
@@ -37,6 +52,10 @@ class FrameData:
     any2full_depth: np.ndarray | None
     any2full_overlay_rgb: np.ndarray | None
     any2full_path: Path | None
+    device_mask: np.ndarray | None
+    device_overlay_rgb: np.ndarray | None
+    device_mask_path: Path | None
+    device_info: dict | None
     cloud_points: np.ndarray
     cloud_colors: np.ndarray
     projected_depth_count: int
@@ -115,24 +134,66 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Do not clean sparse aligned-depth anchors with RGB/depth edges before Any2Full.",
     )
-    parser.add_argument("--edge-rgb-percentile", type=float, default=88.0)
-    parser.add_argument("--edge-dilate-px", type=int, default=3)
-    parser.add_argument("--edge-depth-jump-abs-m", type=float, default=0.18)
-    parser.add_argument("--edge-depth-jump-rel", type=float, default=0.08)
+    parser.add_argument("--edge-rgb-percentile", type=float, default=90.0)
+    parser.add_argument("--edge-dilate-px", type=int, default=4)
+    parser.add_argument("--edge-depth-jump-abs-m", type=float, default=0.12)
+    parser.add_argument("--edge-depth-jump-rel", type=float, default=0.06)
     parser.add_argument("--edge-min-keep-ratio", type=float, default=0.35)
+    parser.add_argument("--edge-isolated-radius-px", type=int, default=2)
+    parser.add_argument("--edge-isolated-min-neighbors", type=int, default=2)
     parser.add_argument(
         "--disable-rgb-guided-postprocess",
         action="store_true",
         help="Do not run RGB-guided edge-aware refinement after Any2Full.",
     )
-    parser.add_argument("--post-color-sigma", type=float, default=24.0)
-    parser.add_argument("--post-depth-sigma-m", type=float, default=0.28)
-    parser.add_argument("--post-iterations", type=int, default=4)
+    parser.add_argument("--post-color-sigma", type=float, default=18.0)
+    parser.add_argument("--post-depth-sigma-m", type=float, default=0.20)
+    parser.add_argument("--post-iterations", type=int, default=3)
     parser.add_argument("--post-anchor-radius-px", type=int, default=3)
-    parser.add_argument("--post-edge-percentile", type=float, default=88.0)
+    parser.add_argument("--post-edge-percentile", type=float, default=90.0)
     parser.add_argument("--post-edge-dilate-px", type=int, default=2)
     parser.add_argument("--post-sparse-trust-radius-px", type=int, default=12)
     parser.add_argument("--post-sparse-blend", type=float, default=0.85)
+    parser.add_argument("--post-depth-edge-abs-m", type=float, default=0.12)
+    parser.add_argument("--post-depth-edge-rel", type=float, default=0.06)
+    parser.add_argument("--post-boundary-dilate-px", type=int, default=2)
+    parser.add_argument("--post-plane-smooth-radius-px", type=int, default=5)
+    parser.add_argument("--post-plane-smooth-weight", type=float, default=0.35)
+    parser.add_argument(
+        "--disable-device-segmentation",
+        action="store_true",
+        help="Disable cursor-prompted device segmentation.",
+    )
+    parser.add_argument("--sam2-model-id", default=DEFAULT_SAM2_MODEL_ID)
+    parser.add_argument("--sam2-checkpoint", type=Path, default=None)
+    parser.add_argument("--sam2-config", default=None)
+    parser.add_argument("--sam2-device", default="cuda")
+    parser.add_argument("--segment-cache-dir", type=Path, default=Path("viewer_device_segments"))
+    parser.add_argument("--cursor-nearest-depth-radius-px", type=int, default=10)
+    parser.add_argument("--seg-depth-abs-band-m", type=float, default=0.18)
+    parser.add_argument("--seg-depth-rel-band", type=float, default=0.12)
+    parser.add_argument("--seg-positive-window-px", type=int, default=90)
+    parser.add_argument("--seg-negative-inner-radius-px", type=int, default=36)
+    parser.add_argument("--seg-negative-outer-radius-px", type=int, default=150)
+    parser.add_argument("--seg-depth-local-jump-m", type=float, default=0.06)
+    parser.add_argument("--seg-depth-local-jump-rel", type=float, default=0.05)
+    parser.add_argument("--seg-depth-global-span-m", type=float, default=0.55)
+    parser.add_argument("--seg-depth-max-radius-px", type=int, default=170)
+    parser.add_argument("--seg-depth-bbox-pad-px", type=int, default=10)
+    parser.add_argument("--seg-depth-max-component-area-ratio", type=float, default=0.08)
+    parser.add_argument(
+        "--seg-depth-ignore-texture-edges",
+        action="store_true",
+        help="Allow RGB-D prompt growth across pure RGB texture edges when depth is continuous.",
+    )
+    parser.add_argument("--seg-refine-depth-span-m", type=float, default=1.20)
+    parser.add_argument(
+        "--seg-enable-depth-component-union",
+        action="store_true",
+        help="Union the depth-grown RGB-D component back into the SAM2 mask during refinement.",
+    )
+    parser.add_argument("--seg-refine-open-px", type=int, default=2)
+    parser.add_argument("--seg-refine-close-px", type=int, default=5)
     parser.add_argument("--export-dir", type=Path, default=None, help="Optional directory for overlay PNG exports.")
     parser.add_argument("--export-ply-dir", type=Path, default=None, help="Optional directory for RGB-colored PLY point-cloud exports.")
     parser.add_argument(
@@ -689,6 +750,8 @@ def run_any2full_completion(
     confidence_path = work_dir / "confidence_rgb_guided.npy"
     confidence_overlay_path = work_dir / "confidence_rgb_guided_overlay.png"
     post_edge_mask_path = work_dir / "post_rgb_edge_mask.png"
+    post_depth_edge_mask_path = work_dir / "post_depth_edge_mask.png"
+    post_corrected_mask_path = work_dir / "post_boundary_corrected_mask.png"
     Image.fromarray(frame.rgb.astype(np.uint8)).save(rgb_path)
     np.save(raw_sparse_path, frame.aligned_depth.astype(np.float32))
 
@@ -703,6 +766,8 @@ def run_any2full_completion(
                 depth_jump_abs_m=args.edge_depth_jump_abs_m,
                 depth_jump_rel=args.edge_depth_jump_rel,
                 min_keep_ratio=args.edge_min_keep_ratio,
+                isolated_radius_px=args.edge_isolated_radius_px,
+                isolated_min_neighbors=args.edge_isolated_min_neighbors,
             ),
         )
         any2full_input_depth = refined.depth
@@ -783,12 +848,19 @@ def run_any2full_completion(
                     edge_dilate_px=args.post_edge_dilate_px,
                     sparse_trust_radius_px=args.post_sparse_trust_radius_px,
                     sparse_blend=args.post_sparse_blend,
+                    depth_edge_abs_m=args.post_depth_edge_abs_m,
+                    depth_edge_rel=args.post_depth_edge_rel,
+                    boundary_dilate_px=args.post_boundary_dilate_px,
+                    plane_smooth_radius_px=args.post_plane_smooth_radius_px,
+                    plane_smooth_weight=args.post_plane_smooth_weight,
                 ),
             )
             np.save(refined_dense_path, post.depth.astype(np.float32))
             np.save(confidence_path, post.confidence.astype(np.float32))
             Image.fromarray(confidence_overlay(frame.rgb, post.confidence)).save(confidence_overlay_path)
             Image.fromarray(post.edge_mask.astype(np.uint8) * 255).save(post_edge_mask_path)
+            Image.fromarray(post.depth_edge_mask.astype(np.uint8) * 255).save(post_depth_edge_mask_path)
+            Image.fromarray(post.corrected_mask.astype(np.uint8) * 255).save(post_corrected_mask_path)
             preview_depth = post.depth
             preview_path = refined_dense_path
             print(
@@ -804,8 +876,184 @@ def run_any2full_completion(
     frame.any2full_path = preview_path
     frame.any2full_depth_count = int(np.count_nonzero(preview_depth > 0))
     frame.frame_dir = work_dir
+    (work_dir / "meta.json").write_text(json.dumps(frame.meta, indent=2), encoding="utf-8")
     print(
         f"[any2full] loaded preview depth: {preview_path} valid={frame.any2full_depth_count}",
+        flush=True,
+    )
+    return frame
+
+
+def create_device_segmenter(args: argparse.Namespace) -> Sam2DeviceSegmenter | None:
+    if args.disable_device_segmentation:
+        return None
+    model_ids = [args.sam2_model_id]
+    if args.sam2_checkpoint is None:
+        for fallback in ("facebook/sam2.1-hiera-small", "facebook/sam2.1-hiera-tiny"):
+            if fallback not in model_ids:
+                model_ids.append(fallback)
+
+    last_error: Exception | None = None
+    for model_id in model_ids:
+        segmenter = Sam2DeviceSegmenter(
+            Sam2RuntimeConfig(
+                model_id=model_id,
+                checkpoint=args.sam2_checkpoint,
+                config=args.sam2_config,
+                device=args.sam2_device,
+            ),
+            Sam2PromptConfig(
+                depth_abs_band_m=args.seg_depth_abs_band_m,
+                depth_rel_band=args.seg_depth_rel_band,
+                positive_window_px=args.seg_positive_window_px,
+                negative_inner_radius_px=args.seg_negative_inner_radius_px,
+                negative_outer_radius_px=args.seg_negative_outer_radius_px,
+            ),
+        )
+        source = str(args.sam2_checkpoint) if args.sam2_checkpoint is not None else model_id
+        print(f"[device-seg] preloading SAM2: {source} on {args.sam2_device}", flush=True)
+        try:
+            segmenter.load()
+        except Exception as exc:
+            last_error = exc
+            print(f"[device-seg] SAM2 load failed for {source}: {exc}", flush=True)
+            if args.sam2_checkpoint is not None:
+                break
+            continue
+        print(f"[device-seg] SAM2 ready: {source}", flush=True)
+        return segmenter
+
+    print(f"[device-seg] disabled: SAM2 load failed: {last_error}", flush=True)
+    return None
+
+
+def run_device_segmentation(
+    frame: FrameData,
+    args: argparse.Namespace,
+    segmenter: Sam2DeviceSegmenter | None,
+) -> FrameData:
+    if args.disable_device_segmentation:
+        return frame
+
+    cursor_payload = frame.meta.get("cursor")
+    if cursor_payload is None:
+        print("[device-seg] skipped: no cursor_json in trigger payload", flush=True)
+        return frame
+
+    depth = frame.any2full_depth if frame.any2full_depth is not None else frame.aligned_depth
+    prompt = build_cursor_prompt(
+        frame.meta,
+        cursor_payload,
+        depth,
+        CursorPromptConfig(nearest_depth_radius_px=args.cursor_nearest_depth_radius_px),
+    )
+    frame.meta["cursor_prompt"] = prompt
+
+    work_dir = frame.frame_dir
+    if work_dir == Path(".") or str(work_dir) == ".":
+        cache_root = args.segment_cache_dir
+        if not cache_root.is_absolute():
+            cache_root = Path.cwd() / cache_root
+        work_dir = cache_root / f"network_{int(time.time() * 1000)}"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        frame.frame_dir = work_dir
+
+    rgb_path = work_dir / "rgb.png"
+    if not rgb_path.exists():
+        Image.fromarray(frame.rgb.astype(np.uint8)).save(rgb_path)
+    depth_path = work_dir / "device_depth_source.npy"
+    prompt_path = work_dir / "cursor_prompt.json"
+    cursor_path = work_dir / "cursor.json"
+    meta_path = work_dir / "meta.json"
+    np.save(depth_path, depth.astype(np.float32))
+    prompt_path.write_text(json.dumps(prompt, indent=2), encoding="utf-8")
+    cursor_path.write_text(json.dumps(cursor_payload, indent=2), encoding="utf-8")
+    meta_path.write_text(json.dumps(frame.meta, indent=2), encoding="utf-8")
+
+    if not prompt.get("valid", False):
+        print(f"[device-seg] skipped: invalid cursor prompt ({prompt.get('reason')})", flush=True)
+        return frame
+
+    rgbd_prompt_path = work_dir / "cursor_prompt_rgbd.json"
+    depth_component_path = work_dir / "device_depth_component_mask.png"
+    rgbd_prompt = build_rgbd_device_prompt(
+        depth,
+        prompt,
+        frame.rgb,
+        RgbdPromptConfig(
+            local_depth_jump_m=args.seg_depth_local_jump_m,
+            local_depth_jump_rel=args.seg_depth_local_jump_rel,
+            global_depth_span_m=args.seg_depth_global_span_m,
+            max_radius_px=args.seg_depth_max_radius_px,
+            bbox_pad_px=args.seg_depth_bbox_pad_px,
+            max_component_area_ratio=args.seg_depth_max_component_area_ratio,
+            rgb_edge_requires_depth_jump=args.seg_depth_ignore_texture_edges,
+        ),
+    )
+    prompt = rgbd_prompt.prompt
+    frame.meta["cursor_prompt"] = prompt
+    rgbd_prompt_path.write_text(json.dumps(prompt, indent=2), encoding="utf-8")
+    Image.fromarray(rgbd_prompt.component_mask.astype(np.uint8) * 255).save(depth_component_path)
+    print(
+        "[device-seg] rgbd prompt "
+        f"valid={prompt.get('rgbd_prompt_valid')} area={prompt.get('rgbd_component_area_px')} "
+        f"box={prompt.get('sam_box_xyxy')}",
+        flush=True,
+    )
+
+    if segmenter is None or not segmenter.ready:
+        print("[device-seg] skipped: SAM2 segmenter is not ready", flush=True)
+        return frame
+
+    raw_mask_path = work_dir / "device_mask_raw.png"
+    raw_overlay_path = work_dir / "device_mask_raw_overlay.png"
+    sam_meta_path = work_dir / "device_sam2_meta.json"
+    try:
+        sam_result = segmenter.segment(frame.rgb, depth, prompt)
+        Image.fromarray(sam_result.mask.astype(np.uint8) * 255).save(raw_mask_path)
+        Image.fromarray(overlay_sam2_mask(frame.rgb, sam_result.mask)).save(raw_overlay_path)
+        sam_info = {
+            "score": sam_result.score,
+            "sam_score": sam_result.sam_score,
+            "depth_consistency": sam_result.depth_consistency,
+            "selected_index": sam_result.selected_index,
+            "point_coords": sam_result.point_coords.astype(float).tolist(),
+            "point_labels": sam_result.point_labels.astype(int).tolist(),
+        }
+        sam_meta_path.write_text(json.dumps(sam_info, indent=2), encoding="utf-8")
+
+        refined = refine_device_mask(
+            frame.rgb,
+            depth,
+            sam_result.mask,
+            prompt,
+            RgbdMaskRefineConfig(
+                max_global_depth_span_m=args.seg_refine_depth_span_m,
+                depth_component_union=args.seg_enable_depth_component_union,
+                open_px=args.seg_refine_open_px,
+                close_px=args.seg_refine_close_px,
+            ),
+        )
+        info = write_refine_outputs(refined, frame.rgb, depth, work_dir, prefix="device")
+    except Exception as exc:
+        print(f"[device-seg] failed: {exc}", flush=True)
+        return frame
+
+    base_overlay = frame.any2full_overlay_rgb if frame.any2full_overlay_rgb is not None else frame.overlay_rgb
+    frame.device_mask = refined.mask
+    frame.device_overlay_rgb = overlay_device_mask(base_overlay, refined.mask)
+    frame.device_mask_path = Path(info["mask"])
+    frame.device_info = {
+        **info,
+        "prompt": str(prompt_path),
+        "rgbd_prompt": str(rgbd_prompt_path),
+        "depth_component_mask": str(depth_component_path),
+        "raw_mask": str(raw_mask_path),
+        "raw_overlay": str(raw_overlay_path),
+        "sam2_meta": str(sam_meta_path),
+    }
+    print(
+        f"[device-seg] mask={frame.device_mask_path} area={refined.area_px} bbox={refined.bbox_xyxy}",
         flush=True,
     )
     return frame
@@ -859,9 +1107,12 @@ def load_frame_from_payload(
     meta_json_str: str,
     min_depth: float,
     max_depth: float,
+    cursor_json_str: str | None = None,
 ) -> FrameData:
     """Load and align a frame from Quest 3 trigger payload bytes."""
     meta = json.loads(meta_json_str)
+    if cursor_json_str:
+        meta["cursor"] = json.loads(cursor_json_str)
     rgb = decode_rgb_payload(rgb_payload_bytes, rgb_format, meta)
 
     depth_meta = meta["depth"]
@@ -891,6 +1142,10 @@ def load_frame_from_payload(
         any2full_depth=None,
         any2full_overlay_rgb=None,
         any2full_path=None,
+        device_mask=None,
+        device_overlay_rgb=None,
+        device_mask_path=None,
+        device_info=None,
         cloud_points=cloud_points,
         cloud_colors=cloud_colors,
         projected_depth_count=int(np.count_nonzero(aligned > 0)),
@@ -968,6 +1223,10 @@ def load_frame(
         any2full_depth=any2full_depth,
         any2full_overlay_rgb=any2full_overlay_rgb,
         any2full_path=any2full_path,
+        device_mask=None,
+        device_overlay_rgb=None,
+        device_mask_path=None,
+        device_info=None,
         cloud_points=cloud_points,
         cloud_colors=cloud_colors,
         projected_depth_count=int(np.count_nonzero(aligned > 0)),
@@ -1073,6 +1332,7 @@ class _PayloadHandler(http.server.BaseHTTPRequestHandler):
         rgb_jpeg = parts.get("rgb_jpeg")
         depth_raw = parts.get("depth_raw")
         meta_json = parts.get("meta_json")
+        cursor_json = parts.get("cursor_json")
         if rgb_raw is None and rgb_jpeg is None:
             self.send_error(400, "missing RGB field: need rgb_raw or rgb_jpeg")
             return
@@ -1093,8 +1353,10 @@ class _PayloadHandler(http.server.BaseHTTPRequestHandler):
                 meta_json_str=meta_json.decode("utf-8"),
                 min_depth=viewer.args.min_depth,
                 max_depth=viewer.args.max_depth,
+                cursor_json_str=cursor_json.decode("utf-8") if cursor_json is not None else None,
             )
             frame = run_any2full_completion(frame, viewer.args, viewer.any2full_service)
+            frame = run_device_segmentation(frame, viewer.args, viewer.device_segmenter)
         except Exception as exc:
             print(f"[server] alignment failed: {exc}", flush=True)
             self.send_error(500, str(exc))
@@ -1114,6 +1376,13 @@ class _PayloadHandler(http.server.BaseHTTPRequestHandler):
                 "projected_pixels": int(frame.projected_depth_count),
                 "any2full_pixels": int(frame.any2full_depth_count),
                 "any2full": frame.any2full_path is not None,
+            },
+            "cursor": frame.meta.get("cursor_prompt", {"valid": False, "reason": "missing"}),
+            "device": {
+                "segmented": frame.device_mask_path is not None,
+                "mask": str(frame.device_mask_path) if frame.device_mask_path is not None else None,
+                "area_px": int(frame.device_info.get("area_px", 0)) if frame.device_info else 0,
+                "bbox_xyxy": frame.device_info.get("bbox_xyxy") if frame.device_info else None,
             },
             "cloud_points": int(frame.cloud_points.shape[0]),
         }
@@ -1155,6 +1424,7 @@ class RgbdViewer:
         self._network_frame_count = 0
         self._current_frame_name = "network"
         self.any2full_service: Any2FullService | None = None
+        self.device_segmenter: Sam2DeviceSegmenter | None = None
 
         self.root = tk.Tk()
         self.root.title("Quest 3 RGB-D Alignment Viewer")
@@ -1165,6 +1435,8 @@ class RgbdViewer:
             self.any2full_service = Any2FullService(self.args)
             if not self.any2full_service.start():
                 self.any2full_service = None
+        if self.args.server and not self.args.disable_device_segmentation:
+            self.device_segmenter = create_device_segmenter(self.args)
         if self.frames:
             self.load_current_frame()
         else:
@@ -1341,11 +1613,13 @@ class RgbdViewer:
         cloud = self.frame.cloud_points.shape[0]
         origin_x, origin_y = self.resolve_origin_xy()
         any2full_note = self.frame.any2full_path.name if self.frame.any2full_path is not None else "missing"
+        device_note = self.frame.device_mask_path.name if self.frame.device_mask_path is not None else "missing"
+        cursor_note = self.get_cursor_status_note()
         self.status_var.set(
             f"{self._current_frame_name} | RGB {rgb['resolution_w']}x{rgb['resolution_h']} | "
             f"depth {depth['resolution_w']}x{depth['resolution_h']} | "
             f"row-order {self.args.depth_origin} | preview {active_name} | origin ({origin_x}, {origin_y}) | "
-            f"projected {exact} | cloud {cloud} | any2full {any2full_note}"
+            f"projected {exact} | cloud {cloud} | any2full {any2full_note} | device {device_note} | cursor {cursor_note}"
         )
         self.cloud_var.set(
             f"Cloud points: {cloud}. 3D perspective view; drag to orbit, wheel to zoom."
@@ -1367,9 +1641,27 @@ class RgbdViewer:
 
     def get_active_overlay_image(self) -> np.ndarray:
         assert self.frame is not None
+        if self.frame.device_overlay_rgb is not None:
+            return self.frame.device_overlay_rgb
         if self.get_active_depth_source_name() == "any2full" and self.frame.any2full_overlay_rgb is not None:
             return self.frame.any2full_overlay_rgb
         return self.frame.overlay_rgb
+
+    def get_cursor_prompt(self) -> dict | None:
+        if self.frame is None:
+            return None
+        prompt = self.frame.meta.get("cursor_prompt")
+        return prompt if isinstance(prompt, dict) else None
+
+    def get_cursor_status_note(self) -> str:
+        prompt = self.get_cursor_prompt()
+        if prompt is None:
+            return "missing"
+        if prompt.get("valid", False):
+            x = prompt.get("rgb_x", "?")
+            y = prompt.get("rgb_y", "?")
+            return f"ok({x},{y})"
+        return str(prompt.get("reason", "invalid"))
 
     def get_active_nearest_index(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         source_name = self.get_active_depth_source_name()
@@ -1467,6 +1759,7 @@ class RgbdViewer:
         self.rgb_canvas.config(width=pil.width, height=pil.height)
         self.rgb_canvas.delete("all")
         self.rgb_canvas.create_image(0, 0, image=self.rgb_photo, anchor=tk.NW)
+        self.draw_cursor_prompt_overlay(pil.width, pil.height)
         if tooltip and tooltip_pos is not None:
             tx = min(max(int(tooltip_pos[0]) + 14, 8), max(8, pil.width - 330))
             lines = tooltip.count("\n") + 1
@@ -1489,6 +1782,74 @@ class RgbdViewer:
                 anchor=tk.NW,
                 font=("Consolas", 11),
             )
+
+    def draw_cursor_prompt_overlay(self, canvas_w: int, canvas_h: int) -> None:
+        prompt = self.get_cursor_prompt()
+        if prompt is None or not prompt.get("valid", False):
+            return
+        try:
+            rgb_x = float(prompt["rgb_x"])
+            rgb_y = float(prompt["rgb_y"])
+        except (KeyError, TypeError, ValueError):
+            return
+        assert self.frame is not None
+        rgb_h, rgb_w = self.frame.rgb.shape[:2]
+        if rgb_x < 0 or rgb_x >= rgb_w or rgb_y < 0 or rgb_y >= rgb_h:
+            return
+
+        x = int(round(rgb_x * self.rgb_scale))
+        y = int(round(rgb_y * self.rgb_scale))
+        radius = 13
+        arm = 21
+        x = int(np.clip(x, 0, max(0, canvas_w - 1)))
+        y = int(np.clip(y, 0, max(0, canvas_h - 1)))
+
+        self.rgb_canvas.create_oval(
+            x - radius,
+            y - radius,
+            x + radius,
+            y + radius,
+            outline="#ffffff",
+            width=4,
+        )
+        self.rgb_canvas.create_oval(
+            x - radius,
+            y - radius,
+            x + radius,
+            y + radius,
+            outline="#ffd400",
+            width=2,
+        )
+        self.rgb_canvas.create_line(x - arm, y, x + arm, y, fill="#ffd400", width=2)
+        self.rgb_canvas.create_line(x, y - arm, x, y + arm, fill="#ffd400", width=2)
+
+        depth_text = ""
+        depth_m = prompt.get("depth_sample_m", prompt.get("rgb_camera_z_m"))
+        if depth_m is not None:
+            try:
+                depth_text = f" {float(depth_m):.2f}m"
+            except (TypeError, ValueError):
+                depth_text = ""
+        label = f"Q3 cursor{depth_text}"
+        tx = min(max(x + 18, 8), max(8, canvas_w - 150))
+        ty = min(max(y - 28, 8), max(8, canvas_h - 24))
+        self.rgb_canvas.create_rectangle(
+            tx - 5,
+            ty - 3,
+            tx + 142,
+            ty + 20,
+            fill="#101010",
+            outline="#ffd400",
+            stipple="gray75",
+        )
+        self.rgb_canvas.create_text(
+            tx,
+            ty,
+            text=label,
+            fill="#ffd400",
+            anchor=tk.NW,
+            font=("Consolas", 10, "bold"),
+        )
 
     def clear_hover_panel(self) -> None:
         self.hover_summary_var.set("No active sample")

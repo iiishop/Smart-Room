@@ -10,11 +10,13 @@ import numpy as np
 
 @dataclass(frozen=True)
 class EdgeDepthRefineConfig:
-    rgb_edge_percentile: float = 88.0
-    edge_dilate_px: int = 3
-    depth_jump_abs_m: float = 0.18
-    depth_jump_rel: float = 0.08
+    rgb_edge_percentile: float = 90.0
+    edge_dilate_px: int = 4
+    depth_jump_abs_m: float = 0.12
+    depth_jump_rel: float = 0.06
     min_keep_ratio: float = 0.35
+    isolated_radius_px: int = 2
+    isolated_min_neighbors: int = 2
 
 
 @dataclass(frozen=True)
@@ -23,6 +25,7 @@ class EdgeDepthRefineResult:
     unsafe_mask: np.ndarray
     rgb_edge_mask: np.ndarray
     depth_jump_mask: np.ndarray
+    isolated_mask: np.ndarray
     removed_count: int
     kept_count: int
     original_valid_count: int
@@ -81,7 +84,7 @@ def refine_depth_anchors(
     original_valid = int(np.count_nonzero(valid))
     if original_valid == 0:
         empty = np.zeros(depth.shape, dtype=bool)
-        return EdgeDepthRefineResult(depth, empty, empty, empty, 0, 0, 0)
+        return EdgeDepthRefineResult(depth, empty, empty, empty, empty, 0, 0, 0)
 
     rgb_edges = rgb_edge_mask(rgb, config.rgb_edge_percentile, config.edge_dilate_px)
     depth_jumps = depth_jump_mask(
@@ -90,7 +93,12 @@ def refine_depth_anchors(
         config.depth_jump_rel,
         config.edge_dilate_px,
     )
-    unsafe = (rgb_edges | depth_jumps) & valid
+    isolated = isolated_depth_anchor_mask(
+        depth,
+        config.isolated_radius_px,
+        config.isolated_min_neighbors,
+    )
+    unsafe = (rgb_edges | depth_jumps | isolated) & valid
 
     candidate = depth.copy()
     candidate[unsafe] = 0.0
@@ -109,10 +117,21 @@ def refine_depth_anchors(
         unsafe_mask=unsafe,
         rgb_edge_mask=rgb_edges,
         depth_jump_mask=depth_jumps,
+        isolated_mask=isolated,
         removed_count=removed,
         kept_count=kept,
         original_valid_count=original_valid,
     )
+
+
+def isolated_depth_anchor_mask(depth: np.ndarray, radius_px: int, min_neighbors: int) -> np.ndarray:
+    valid = np.isfinite(depth) & (depth > 0)
+    if not np.any(valid):
+        return np.zeros(depth.shape, dtype=bool)
+    radius_px = max(1, int(radius_px))
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (radius_px * 2 + 1, radius_px * 2 + 1))
+    count = cv2.filter2D(valid.astype(np.uint8), cv2.CV_16U, kernel)
+    return valid & (count <= int(max(1, min_neighbors)))
 
 
 def main() -> None:
@@ -121,11 +140,13 @@ def main() -> None:
     parser.add_argument("--depth", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--mask-out", type=Path, default=None)
-    parser.add_argument("--rgb-edge-percentile", type=float, default=88.0)
-    parser.add_argument("--edge-dilate-px", type=int, default=3)
-    parser.add_argument("--depth-jump-abs-m", type=float, default=0.18)
-    parser.add_argument("--depth-jump-rel", type=float, default=0.08)
+    parser.add_argument("--rgb-edge-percentile", type=float, default=90.0)
+    parser.add_argument("--edge-dilate-px", type=int, default=4)
+    parser.add_argument("--depth-jump-abs-m", type=float, default=0.12)
+    parser.add_argument("--depth-jump-rel", type=float, default=0.06)
     parser.add_argument("--min-keep-ratio", type=float, default=0.35)
+    parser.add_argument("--isolated-radius-px", type=int, default=2)
+    parser.add_argument("--isolated-min-neighbors", type=int, default=2)
     args = parser.parse_args()
 
     bgr = cv2.imread(str(args.rgb), cv2.IMREAD_COLOR)
@@ -142,6 +163,8 @@ def main() -> None:
             depth_jump_abs_m=args.depth_jump_abs_m,
             depth_jump_rel=args.depth_jump_rel,
             min_keep_ratio=args.min_keep_ratio,
+            isolated_radius_px=args.isolated_radius_px,
+            isolated_min_neighbors=args.isolated_min_neighbors,
         ),
     )
     args.out.parent.mkdir(parents=True, exist_ok=True)
