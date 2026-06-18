@@ -186,6 +186,24 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Allow RGB-D prompt growth across pure RGB texture edges when depth is continuous.",
     )
+    parser.add_argument(
+        "--seg-enable-stage2",
+        action="store_true",
+        default=True,
+        help="Enable stage-2 BFS growth past texture edges (default: on)",
+    )
+    parser.add_argument(
+        "--seg-disable-stage2",
+        action="store_false",
+        dest="seg_enable_stage2",
+        help="Disable stage-2 BFS growth",
+    )
+    parser.add_argument(
+        "--seg-stage2-dilate-px",
+        type=int,
+        default=8,
+        help="Dilation radius before stage-2 growth (default: 8)",
+    )
     parser.add_argument("--seg-refine-depth-span-m", type=float, default=1.20)
     parser.add_argument(
         "--seg-enable-depth-component-union",
@@ -988,6 +1006,8 @@ def run_device_segmentation(
             bbox_pad_px=args.seg_depth_bbox_pad_px,
             max_component_area_ratio=args.seg_depth_max_component_area_ratio,
             rgb_edge_requires_depth_jump=args.seg_depth_ignore_texture_edges,
+            enable_stage2_growth=args.seg_enable_stage2,
+            stage2_dilate_px=args.seg_stage2_dilate_px,
         ),
     )
     prompt = rgbd_prompt.prompt

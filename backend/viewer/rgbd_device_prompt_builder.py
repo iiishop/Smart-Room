@@ -24,6 +24,9 @@ class RgbdPromptConfig:
     rgb_edge_percentile: float = 92.0
     rgb_edge_dilate_px: int = 1
     rgb_edge_requires_depth_jump: bool = False
+    enable_stage2_growth: bool = True
+    stage2_dilate_px: int = 8
+    stage2_max_radius_px: int = 250
 
 
 @dataclass(frozen=True)
@@ -129,6 +132,62 @@ def _grow_depth_component(
             queue_y.append(ny)
 
     full = np.zeros(depth.shape, dtype=bool)
+    full[y0:y1, x0:x1] = component
+    return full
+
+
+def _grow_depth_component_stage2(
+    depth: np.ndarray,
+    seed_mask: np.ndarray,
+    seed_depth: float,
+    config: RgbdPromptConfig,
+) -> np.ndarray:
+    """Grow past RGB edges to recover the enclosing same-depth object."""
+    bbox = _mask_bbox(seed_mask, 0)
+    if bbox is None:
+        return seed_mask.copy()
+
+    h, w = depth.shape
+    x0, y0, x1, y1 = bbox
+    radius = max(0, int(config.stage2_max_radius_px))
+    x0 = max(0, x0 - radius)
+    y0 = max(0, y0 - radius)
+    x1 = min(w, x1 + radius + 1)
+    y1 = min(h, y1 + radius + 1)
+
+    crop = depth[y0:y1, x0:x1].astype(np.float32, copy=False)
+    valid = np.isfinite(crop) & (crop > 0)
+    global_ok = valid & (np.abs(crop - np.float32(seed_depth)) <= np.float32(config.global_depth_span_m))
+    if not global_ok.any():
+        return seed_mask.copy()
+
+    local_jump = max(float(config.local_depth_jump_m), abs(float(seed_depth)) * float(config.local_depth_jump_rel))
+    component = seed_mask[y0:y1, x0:x1].copy()
+    queue_y, queue_x = np.where(component & global_ok)
+    if queue_x.size == 0:
+        return seed_mask.copy()
+
+    queue_x = queue_x.astype(int).tolist()
+    queue_y = queue_y.astype(int).tolist()
+    h_crop, w_crop = crop.shape
+    head = 0
+    while head < len(queue_x):
+        cx = queue_x[head]
+        cy = queue_y[head]
+        head += 1
+        current_depth = float(crop[cy, cx])
+        for nx, ny in ((cx + 1, cy), (cx - 1, cy), (cx, cy + 1), (cx, cy - 1)):
+            if nx < 0 or nx >= w_crop or ny < 0 or ny >= h_crop or component[ny, nx]:
+                continue
+            if not global_ok[ny, nx]:
+                continue
+            if abs(float(crop[ny, nx]) - current_depth) > local_jump:
+                continue
+            component[ny, nx] = True
+            queue_x.append(nx)
+            queue_y.append(ny)
+
+    full = seed_mask.copy()
     full[y0:y1, x0:x1] = component
     return full
 
@@ -266,6 +325,22 @@ def build_rgbd_device_prompt(
     component = _grow_depth_component(depth, rgb, seed_x, seed_y, seed_depth, config)
     component = _largest_or_seed_component(component, seed_x, seed_y)
     component_area = int(np.count_nonzero(component))
+    if config.enable_stage2_growth and component_area > 0:
+        radius = max(0, int(config.stage2_dilate_px))
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (radius * 2 + 1, radius * 2 + 1))
+        stage2_seed = cv2.dilate(component.astype(np.uint8), kernel, iterations=1).astype(bool)
+        stage2_component = _grow_depth_component_stage2(depth, stage2_seed, seed_depth, config)
+        stage2_component = _largest_or_seed_component(stage2_component, seed_x, seed_y)
+        stage2_area = int(np.count_nonzero(stage2_component))
+        stage2_bbox = _mask_bbox(stage2_component, config.bbox_pad_px)
+        stage2_bbox_ratio = 0.0
+        if stage2_bbox is not None:
+            x0, y0, x1, y1 = stage2_bbox
+            stage2_bbox_ratio = float((x1 - x0 + 1) * (y1 - y0 + 1)) / float(depth.shape[0] * depth.shape[1])
+        if stage2_area > int(component_area * 1.5) and stage2_bbox_ratio <= float(config.max_component_area_ratio):
+            component = stage2_component
+            component_area = stage2_area
+
     bbox = _mask_bbox(component, config.bbox_pad_px)
     bbox_area_ratio = 0.0
     if bbox is not None:
