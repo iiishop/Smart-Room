@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import http.server
 import json
 import math
+import threading
 from dataclasses import dataclass
+from email.parser import BytesParser
+from email.policy import default as default_email_policy
 from pathlib import Path
 
 import cv2
@@ -32,6 +36,7 @@ class FrameData:
     cloud_colors: np.ndarray
     projected_depth_count: int
     any2full_depth_count: int
+    alignment_mode: str
 
 
 def parse_args() -> argparse.Namespace:
@@ -50,12 +55,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--view-size", type=int, default=960, help="Square RGB display size in pixels.")
     parser.add_argument("--cloud-width", type=int, default=980, help="Point-cloud canvas width.")
     parser.add_argument("--cloud-height", type=int, default=760, help="Point-cloud canvas height.")
+    parser.add_argument(
+        "--mode",
+        choices=("sdk_reprojection", "legacy_pinhole", "screen_space"),
+        default="sdk_reprojection",
+        help="Alignment model. sdk_reprojection reproduces Meta EnvironmentDepthUtils.",
+    )
     parser.add_argument("--depth-origin",
         choices=("raw", "flip_y"),
         default="raw",
         help="Depth row order. Use flip_y if the saved RenderTexture readback is vertically inverted.",
     )
     parser.add_argument("--no-ui", action="store_true", help="Load and align all frames, then print stats.")
+    parser.add_argument(
+        "--server",
+        action="store_true",
+        help="Start HTTP server on port 8500 to accept trigger payloads from Quest 3.",
+    )
     parser.add_argument("--export-dir", type=Path, default=None, help="Optional directory for overlay PNG exports.")
     parser.add_argument("--export-ply-dir", type=Path, default=None, help="Optional directory for RGB-colored PLY point-cloud exports.")
     parser.add_argument(
@@ -96,7 +112,15 @@ def read_depth_ndc(frame_dir: Path, width: int, height: int) -> np.ndarray:
     return raw.reshape(height, width)
 
 
-def ndc_to_linear_depth(depth_ndc: np.ndarray, near: float, far: float) -> np.ndarray:
+def ndc_to_linear_depth_legacy(depth_ndc: np.ndarray, near: float, far: float) -> np.ndarray:
+    """DEPRECATED: Derives (x, y) from near/far — mathematically imprecise for Quest 3.
+
+    The correct approach uses raw_depth_to_linear_m() with the actual GPU
+    zbuffer_x / zbuffer_y from the capture meta, which is the direct inverse
+    of Meta's _EnvironmentDepthZBufferParams formula.
+
+    This function is kept only for diagnostic comparison in load_frame().
+    """
     if math.isinf(far) or far < near:
         x, y = -2.0 * near, -1.0
     else:
@@ -109,6 +133,39 @@ def ndc_to_linear_depth(depth_ndc: np.ndarray, near: float, far: float) -> np.nd
         denom,
         out=np.zeros_like(depth_ndc, dtype=np.float32),
         where=np.abs(denom) > 1e-8,
+    )
+
+
+def raw_depth_to_linear_m(raw_depth: np.ndarray, depth_meta: dict) -> np.ndarray:
+    """Convert Quest 3 raw NDC depth [0, 1] to linear metres.
+
+    Uses the actual GPU ZBufferParams from Meta's _EnvironmentDepthZBufferParams
+    shader global — the exact inverse of the GPU-side formula:
+        z_ndc = ZBP.x / linear_depth - ZBP.y
+        → linear_depth = ZBP.x / (z_ndc + ZBP.y)
+
+    This matches quest3server/tracking/rgbd_final_alignment.py.
+    """
+    zbuffer_x = float(depth_meta["zbuffer_x"])
+    zbuffer_y = float(depth_meta["zbuffer_y"])
+    ndc = raw_depth.astype(np.float32) * 2.0 - 1.0
+    denom = ndc + np.float32(zbuffer_y)
+    return np.divide(
+        np.float32(zbuffer_x),
+        denom,
+        out=np.zeros_like(raw_depth, dtype=np.float32),
+        where=np.abs(denom) > 1e-8,
+    )
+
+
+def rgb_intrinsics(rgb_meta: dict) -> np.ndarray:
+    return np.array(
+        [
+            [float(rgb_meta["focal_length_x"]), 0.0, float(rgb_meta["principal_point_x"])],
+            [0.0, float(rgb_meta["focal_length_y"]), float(rgb_meta["principal_point_y"])],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=np.float32,
     )
 
 
@@ -414,10 +471,60 @@ def find_any2full_depth_path(frame_dir: Path) -> Path | None:
     return None
 
 
+def load_frame_from_payload(
+    rgb_jpeg_bytes: bytes,
+    depth_raw_bytes: bytes,
+    meta_json_str: str,
+    min_depth: float,
+    max_depth: float,
+) -> FrameData:
+    """Load and align a frame from Quest 3 trigger payload bytes."""
+    meta = json.loads(meta_json_str)
+    rgb = cv2.imdecode(np.frombuffer(rgb_jpeg_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if rgb is None:
+        raise ValueError("rgb_jpeg payload could not be decoded")
+    rgb = cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB)
+
+    depth_meta = meta["depth"]
+    depth_w = int(depth_meta["resolution_w"])
+    depth_h = int(depth_meta["resolution_h"])
+    depth_ndc = np.frombuffer(depth_raw_bytes, dtype=np.float32)
+    expected = depth_w * depth_h
+    if depth_ndc.size != expected:
+        raise ValueError(f"depth_raw payload has {depth_ndc.size} floats, expected {expected}")
+    depth_ndc = depth_ndc.reshape((depth_h, depth_w))
+
+    depth_m = raw_depth_to_linear_m(depth_ndc, depth_meta)
+    aligned, points_rgb_all, _ = align_depth_to_rgb_sdk(depth_m, meta, min_depth, max_depth)
+    if not np.any(aligned > 0):
+        print("  [WARN] alignment produced no valid depth pixels")
+
+    overlay_rgb = make_depth_overlay(rgb, aligned, min_depth, max_depth)
+    cloud_points, cloud_colors = sample_cloud_colors(rgb, points_rgb_all, meta["rgb"])
+    return FrameData(
+        frame_dir=Path("."),
+        meta=meta,
+        rgb=rgb,
+        depth_ndc=depth_ndc,
+        depth_m=depth_m,
+        aligned_depth=aligned,
+        overlay_rgb=overlay_rgb,
+        any2full_depth=None,
+        any2full_overlay_rgb=None,
+        any2full_path=None,
+        cloud_points=cloud_points,
+        cloud_colors=cloud_colors,
+        projected_depth_count=int(np.count_nonzero(aligned > 0)),
+        any2full_depth_count=0,
+        alignment_mode="sdk_reprojection",
+    )
+
+
 def load_frame(
     frame_dir: Path,
     min_depth: float,
     max_depth: float,
+    mode: str = "sdk_reprojection",
     depth_origin: str = "raw",
 ) -> FrameData:
     meta = load_meta(frame_dir)
@@ -428,13 +535,36 @@ def load_frame(
     depth_ndc = read_depth_ndc(frame_dir, depth_w, depth_h)
     if depth_origin == "flip_y":
         depth_ndc = np.flipud(depth_ndc)
-    depth_m = ndc_to_linear_depth(
-        depth_ndc,
-        float(depth_meta["near_z"]),
-        float(depth_meta.get("far_z", math.inf)),
-    )
 
-    aligned, points_rgb_all, _ = align_depth_to_rgb_sdk(depth_m, meta, min_depth, max_depth)
+    # Primary: correct GPU zbuffer-param conversion (matches quest3server backend)
+    depth_m = raw_depth_to_linear_m(depth_ndc, depth_meta)
+
+    # Feedback: compare against legacy near-derived method
+    near_z = float(depth_meta["near_z"])
+    far_z = float(depth_meta.get("far_z", math.inf))
+    depth_m_legacy = ndc_to_linear_depth_legacy(depth_ndc, near_z, far_z)
+    valid_both = (depth_m > 0) & (depth_m_legacy > 0)
+    if valid_both.any():
+        abs_diff = np.abs(depth_m[valid_both] - depth_m_legacy[valid_both])
+        max_err = float(np.max(abs_diff))
+        mean_err = float(np.mean(abs_diff))
+        # Only report when error is meaningful (> 1 mm)
+        if max_err > 0.001:
+            print(
+                f"  [NDC→linear] legacy depth error vs GPU zbuffer: "
+                f"max={max_err:.4f}m, mean={mean_err:.4f}m, "
+                f"pixels_compared={int(np.count_nonzero(valid_both))}",
+                flush=True,
+            )
+    else:
+        print(f"  [NDC→linear] no valid pixels to compare depth methods")
+
+    if mode == "sdk_reprojection":
+        aligned, points_rgb_all, _ = align_depth_to_rgb_sdk(depth_m, meta, min_depth, max_depth)
+    elif mode == "screen_space":
+        aligned, points_rgb_all, _ = align_depth_to_rgb_screen_space(depth_m, meta, min_depth, max_depth)
+    else:
+        raise ValueError(f"Unsupported mode: {mode}")
     if aligned is None or not np.any(aligned > 0):
         print(f"  [WARN] {frame_dir.name}: alignment produced no valid depth pixels")
 
@@ -463,6 +593,7 @@ def load_frame(
         cloud_colors=cloud_colors,
         projected_depth_count=int(np.count_nonzero(aligned > 0)),
         any2full_depth_count=int(np.count_nonzero(any2full_depth > 0)) if any2full_depth is not None else 0,
+        alignment_mode=mode,
     )
 
 
@@ -480,6 +611,90 @@ def resize_for_display(image: np.ndarray, max_size: int) -> tuple[Image.Image, f
     out_h = max(1, int(round(h * scale)))
     resized = cv2.resize(image, (out_w, out_h), interpolation=cv2.INTER_AREA)
     return Image.fromarray(resized), scale
+
+
+def _parse_multipart(body: bytes, content_type: str) -> dict[str, bytes]:
+    message = BytesParser(policy=default_email_policy).parsebytes(
+        f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("utf-8") + body
+    )
+    parts: dict[str, bytes] = {}
+    for part in message.iter_parts():
+        name = part.get_param("name", header="content-disposition")
+        if not name:
+            continue
+        payload = part.get_payload(decode=True)
+        if payload is not None:
+            parts[name] = payload
+    return parts
+
+
+class _PayloadHandler(http.server.BaseHTTPRequestHandler):
+    viewer_ref: "RgbdViewer | None" = None
+
+    def do_POST(self) -> None:
+        if self.path != "/api/track/start-final-rgbd":
+            self.send_error(404)
+            return
+
+        content_type = self.headers.get("Content-Type", "")
+        if "multipart/form-data" not in content_type:
+            self.send_error(400, "expected multipart/form-data")
+            return
+
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self.send_error(400, "invalid Content-Length")
+            return
+        body = self.rfile.read(content_length)
+
+        try:
+            parts = _parse_multipart(body, content_type)
+        except Exception as exc:
+            self.send_error(400, f"invalid multipart payload: {exc}")
+            return
+
+        rgb_jpeg = parts.get("rgb_jpeg")
+        depth_raw = parts.get("depth_raw")
+        meta_json = parts.get("meta_json")
+        if rgb_jpeg is None or depth_raw is None or meta_json is None:
+            self.send_error(400, "missing fields: need rgb_jpeg, depth_raw, meta_json")
+            return
+
+        viewer = self.viewer_ref
+        if viewer is None:
+            self.send_error(503, "viewer not ready")
+            return
+
+        try:
+            frame = load_frame_from_payload(
+                rgb_jpeg_bytes=rgb_jpeg,
+                depth_raw_bytes=depth_raw,
+                meta_json_str=meta_json.decode("utf-8"),
+                min_depth=viewer.args.min_depth,
+                max_depth=viewer.args.max_depth,
+            )
+        except Exception as exc:
+            print(f"[server] alignment failed: {exc}", flush=True)
+            self.send_error(500, str(exc))
+            return
+
+        viewer.root.after(0, lambda: viewer._on_network_frame(frame, rgb_jpeg))
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"ok")
+
+    def log_message(self, format: str, *args: object) -> None:
+        print(f"[server] {format % args}", flush=True)
+
+
+def _start_server(viewer: "RgbdViewer", port: int = 8500) -> threading.Thread:
+    _PayloadHandler.viewer_ref = viewer
+    server = http.server.HTTPServer(("0.0.0.0", port), _PayloadHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    print(f"[server] listening on :{port}", flush=True)
+    return thread
 
 
 class RgbdViewer:
@@ -633,6 +848,15 @@ class RgbdViewer:
         self.yaw = -0.65
         self.pitch = -0.28
         self.zoom = 1.8
+        self.update_rgb_image()
+        self.render_cloud()
+        self.update_status()
+
+    def _on_network_frame(self, frame: FrameData, rgb_jpeg: bytes) -> None:
+        _ = rgb_jpeg
+        self.frame = frame
+        self._nearest_cache = {}
+        self._last_hover_display_xy = None
         self.update_rgb_image()
         self.render_cloud()
         self.update_status()
@@ -1016,7 +1240,7 @@ def export_overlays(frames: list[Path], args: argparse.Namespace) -> None:
     assert args.export_dir is not None
     args.export_dir.mkdir(parents=True, exist_ok=True)
     for frame_dir in frames:
-        frame = load_frame(frame_dir, args.min_depth, args.max_depth, args.depth_origin)
+        frame = load_frame(frame_dir, args.min_depth, args.max_depth, args.mode, args.depth_origin)
         out = args.export_dir / f"{frame_dir.name}_aligned_overlay.png"
         cv2.imwrite(str(out), cv2.cvtColor(frame.overlay_rgb, cv2.COLOR_RGB2BGR))
 
@@ -1042,14 +1266,14 @@ def export_point_clouds(frames: list[Path], args: argparse.Namespace) -> None:
     assert args.export_ply_dir is not None
     args.export_ply_dir.mkdir(parents=True, exist_ok=True)
     for frame_dir in frames:
-        frame = load_frame(frame_dir, args.min_depth, args.max_depth, args.depth_origin)
+        frame = load_frame(frame_dir, args.min_depth, args.max_depth, args.mode, args.depth_origin)
         out = args.export_ply_dir / f"{frame_dir.name}_cloud_rgb_camera.ply"
         write_ascii_ply(out, frame.cloud_points, frame.cloud_colors)
 
 
 def print_stats(frames: list[Path], args: argparse.Namespace) -> None:
     for frame_dir in frames:
-        frame = load_frame(frame_dir, args.min_depth, args.max_depth, args.depth_origin)
+        frame = load_frame(frame_dir, args.min_depth, args.max_depth, args.mode, args.depth_origin)
         rgb = frame.meta["rgb"]
         depth = frame.meta["depth"]
         exact = int(np.count_nonzero(frame.aligned_depth > 0))
@@ -1075,6 +1299,8 @@ def main() -> None:
         print_stats(frames, args)
         return
     viewer = RgbdViewer(args, frames)
+    if args.server:
+        _start_server(viewer, port=8500)
     viewer.run()
 
 
