@@ -427,9 +427,7 @@ class DashboardWindow(QMainWindow):
         w = QWidget()
         layout = QVBoxLayout()
 
-        # Hover info bar
-        self._lbl_preview_hover = QLabel("Hover over image for pixel coords and depth")
-        layout.addWidget(self._lbl_preview_hover)
+        self._lbl_preview_hover = None
 
         # Unified RGB-D Overlay
         overlay_group = QGroupBox("RGB-D Aligned Overlay")
@@ -443,6 +441,24 @@ class DashboardWindow(QMainWindow):
             "background-color: #0a1322; border-radius: 8px;"
         )
         overlay_layout.addWidget(self._lbl_rgbd_overlay)
+        self._hover_tooltip = QLabel(self._lbl_rgbd_overlay)
+        self._hover_tooltip.hide()
+        self._hover_tooltip.setStyleSheet(
+            """
+            QLabel {
+                background-color: rgba(0, 0, 0, 200);
+                color: #e0e0e0;
+                font-family: 'Consolas', 'Courier New', monospace;
+                font-size: 12px;
+                padding: 4px 8px;
+                border: 1px solid #444;
+                border-radius: 4px;
+            }
+            """
+        )
+        self._hover_tooltip.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
+        )
         overlay_group.setLayout(overlay_layout)
         layout.addWidget(overlay_group, stretch=1)
 
@@ -1030,13 +1046,24 @@ class DashboardWindow(QMainWindow):
             if etype == QEvent.Type.MouseMove:
                 pos = event.position().toPoint()
                 self._update_preview_hover(pos.x(), pos.y())
+                if self._hover_tooltip is not None and not self._hover_tooltip.isHidden():
+                    tip_x = pos.x() + 16
+                    tip_y = pos.y() + 16
+                    overlay_w = self._lbl_rgbd_overlay.width()
+                    overlay_h = self._lbl_rgbd_overlay.height()
+                    tip_w = self._hover_tooltip.width()
+                    tip_h = self._hover_tooltip.height()
+                    if tip_x + tip_w > overlay_w:
+                        tip_x = pos.x() - tip_w - 8
+                    if tip_y + tip_h > overlay_h:
+                        tip_y = pos.y() - tip_h - 8
+                    self._hover_tooltip.move(max(0, tip_x), max(0, tip_y))
             elif etype == QEvent.Type.MouseButtonPress:
                 pos = event.position().toPoint()
                 self._on_rgb_click_v2(pos.x(), pos.y())
             elif etype == QEvent.Type.Leave:
-                self._lbl_preview_hover.setText(
-                    "Hover over image for pixel coords and depth"
-                )
+                if self._hover_tooltip is not None:
+                    self._hover_tooltip.hide()
         return super().eventFilter(watched, event)
 
     def _map_preview_pos_to_source_pixel(self, mx: int, my: int) -> tuple[int, int] | None:
@@ -1062,14 +1089,12 @@ class DashboardWindow(QMainWindow):
     def _update_preview_hover(self, mx: int, my: int) -> None:
         mapped = self._map_preview_pos_to_source_pixel(mx, my)
         if mapped is None:
-            self._lbl_preview_hover.setText(
-                "Hover over image for pixel coords and depth"
-            )
+            if self._hover_tooltip is not None:
+                self._hover_tooltip.hide()
             return
         px, py = mapped
 
-        # Query depth from aligned depth API (may return None)
-        depth_str = "-"
+        text = f"({px},{py})  no depth"
         try:
             req = urllib.request.Request(
                 f"{API_BASE}/api/depth/at?px={px}&py={py}", method="GET",
@@ -1077,16 +1102,23 @@ class DashboardWindow(QMainWindow):
             with urllib.request.urlopen(req, timeout=0.3) as res:
                 d = json.loads(res.read().decode("utf-8"))
             dm = d.get("depth_m")
-            if dm is not None:
-                depth_str = f"{dm:.3f}m"
-            else:
-                depth_str = "(no depth)"
+            if dm is not None and d.get("valid"):
+                src = d.get("source", "?")
+                x = d.get("rgb_cam_x", 0)
+                y = d.get("rgb_cam_y", 0)
+                z = d.get("rgb_cam_z", 0)
+                text = f"XYZ = ({x:.3f}, {y:.3f}, {z:.3f}) m"
+                if src == "nearest":
+                    dist = d.get("distance_px", 0)
+                    text += f"  (~{dist:.0f}px)"
         except Exception:
-            depth_str = "(query failed)"
+            text = f"({px},{py})  (query failed)"
 
-        self._lbl_preview_hover.setText(
-            f"Pixel: ({px},{py}) | Depth: {depth_str}",
-        )
+        if self._hover_tooltip is not None:
+            self._hover_tooltip.setText(text)
+            self._hover_tooltip.adjustSize()
+            self._hover_tooltip.raise_()
+            self._hover_tooltip.show()
 
     def _fetch_aligned_depth(self) -> None:
         """Fetch the aligned-depth heatmap from the backend (one HTTP request per refresh).
@@ -1237,8 +1269,13 @@ class DashboardWindow(QMainWindow):
     # ═══════════════════════ Cleanup ══════════════════════════════════
 
     def closeEvent(self, event) -> None:
-        self._rgb_socket.abort()
-        self._depth_socket.abort()
+        for attr in ("_rgb_socket", "_depth_socket", "_rgbd_overlay_socket"):
+            sock = getattr(self, attr, None)
+            if sock is not None:
+                try:
+                    sock.abort()
+                except Exception:
+                    pass
         super().closeEvent(event)
 
 
