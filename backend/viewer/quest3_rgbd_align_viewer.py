@@ -1367,6 +1367,16 @@ def _parse_multipart(body: bytes, content_type: str) -> dict[str, bytes]:
     return parts
 
 
+def _build_device_contour(frame: FrameData) -> list[dict[str, float]] | None:
+    contour = getattr(frame, "device_contour_3d", None)
+    if contour is None or len(contour) == 0:
+        return None
+    return [
+        {"x": round(float(point[0]), 4), "y": round(float(point[1]), 4), "z": round(float(point[2]), 4)}
+        for point in contour
+    ]
+
+
 class _PayloadHandler(http.server.BaseHTTPRequestHandler):
     viewer_ref: "RgbdViewer | None" = None
 
@@ -1455,8 +1465,8 @@ class _PayloadHandler(http.server.BaseHTTPRequestHandler):
                 "mask": str(frame.device_mask_path) if frame.device_mask_path is not None else None,
                 "area_px": int(frame.device_info.get("area_px", 0)) if frame.device_info else 0,
                 "bbox_xyxy": frame.device_info.get("bbox_xyxy") if frame.device_info else None,
+                "contour_3d": _build_device_contour(frame),
             },
-            "contour_3d": frame.device_contour_3d or [],
             "cloud_points": int(frame.cloud_points.shape[0]),
         }
         body = json.dumps(response).encode("utf-8")

@@ -67,6 +67,8 @@ namespace SmartRoom.Tracking
         private Quest3RgbdCaptureFinal.CapturePayload _lastCapturePayload;
         private LineRenderer _contourRenderer;
         private GameObject _contourObject;
+        private GameObject _statusSphere;
+        private float _bPressTime = -1f;
 
         private void Awake()
         {
@@ -93,10 +95,33 @@ namespace SmartRoom.Tracking
                 Debug.Log($"[TrackingManager] Anchor mode: {(_currentLabel == 1 ? "positive (green)" : "negative (red)")}");
             }
 
-            if (OVRInput.GetDown(OVRInput.RawButton.B))
+            UpdateStatusSphere();
+
+            if (OVRInput.GetDown(OVRInput.RawButton.RHandTrigger))
             {
-                ClearAnchors();
-                Debug.Log("[TrackingManager] Anchors cleared");
+                _lastTriggerAt = Time.time;
+                _ = CaptureNewFrameAsync();
+            }
+
+            if (OVRInput.GetDown(OVRInput.RawButton.B))
+                _bPressTime = Time.time;
+
+            if (OVRInput.GetUp(OVRInput.RawButton.B))
+            {
+                float holdDuration = _bPressTime < 0f ? 0f : Time.time - _bPressTime;
+                if (holdDuration < 0.5f)
+                {
+                    UndoLastAnchor();
+                    if (_anchorPositions.Count > 0)
+                        _ = RePredictAsync();
+                }
+                else
+                {
+                    ClearAnchors();
+                    Debug.Log("[TrackingManager] All anchors cleared");
+                }
+
+                _bPressTime = -1f;
             }
 
             bool triggerPressed = OVRInput.Get(OVRInput.RawButton.RIndexTrigger);
@@ -146,7 +171,7 @@ namespace SmartRoom.Tracking
                 _lastCapturePayload = capture;
 
                 ShowStatus("Uploading RGB-D...");
-                bool ok = await UploadCaptureAsync(capture);
+                bool ok = await UploadAndSegmentAsync(capture, rePredict: false);
                 ShowStatus(ok ? "RGB-D sent to viewer" : "RGB-D upload failed");
             }
             catch (Exception ex)
@@ -160,7 +185,45 @@ namespace SmartRoom.Tracking
             }
         }
 
-        private async Task<bool> UploadCaptureAsync(Quest3RgbdCaptureFinal.CapturePayload capture)
+        private async Task CaptureNewFrameAsync()
+        {
+            if (_uploadInFlight)
+                return;
+            if (finalRgbdCapture == null)
+            {
+                ShowStatus("RGB-D capture unavailable");
+                return;
+            }
+
+            _uploadInFlight = true;
+
+            try
+            {
+                ShowStatus("Capturing RGB-D...");
+                if (!finalRgbdCapture.CaptureOnceToPayload(out var capture) || capture == null)
+                {
+                    Debug.LogWarning("[TrackingManager] RGB-D capture unavailable.");
+                    ShowStatus("RGB-D capture unavailable");
+                    return;
+                }
+
+                _lastCapturePayload = capture;
+                ShowStatus("Uploading RGB-D...");
+                bool ok = await UploadAndSegmentAsync(capture, rePredict: enableAnchors && _anchorPositions.Count > 0);
+                ShowStatus(ok ? "RGB-D sent to viewer" : "RGB-D upload failed");
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[TrackingManager] Re-capture error: {ex.Message}");
+                ShowStatus("RGB-D upload error");
+            }
+            finally
+            {
+                _uploadInFlight = false;
+            }
+        }
+
+        private async Task<bool> UploadAndSegmentAsync(Quest3RgbdCaptureFinal.CapturePayload capture, bool rePredict)
         {
             if (capture.depthRawBytes == null || capture.depthRawBytes.Length == 0)
             {
@@ -202,6 +265,8 @@ namespace SmartRoom.Tracking
                 string anchorsJson = BuildAnchorsJson();
                 form.Add(new StringContent(anchorsJson, Encoding.UTF8, "application/json"), "anchor_points_json");
             }
+            if (rePredict)
+                form.Add(new StringContent("true", Encoding.UTF8, "text/plain"), "re_predict");
 
             string url = BuildUrl(backendBaseUrl, uploadPath);
             using HttpResponseMessage response = await http.PostAsync(url, form);
@@ -218,6 +283,33 @@ namespace SmartRoom.Tracking
             );
             HandleSegmentationResponse(body);
             return true;
+        }
+
+        private void UpdateStatusSphere()
+        {
+            if (_statusSphere == null)
+            {
+                _statusSphere = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+                _statusSphere.transform.localScale = Vector3.one * (anchorRadius * 1.2f);
+                Destroy(_statusSphere.GetComponent<Collider>());
+                _statusSphere.name = "AnchorStatusIndicator";
+            }
+
+            if (depthCursor != null && depthCursor.IsHitting)
+            {
+                _statusSphere.transform.position = depthCursor.GetHitPoint();
+                Renderer renderer = _statusSphere.GetComponent<Renderer>();
+                Material material = _currentLabel == 1 ? anchorPositiveMaterial : anchorNegativeMaterial;
+                if (material != null)
+                    renderer.material = material;
+                else
+                    renderer.material.color = _currentLabel == 1 ? Color.green : Color.red;
+                _statusSphere.SetActive(true);
+            }
+            else if (_statusSphere.activeSelf)
+            {
+                _statusSphere.SetActive(false);
+            }
         }
 
         private string BuildAnchorsJson()
@@ -323,6 +415,25 @@ namespace SmartRoom.Tracking
             _anchorSpheres.Clear();
             _anchorPositions.Clear();
             _anchorLabels.Clear();
+            ClearContour();
+        }
+
+        private void UndoLastAnchor()
+        {
+            if (_anchorPositions.Count == 0)
+                return;
+
+            int idx = _anchorPositions.Count - 1;
+            if (_anchorSpheres[idx] != null)
+                Destroy(_anchorSpheres[idx]);
+            _anchorSpheres.RemoveAt(idx);
+            _anchorPositions.RemoveAt(idx);
+            _anchorLabels.RemoveAt(idx);
+
+            if (_anchorPositions.Count == 0)
+                ClearContour();
+
+            Debug.Log($"[TrackingManager] Removed last anchor, {_anchorPositions.Count} remaining");
         }
 
         private async Task RePredictAsync()
@@ -332,25 +443,7 @@ namespace SmartRoom.Tracking
 
             try
             {
-                using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(Mathf.Max(1f, requestTimeoutSeconds)) };
-                using var form = new MultipartFormDataContent();
-
-                var capture = _lastCapturePayload;
-                if (capture.rgbRawBytes != null && capture.rgbRawBytes.Length > 0)
-                    AddBinaryPart(form, "rgb_raw", "rgb.raw", capture.rgbRawBytes, "application/octet-stream");
-                else if (capture.rgbJpegBytes != null && capture.rgbJpegBytes.Length > 0)
-                    AddBinaryPart(form, "rgb_jpeg", "rgb.jpg", capture.rgbJpegBytes, "image/jpeg");
-
-                AddBinaryPart(form, "depth_raw", "depth.raw", capture.depthRawBytes, "application/octet-stream");
-                form.Add(new StringContent(capture.metaJson, Encoding.UTF8, "application/json"), "meta_json");
-                form.Add(new StringContent(BuildAnchorsJson(), Encoding.UTF8, "application/json"), "anchor_points_json");
-                form.Add(new StringContent("true", Encoding.UTF8, "text/plain"), "re_predict");
-
-                string url = BuildUrl(backendBaseUrl, uploadPath);
-                using HttpResponseMessage response = await http.PostAsync(url, form);
-                string body = await response.Content.ReadAsStringAsync();
-                if (response.IsSuccessStatusCode)
-                    HandleSegmentationResponse(body);
+                await UploadAndSegmentAsync(_lastCapturePayload, rePredict: true);
             }
             catch (Exception ex)
             {
