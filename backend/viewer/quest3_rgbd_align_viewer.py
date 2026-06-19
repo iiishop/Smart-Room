@@ -1515,12 +1515,12 @@ class RgbdViewer:
         self.root.geometry(f"{max(args.view_size, args.cloud_width) + 80}x{args.cloud_height + 150}")
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self._build_ui()
+        if self.args.server and not self.args.disable_device_segmentation:
+            self.device_segmenter = create_device_segmenter(self.args)
         if self.args.server and not self.args.disable_any2full:
             self.any2full_service = Any2FullService(self.args)
             if not self.any2full_service.start():
                 self.any2full_service = None
-        if self.args.server and not self.args.disable_device_segmentation:
-            self.device_segmenter = create_device_segmenter(self.args)
         if self.frames:
             self.load_current_frame()
         else:
