@@ -1,8 +1,10 @@
 using System;
+using System.Collections.Generic;
 using System.Net.Http;
 using System.Text;
 using System.Threading.Tasks;
 using SmartRoom.Capture;
+using SmartRoom.Interaction;
 using UnityEngine;
 
 namespace SmartRoom.Tracking
@@ -20,11 +22,28 @@ namespace SmartRoom.Tracking
         [SerializeField] private Quest3RgbdCaptureFinal finalRgbdCapture;
         [SerializeField] private bool sendRgbRaw = true;
         [SerializeField] private bool includeJpegFallback = false;
+        [SerializeField] private bool includeCursorPrompt = true;
+
+        [Header("Cursor Prompt")]
+        [SerializeField] private DepthCursor depthCursor;
+        [SerializeField] private ControllerRaycaster controllerRaycaster;
 
         [Header("Viewer")]
         [SerializeField] private string backendBaseUrl = "http://127.0.0.1:8500";
         [SerializeField] private string uploadPath = "/api/track/start-final-rgbd";
         [SerializeField] private float requestTimeoutSeconds = 300f;
+
+        [Header("VR Interactive Anchors")]
+        [SerializeField] private bool enableAnchors = true;
+        [SerializeField] private Material anchorPositiveMaterial;
+        [SerializeField] private Material anchorNegativeMaterial;
+        [SerializeField] private float anchorRadius = 0.025f;
+        [SerializeField] private int maxAnchors = 16;
+
+        [Header("Contour Rendering")]
+        [SerializeField] private Material contourMaterial;
+        [SerializeField] private float contourWidth = 0.005f;
+        [SerializeField] private Color contourColor = Color.white;
 
         [Header("Input")]
         [SerializeField] private float triggerCooldownSeconds = 0.75f;
@@ -41,6 +60,13 @@ namespace SmartRoom.Tracking
         private float _hideStatusAt = -1f;
         private GameObject _statusTextObject;
         private TextMesh _statusText;
+        private readonly List<Vector3> _anchorPositions = new();
+        private readonly List<int> _anchorLabels = new();
+        private readonly List<GameObject> _anchorSpheres = new();
+        private int _currentLabel = 1;
+        private Quest3RgbdCaptureFinal.CapturePayload _lastCapturePayload;
+        private LineRenderer _contourRenderer;
+        private GameObject _contourObject;
 
         private void Awake()
         {
@@ -48,6 +74,8 @@ namespace SmartRoom.Tracking
             if (finalRgbdCapture == null)
                 finalRgbdCapture = gameObject.AddComponent<Quest3RgbdCaptureFinal>();
 
+            depthCursor ??= FindFirstObjectByType<DepthCursor>();
+            controllerRaycaster ??= FindFirstObjectByType<ControllerRaycaster>();
             xrCamera ??= Camera.main;
         }
 
@@ -59,6 +87,18 @@ namespace SmartRoom.Tracking
 
         private void Update()
         {
+            if (OVRInput.GetDown(OVRInput.RawButton.A))
+            {
+                _currentLabel = _currentLabel == 1 ? 0 : 1;
+                Debug.Log($"[TrackingManager] Anchor mode: {(_currentLabel == 1 ? "positive (green)" : "negative (red)")}");
+            }
+
+            if (OVRInput.GetDown(OVRInput.RawButton.B))
+            {
+                ClearAnchors();
+                Debug.Log("[TrackingManager] Anchors cleared");
+            }
+
             bool triggerPressed = OVRInput.Get(OVRInput.RawButton.RIndexTrigger);
             if (triggerPressed && !_prevTriggerPressed)
                 OnTriggerPressed();
@@ -78,6 +118,18 @@ namespace SmartRoom.Tracking
             if (Time.time - _lastTriggerAt < triggerCooldownSeconds)
                 return;
 
+            if (enableAnchors &&
+                _lastCapturePayload != null &&
+                depthCursor != null &&
+                depthCursor.IsHitting &&
+                _anchorPositions.Count < maxAnchors)
+            {
+                _lastTriggerAt = Time.time;
+                PlaceAnchor(depthCursor.GetHitPoint(), _currentLabel);
+                _ = RePredictAsync();
+                return;
+            }
+
             _lastTriggerAt = Time.time;
             _uploadInFlight = true;
 
@@ -90,6 +142,8 @@ namespace SmartRoom.Tracking
                     ShowStatus("RGB-D capture unavailable");
                     return;
                 }
+
+                _lastCapturePayload = capture;
 
                 ShowStatus("Uploading RGB-D...");
                 bool ok = await UploadCaptureAsync(capture);
@@ -140,6 +194,14 @@ namespace SmartRoom.Tracking
 
             AddBinaryPart(form, "depth_raw", "depth.raw", capture.depthRawBytes, "application/octet-stream");
             form.Add(new StringContent(capture.metaJson, Encoding.UTF8, "application/json"), "meta_json");
+            string cursorJson = BuildCursorJson();
+            if (includeCursorPrompt && !string.IsNullOrWhiteSpace(cursorJson))
+                form.Add(new StringContent(cursorJson, Encoding.UTF8, "application/json"), "cursor_json");
+            if (enableAnchors && _anchorPositions.Count > 0)
+            {
+                string anchorsJson = BuildAnchorsJson();
+                form.Add(new StringContent(anchorsJson, Encoding.UTF8, "application/json"), "anchor_points_json");
+            }
 
             string url = BuildUrl(backendBaseUrl, uploadPath);
             using HttpResponseMessage response = await http.PostAsync(url, form);
@@ -154,7 +216,56 @@ namespace SmartRoom.Tracking
                 $"[TrackingManager] Uploaded RGB-D to viewer: rgb={capture.rgbWidth}x{capture.rgbHeight} " +
                 $"depth={capture.depthWidth}x{capture.depthHeight} rawRgb={canSendRaw} response={body}"
             );
+            HandleSegmentationResponse(body);
             return true;
+        }
+
+        private string BuildAnchorsJson()
+        {
+            var sb = new StringBuilder();
+            sb.Append("[");
+            for (int i = 0; i < _anchorPositions.Count; i++)
+            {
+                if (i > 0)
+                    sb.Append(",");
+
+                Vector3 p = _anchorPositions[i];
+                sb.Append($"{{\"x\":{p.x:F4},\"y\":{p.y:F4},\"z\":{p.z:F4},\"label\":{_anchorLabels[i]}}}");
+            }
+
+            sb.Append("]");
+            return sb.ToString();
+        }
+
+        private string BuildCursorJson()
+        {
+            var ray = controllerRaycaster != null ? controllerRaycaster.GetRay() : default;
+            bool hasRay = controllerRaycaster != null && controllerRaycaster.IsActive;
+            bool isHitting = depthCursor != null && depthCursor.IsHitting;
+            Vector3 hitPoint = isHitting ? depthCursor.GetHitPoint() : Vector3.zero;
+            Vector3 hitNormal = isHitting ? depthCursor.HitNormal : Vector3.zero;
+            float hitDistance = isHitting ? depthCursor.HitDistance : 0f;
+
+            var payload = new CursorPromptPayload
+            {
+                is_hitting = isHitting,
+                has_ray = hasRay,
+                unity_frame = Time.frameCount,
+                hit_world_x = hitPoint.x,
+                hit_world_y = hitPoint.y,
+                hit_world_z = hitPoint.z,
+                hit_normal_x = hitNormal.x,
+                hit_normal_y = hitNormal.y,
+                hit_normal_z = hitNormal.z,
+                hit_distance_m = hitDistance,
+                ray_origin_x = ray.origin.x,
+                ray_origin_y = ray.origin.y,
+                ray_origin_z = ray.origin.z,
+                ray_direction_x = ray.direction.x,
+                ray_direction_y = ray.direction.y,
+                ray_direction_z = ray.direction.z,
+            };
+            return JsonUtility.ToJson(payload, false);
         }
 
         private static void AddBinaryPart(
@@ -176,6 +287,130 @@ namespace SmartRoom.Tracking
             if (!suffix.StartsWith("/", StringComparison.Ordinal))
                 suffix = "/" + suffix;
             return root + suffix;
+        }
+
+        private void PlaceAnchor(Vector3 worldPos, int label)
+        {
+            _anchorPositions.Add(worldPos);
+            _anchorLabels.Add(label);
+
+            Material mat = label == 1 ? anchorPositiveMaterial : anchorNegativeMaterial;
+            if (mat == null)
+            {
+                mat = new Material(Shader.Find("Universal Render Pipeline/Unlit"));
+                mat.color = label == 1 ? Color.green : Color.red;
+            }
+
+            GameObject sphere = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+            sphere.transform.position = worldPos;
+            sphere.transform.localScale = Vector3.one * (anchorRadius * 2f);
+            sphere.GetComponent<Renderer>().material = mat;
+            Destroy(sphere.GetComponent<Collider>());
+            sphere.name = $"Anchor_{label}_{_anchorPositions.Count}";
+            _anchorSpheres.Add(sphere);
+
+            Debug.Log($"[TrackingManager] Placed {(label == 1 ? "positive" : "negative")} anchor at {worldPos}");
+        }
+
+        private void ClearAnchors()
+        {
+            foreach (GameObject sphere in _anchorSpheres)
+            {
+                if (sphere != null)
+                    Destroy(sphere);
+            }
+
+            _anchorSpheres.Clear();
+            _anchorPositions.Clear();
+            _anchorLabels.Clear();
+        }
+
+        private async Task RePredictAsync()
+        {
+            if (_anchorPositions.Count == 0 || _lastCapturePayload == null)
+                return;
+
+            try
+            {
+                using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(Mathf.Max(1f, requestTimeoutSeconds)) };
+                using var form = new MultipartFormDataContent();
+
+                var capture = _lastCapturePayload;
+                if (capture.rgbRawBytes != null && capture.rgbRawBytes.Length > 0)
+                    AddBinaryPart(form, "rgb_raw", "rgb.raw", capture.rgbRawBytes, "application/octet-stream");
+                else if (capture.rgbJpegBytes != null && capture.rgbJpegBytes.Length > 0)
+                    AddBinaryPart(form, "rgb_jpeg", "rgb.jpg", capture.rgbJpegBytes, "image/jpeg");
+
+                AddBinaryPart(form, "depth_raw", "depth.raw", capture.depthRawBytes, "application/octet-stream");
+                form.Add(new StringContent(capture.metaJson, Encoding.UTF8, "application/json"), "meta_json");
+                form.Add(new StringContent(BuildAnchorsJson(), Encoding.UTF8, "application/json"), "anchor_points_json");
+                form.Add(new StringContent("true", Encoding.UTF8, "text/plain"), "re_predict");
+
+                string url = BuildUrl(backendBaseUrl, uploadPath);
+                using HttpResponseMessage response = await http.PostAsync(url, form);
+                string body = await response.Content.ReadAsStringAsync();
+                if (response.IsSuccessStatusCode)
+                    HandleSegmentationResponse(body);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[TrackingManager] Re-predict error: {ex.Message}");
+            }
+        }
+
+        private void HandleSegmentationResponse(string jsonBody)
+        {
+            try
+            {
+                var response = JsonUtility.FromJson<ViewerResponse>(jsonBody);
+                if (response?.device?.contour_3d == null || response.device.contour_3d.Length == 0)
+                {
+                    Debug.Log("[TrackingManager] No contour in response");
+                    ClearContour();
+                    return;
+                }
+
+                RenderContour(response.device.contour_3d);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[TrackingManager] Parse response error: {ex.Message}");
+            }
+        }
+
+        private void RenderContour(ContourPoint[] points)
+        {
+            if (points.Length < 3)
+            {
+                ClearContour();
+                return;
+            }
+
+            if (_contourObject == null)
+            {
+                _contourObject = new GameObject("SAM2_Contour");
+                _contourRenderer = _contourObject.AddComponent<LineRenderer>();
+                _contourRenderer.material = contourMaterial ?? new Material(Shader.Find("Universal Render Pipeline/Unlit"));
+                _contourRenderer.startColor = contourColor;
+                _contourRenderer.endColor = contourColor;
+                _contourRenderer.startWidth = contourWidth;
+                _contourRenderer.endWidth = contourWidth;
+                _contourRenderer.loop = true;
+                _contourRenderer.positionCount = 0;
+                _contourRenderer.useWorldSpace = true;
+            }
+
+            _contourRenderer.positionCount = points.Length;
+            for (int i = 0; i < points.Length; i++)
+                _contourRenderer.SetPosition(i, new Vector3(points[i].x, points[i].y, points[i].z));
+
+            Debug.Log($"[TrackingManager] Contour rendered: {points.Length} points");
+        }
+
+        private void ClearContour()
+        {
+            if (_contourRenderer != null)
+                _contourRenderer.positionCount = 0;
         }
 
         private void CreateStatusText()
@@ -207,6 +442,40 @@ namespace SmartRoom.Tracking
             _statusTextObject.transform.LookAt(xrCamera.transform);
             _statusTextObject.transform.Rotate(0f, 180f, 0f);
             _hideStatusAt = Time.time + statusVisibleSeconds;
+        }
+
+        [Serializable]
+        private sealed class CursorPromptPayload
+        {
+            public bool is_hitting;
+            public bool has_ray;
+            public int unity_frame;
+            public float hit_world_x, hit_world_y, hit_world_z;
+            public float hit_normal_x, hit_normal_y, hit_normal_z;
+            public float hit_distance_m;
+            public float ray_origin_x, ray_origin_y, ray_origin_z;
+            public float ray_direction_x, ray_direction_y, ray_direction_z;
+        }
+
+        [Serializable]
+        private sealed class ViewerResponse
+        {
+            public DeviceInfo device;
+        }
+
+        [Serializable]
+        private sealed class DeviceInfo
+        {
+            public ContourPoint[] contour_3d;
+            public bool segmented;
+        }
+
+        [Serializable]
+        private sealed class ContourPoint
+        {
+            public float x;
+            public float y;
+            public float z;
         }
     }
 }
