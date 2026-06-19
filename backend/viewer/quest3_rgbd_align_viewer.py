@@ -32,6 +32,7 @@ from sam2_device_segment import (
     Sam2RuntimeConfig,
     mask_overlay as overlay_sam2_mask,
 )
+from pose_projection import extract_world_contour, world_to_rgb_pixel
 from rgb_guided_depth_postprocess import RgbGuidedPostprocessConfig, confidence_overlay, postprocess_depth
 from rgb_edge_depth_refine import EdgeDepthRefineConfig, refine_depth_anchors
 
@@ -56,6 +57,7 @@ class FrameData:
     device_overlay_rgb: np.ndarray | None
     device_mask_path: Path | None
     device_info: dict | None
+    device_contour_3d: list[list[float]] | None
     cloud_points: np.ndarray
     cloud_colors: np.ndarray
     projected_depth_count: int
@@ -931,23 +933,13 @@ def run_device_segmentation(
     frame: FrameData,
     args: argparse.Namespace,
     segmenter: Sam2DeviceSegmenter | None,
+    anchors: list[dict] | None = None,
+    re_predict: bool = False,
 ) -> FrameData:
     if args.disable_device_segmentation:
         return frame
 
-    cursor_payload = frame.meta.get("cursor")
-    if cursor_payload is None:
-        print("[device-seg] skipped: no cursor_json in trigger payload", flush=True)
-        return frame
-
     depth = frame.any2full_depth if frame.any2full_depth is not None else frame.aligned_depth
-    prompt = build_cursor_prompt(
-        frame.meta,
-        cursor_payload,
-        depth,
-        CursorPromptConfig(nearest_depth_radius_px=args.cursor_nearest_depth_radius_px),
-    )
-    frame.meta["cursor_prompt"] = prompt
 
     work_dir = frame.frame_dir
     if work_dir == Path(".") or str(work_dir) == ".":
@@ -957,6 +949,76 @@ def run_device_segmentation(
         work_dir = cache_root / f"network_{int(time.time() * 1000)}"
         work_dir.mkdir(parents=True, exist_ok=True)
         frame.frame_dir = work_dir
+
+    if anchors and segmenter is not None and segmenter.ready:
+        rgb_meta = frame.meta["rgb"]
+        rgb_intrinsics_arr = rgb_intrinsics(rgb_meta)
+        rgb_pose_world = unity_trs(
+            np.array(
+                [
+                    float(rgb_meta["pose_position_x"]),
+                    float(rgb_meta["pose_position_y"]),
+                    float(rgb_meta["pose_position_z"]),
+                ],
+                dtype=np.float32,
+            ),
+            quaternion_to_matrix(
+                np.array(
+                    [
+                        float(rgb_meta["pose_rotation_x"]),
+                        float(rgb_meta["pose_rotation_y"]),
+                        float(rgb_meta["pose_rotation_z"]),
+                        float(rgb_meta["pose_rotation_w"]),
+                    ],
+                    dtype=np.float32,
+                )
+            ),
+            (1.0, 1.0, 1.0),
+        )
+        world_pts = np.array([[float(a["x"]), float(a["y"]), float(a["z"])] for a in anchors], dtype=np.float32)
+        labels_arr = np.array([1 if int(a["label"]) > 0 else 0 for a in anchors], dtype=np.int32)
+        projection = world_to_rgb_pixel(world_pts, rgb_pose_world, rgb_intrinsics_arr, frame.rgb.shape[0], frame.rgb.shape[1])
+        if projection is not None:
+            pixel_pts, in_frame = projection
+            if in_frame.any():
+                pixel_pts = pixel_pts[in_frame].astype(np.float32)
+                labels_arr = labels_arr[in_frame]
+                current_rgb_hash = hash(frame.rgb.tobytes())
+                if (not re_predict) or (segmenter._current_rgb_hash != current_rgb_hash):
+                    segmenter.reset_for_image(frame.rgb)
+                mask = segmenter.re_predict(pixel_pts, labels_arr)
+                if mask is not None:
+                    contour_3d = extract_world_contour(mask, frame.aligned_depth, rgb_pose_world, rgb_intrinsics_arr)
+                    base_overlay = frame.any2full_overlay_rgb if frame.any2full_overlay_rgb is not None else frame.overlay_rgb
+                    frame.device_mask = mask
+                    frame.device_contour_3d = contour_3d
+                    frame.device_overlay_rgb = overlay_device_mask(base_overlay, mask)
+                    frame.device_mask_path = work_dir / "device_mask_vr.png"
+                    Image.fromarray(mask.astype(np.uint8) * 255).save(frame.device_mask_path)
+                    frame.device_info = {
+                        "area_px": int(np.count_nonzero(mask)),
+                        "bbox_xyxy": None,
+                        "contour_3d_points": len(contour_3d),
+                        "anchors_used": int(in_frame.sum()),
+                    }
+                    print(
+                        f"[device-seg] vr mask={frame.device_mask_path} area={frame.device_info['area_px']} anchors={frame.device_info['anchors_used']}",
+                        flush=True,
+                    )
+                    return frame
+
+    cursor_payload = frame.meta.get("cursor")
+    if cursor_payload is None:
+        print("[device-seg] skipped: no cursor_json in trigger payload", flush=True)
+        return frame
+
+    prompt = build_cursor_prompt(
+        frame.meta,
+        cursor_payload,
+        depth,
+        CursorPromptConfig(nearest_depth_radius_px=args.cursor_nearest_depth_radius_px),
+    )
+    frame.meta["cursor_prompt"] = prompt
 
     rgb_path = work_dir / "rgb.png"
     if not rgb_path.exists():
@@ -1052,6 +1114,7 @@ def run_device_segmentation(
         "raw_overlay": str(raw_overlay_path),
         "sam2_meta": str(sam_meta_path),
     }
+    frame.device_contour_3d = None
     print(
         f"[device-seg] mask={frame.device_mask_path} area={refined.area_px} bbox={refined.bbox_xyxy}",
         flush=True,
@@ -1146,6 +1209,7 @@ def load_frame_from_payload(
         device_overlay_rgb=None,
         device_mask_path=None,
         device_info=None,
+        device_contour_3d=None,
         cloud_points=cloud_points,
         cloud_colors=cloud_colors,
         projected_depth_count=int(np.count_nonzero(aligned > 0)),
@@ -1227,6 +1291,7 @@ def load_frame(
         device_overlay_rgb=None,
         device_mask_path=None,
         device_info=None,
+        device_contour_3d=None,
         cloud_points=cloud_points,
         cloud_colors=cloud_colors,
         projected_depth_count=int(np.count_nonzero(aligned > 0)),
@@ -1333,6 +1398,8 @@ class _PayloadHandler(http.server.BaseHTTPRequestHandler):
         depth_raw = parts.get("depth_raw")
         meta_json = parts.get("meta_json")
         cursor_json = parts.get("cursor_json")
+        anchor_points_json = parts.get("anchor_points_json")
+        re_predict_raw = parts.get("re_predict")
         if rgb_raw is None and rgb_jpeg is None:
             self.send_error(400, "missing RGB field: need rgb_raw or rgb_jpeg")
             return
@@ -1345,6 +1412,11 @@ class _PayloadHandler(http.server.BaseHTTPRequestHandler):
             self.send_error(503, "viewer not ready")
             return
 
+        anchors = None
+        if anchor_points_json is not None:
+            anchors = json.loads(anchor_points_json.decode("utf-8"))
+        re_predict = re_predict_raw is not None and re_predict_raw.strip().lower() == b"true"
+
         try:
             frame = load_frame_from_payload(
                 rgb_payload_bytes=rgb_raw if rgb_raw is not None else rgb_jpeg,
@@ -1356,7 +1428,7 @@ class _PayloadHandler(http.server.BaseHTTPRequestHandler):
                 cursor_json_str=cursor_json.decode("utf-8") if cursor_json is not None else None,
             )
             frame = run_any2full_completion(frame, viewer.args, viewer.any2full_service)
-            frame = run_device_segmentation(frame, viewer.args, viewer.device_segmenter)
+            frame = run_device_segmentation(frame, viewer.args, viewer.device_segmenter, anchors=anchors, re_predict=re_predict)
         except Exception as exc:
             print(f"[server] alignment failed: {exc}", flush=True)
             self.send_error(500, str(exc))
@@ -1384,6 +1456,7 @@ class _PayloadHandler(http.server.BaseHTTPRequestHandler):
                 "area_px": int(frame.device_info.get("area_px", 0)) if frame.device_info else 0,
                 "bbox_xyxy": frame.device_info.get("bbox_xyxy") if frame.device_info else None,
             },
+            "contour_3d": frame.device_contour_3d or [],
             "cloud_points": int(frame.cloud_points.shape[0]),
         }
         body = json.dumps(response).encode("utf-8")

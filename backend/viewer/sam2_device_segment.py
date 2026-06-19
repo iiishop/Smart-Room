@@ -244,6 +244,7 @@ class Sam2DeviceSegmenter:
         self.runtime = runtime
         self.prompt_config = prompt_config
         self.predictor = None
+        self._current_rgb_hash: int | None = None
 
     @property
     def ready(self) -> bool:
@@ -326,6 +327,45 @@ class Sam2DeviceSegmenter:
             point_coords=points,
             point_labels=labels,
         )
+
+    def reset_for_image(self, rgb: np.ndarray) -> None:
+        """Encode a new RGB frame once so later point updates are cheap."""
+        self.load()
+        assert self.predictor is not None
+        self.predictor.set_image(rgb.astype(np.uint8))
+        self._current_rgb_hash = hash(rgb.tobytes())
+
+    def re_predict(
+        self,
+        point_coords: np.ndarray,
+        point_labels: np.ndarray,
+        box: np.ndarray | None = None,
+    ) -> np.ndarray | None:
+        assert self.predictor is not None
+        use_cuda_amp = str(self.runtime.device).startswith("cuda") and torch.cuda.is_available()
+        with torch.inference_mode():
+            if use_cuda_amp:
+                with torch.autocast("cuda", dtype=torch.bfloat16):
+                    masks, scores, _ = self.predictor.predict(
+                        point_coords=point_coords,
+                        point_labels=point_labels,
+                        box=box,
+                        multimask_output=True,
+                        return_logits=False,
+                    )
+            else:
+                masks, scores, _ = self.predictor.predict(
+                    point_coords=point_coords,
+                    point_labels=point_labels,
+                    box=box,
+                    multimask_output=True,
+                    return_logits=False,
+                )
+        masks = masks.astype(bool)
+        scores = np.asarray(scores, dtype=np.float32)
+        if masks.size == 0:
+            return None
+        return masks[int(np.argmax(scores))]
 
 
 def mask_overlay(rgb: np.ndarray, mask: np.ndarray) -> np.ndarray:
