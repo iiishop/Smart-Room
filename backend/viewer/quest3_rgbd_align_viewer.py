@@ -1498,6 +1498,7 @@ class RgbdViewer:
         self.rgb_scale = 1.0
         self.rgb_photo: ImageTk.PhotoImage | None = None
         self.cloud_photo: ImageTk.PhotoImage | None = None
+        self.device_photos: list[ImageTk.PhotoImage | None] = []
         self.yaw = 0.0
         self.pitch = -0.2
         self.zoom = 1.0
@@ -1587,8 +1588,10 @@ class RgbdViewer:
 
         rgb_tab = ttk.Frame(notebook, padding=8)
         cloud_tab = ttk.Frame(notebook, padding=8)
+        device_tab = ttk.Frame(notebook, padding=8)
         notebook.add(rgb_tab, text="RGB depth")
         notebook.add(cloud_tab, text="Point cloud")
+        notebook.add(device_tab, text="Device")
 
         rgb_main = ttk.Frame(rgb_tab)
         rgb_main.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
@@ -1642,6 +1645,18 @@ class RgbdViewer:
         )
         ttk.Label(cloud_tab, textvariable=self.cloud_var).pack(side=tk.TOP, fill=tk.X, pady=(8, 0))
 
+        device_main = ttk.Frame(device_tab)
+        device_main.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        self.device_panel_labels: list[ttk.Label] = []
+        for title in ("Raw mask", "Refined mask", "Masked RGB", "Contour"):
+            panel = ttk.LabelFrame(device_main, text=title, padding=8)
+            panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 8))
+            label = ttk.Label(panel, text="No segmentation yet", justify=tk.CENTER, anchor=tk.CENTER)
+            label.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+            self.device_panel_labels.append(label)
+        self.device_info_var = tk.StringVar(value="OCR: would run on this masked region")
+        ttk.Label(device_tab, textvariable=self.device_info_var, justify=tk.LEFT, anchor=tk.W).pack(side=tk.TOP, fill=tk.X, pady=(8, 0))
+
     def load_current_frame(self) -> None:
         if not self.frames:
             self.frame = None
@@ -1650,6 +1665,7 @@ class RgbdViewer:
             self.frame_var.set("")
             self.update_rgb_image()
             self.render_cloud()
+            self.update_device_tab()
             self.update_status()
             return
         self.frame = load_frame(
@@ -1668,6 +1684,7 @@ class RgbdViewer:
         self.zoom = 1.8
         self.update_rgb_image()
         self.render_cloud()
+        self.update_device_tab()
         self.update_status()
 
     def _on_network_frame(self, frame: FrameData) -> None:
@@ -1679,6 +1696,7 @@ class RgbdViewer:
         self._last_hover_display_xy = None
         self.update_rgb_image()
         self.render_cloud()
+        self.update_device_tab()
         self.update_status()
 
     def update_status(self) -> None:
@@ -1939,6 +1957,44 @@ class RgbdViewer:
         self.hover_rgb_xyz_var.set("RGB cam XYZ: -")
         self.hover_origin_xyz_var.set("Origin-rel xyz: -")
         self.hover_sample_var.set("Sample: -")
+
+    def _set_device_panel_text(self, index: int, text: str) -> None:
+        label = self.device_panel_labels[index]
+        label.configure(text=text, image="", compound=tk.NONE)
+
+    def _set_device_panel_image(self, index: int, image: np.ndarray) -> None:
+        pil, _ = resize_for_display(image, max(220, self.args.view_size // 3))
+        photo = ImageTk.PhotoImage(pil)
+        self.device_photos[index] = photo
+        self.device_panel_labels[index].configure(image=photo, text="", compound=tk.CENTER)
+
+    def update_device_tab(self) -> None:
+        self.device_photos = [None, None, None, None]
+        if self.frame is None or self.frame.device_mask is None:
+            for i in range(4):
+                self._set_device_panel_text(i, "No segmentation yet")
+            self.device_info_var.set("OCR: would run on this masked region")
+            return
+
+        raw_mask_path = None if self.frame.device_info is None else self.frame.device_info.get("raw_mask")
+        raw_mask = None
+        if raw_mask_path:
+            raw_mask_img = cv2.imread(str(raw_mask_path), cv2.IMREAD_GRAYSCALE)
+            if raw_mask_img is not None:
+                raw_mask = cv2.cvtColor(raw_mask_img, cv2.COLOR_GRAY2RGB)
+        if raw_mask is None:
+            raw_mask = cv2.cvtColor((self.frame.device_mask.astype(np.uint8) * 255), cv2.COLOR_GRAY2RGB)
+
+        refined_mask = cv2.cvtColor((self.frame.device_mask.astype(np.uint8) * 255), cv2.COLOR_GRAY2RGB)
+        masked_rgb = np.zeros_like(self.frame.rgb)
+        masked_rgb[self.frame.device_mask] = self.frame.rgb[self.frame.device_mask]
+        contour_count = len(self.frame.device_contour_3d) if self.frame.device_contour_3d is not None else int((self.frame.device_info or {}).get("contour_3d_points", 0))
+
+        self._set_device_panel_image(0, raw_mask)
+        self._set_device_panel_image(1, refined_mask)
+        self._set_device_panel_image(2, masked_rgb)
+        self._set_device_panel_text(3, f"Contour points: {contour_count}")
+        self.device_info_var.set(f"OCR: would run on this masked region | area_px={(self.frame.device_info or {}).get('area_px', 0)}")
 
     def update_hover_panel(
         self,
