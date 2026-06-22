@@ -42,6 +42,9 @@ namespace SmartRoom.Interaction
         [SerializeField] private int ringSegments = 64;
         [SerializeField] private float ringWidth = 0.002f;
 
+        [Header("Room Coordinate UI")]
+        [SerializeField] private bool showRoomCoordinateSystemPanel = true;
+
         // Internal
         private Material _probeMaterial;
         private Mesh _quadMesh;
@@ -79,6 +82,7 @@ namespace SmartRoom.Interaction
             InitializeMaterial();
             CreateQuadMesh();
             CreateBoundaryRing();
+            EnsureRoomCoordinateSystemPanel();
 
             Debug.Log($"[DepthProbe] Awake — depthCursor={depthCursor != null} " +
                       $"camera={xrCamera != null} raycastMgr={raycastManager != null} " +
@@ -126,6 +130,15 @@ namespace SmartRoom.Interaction
 
         private void LateUpdate()
         {
+            if (SmartRoom.UI.RoomCoordinateSystemPanel.IsUiBlockingSceneInput)
+            {
+                _points.Clear();
+                ReleaseBuffer();
+                UpdateBoundaryRing(false, Vector3.zero, Vector3.up);
+                _wasActive = false;
+                return;
+            }
+
             bool triggerHeld = OVRInput.Get(OVRInput.RawButton.RIndexTrigger);
 
             if (!triggerHeld)
@@ -145,6 +158,7 @@ namespace SmartRoom.Interaction
             // Validate state
             if (depthCursor == null || !depthCursor.IsHitting)
             {
+                UpdateBoundaryRing(false, Vector3.zero, Vector3.up);
                 DiagLog("depthCursor not hitting");
                 return;
             }
@@ -354,6 +368,13 @@ namespace SmartRoom.Interaction
         {
             _points.Clear();
             ReleaseBuffer();
+        }
+
+        private void EnsureRoomCoordinateSystemPanel()
+        {
+            if (!showRoomCoordinateSystemPanel) return;
+
+            SmartRoom.UI.RoomCoordinateSystemPanel.EnsureExists(xrCamera != null ? xrCamera : Camera.main);
         }
 
         private static float PackColor(Color c)

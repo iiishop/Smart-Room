@@ -59,6 +59,12 @@ namespace SmartRoom.Interaction
 
         private void Update()
         {
+            if (SmartRoom.UI.RoomCoordinateSystemPanel.IsUiBlockingSceneInput)
+            {
+                _prevTriggerPressed = OVRInput.Get(OVRInput.RawButton.RIndexTrigger);
+                return;
+            }
+
             if (Time.time - _lastGrabTime < grabCooldownSeconds) return;
 
             // OVRInput: Meta XR SDK v85 扳机输入
