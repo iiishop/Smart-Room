@@ -1,5 +1,8 @@
 using System;
+using System.Threading.Tasks;
 using SmartRoom.Networking;
+using SmartRoom.Tracking;
+using SmartRoom.UI;
 using UnityEngine;
 
 namespace SmartRoom.Interaction
@@ -20,6 +23,7 @@ namespace SmartRoom.Interaction
         [SerializeField] private PixelProjector pixelProjector;
         [SerializeField] private BackendCommunicationManager backendManager;
         [SerializeField] private RgbStreamModule rgbStreamModule;
+        [SerializeField] private TrackingManager trackingManager;
 
         [Header("Input")]
         [SerializeField] private float grabCooldownSeconds = 0.5f;
@@ -38,6 +42,9 @@ namespace SmartRoom.Interaction
 
         private float _lastGrabTime;
         private bool _prevTriggerPressed;
+        private bool _prevDeletePressed;
+        private bool _deleteInFlight;
+        private PromptPointMarkerManager.MarkerHandle _hoveredPromptPoint;
 
         private void Awake()
         {
@@ -55,6 +62,9 @@ namespace SmartRoom.Interaction
 
             if (rgbStreamModule == null)
                 rgbStreamModule = FindFirstObjectByType<RgbStreamModule>();
+
+            if (trackingManager == null)
+                trackingManager = FindFirstObjectByType<TrackingManager>();
         }
 
         private void Update()
@@ -62,8 +72,16 @@ namespace SmartRoom.Interaction
             if (SmartRoom.UI.RoomCoordinateSystemPanel.IsUiBlockingSceneInput)
             {
                 _prevTriggerPressed = OVRInput.Get(OVRInput.RawButton.RIndexTrigger);
+                _prevDeletePressed = OVRInput.Get(OVRInput.Button.Two, OVRInput.Controller.RTouch);
+                PromptPointMarkerManager.ClearHover();
                 return;
             }
+
+            UpdatePromptPointHover();
+            bool deletePressed = OVRInput.Get(OVRInput.Button.Two, OVRInput.Controller.RTouch);
+            if (deletePressed && !_prevDeletePressed)
+                TryDeleteHoveredPromptPoint();
+            _prevDeletePressed = deletePressed;
 
             if (Time.time - _lastGrabTime < grabCooldownSeconds) return;
 
@@ -75,6 +93,49 @@ namespace SmartRoom.Interaction
                 TryGrab();
             }
             _prevTriggerPressed = triggerPressed;
+        }
+
+        private void UpdatePromptPointHover()
+        {
+            _hoveredPromptPoint = null;
+            if (controllerRaycaster == null)
+            {
+                PromptPointMarkerManager.ClearHover();
+                return;
+            }
+
+            Ray ray = controllerRaycaster.GetRay();
+            PromptPointMarkerManager.TryUpdateHover(ray, out _hoveredPromptPoint);
+        }
+
+        private void TryDeleteHoveredPromptPoint()
+        {
+            if (_deleteInFlight || _hoveredPromptPoint == null || !_hoveredPromptPoint.IsValid)
+                return;
+
+            _ = DeleteHoveredPromptPointAsync(_hoveredPromptPoint);
+        }
+
+        private async Task DeleteHoveredPromptPointAsync(PromptPointMarkerManager.MarkerHandle marker)
+        {
+            _deleteInFlight = true;
+            try
+            {
+                if (trackingManager == null)
+                {
+                    PromptPointMarkerManager.RemoveMarker(marker);
+                    return;
+                }
+
+                trackingManager.ReportStatus("Deleting point...");
+                bool deleted = await trackingManager.DeletePointPromptAsync(marker.WorldPoint);
+                if (deleted)
+                    PromptPointMarkerManager.RemoveMarker(marker);
+            }
+            finally
+            {
+                _deleteInFlight = false;
+            }
         }
 
         public bool TryGrab()
@@ -134,14 +195,33 @@ namespace SmartRoom.Interaction
 
             OnGrabStarted?.Invoke(hitPoint, pixel ?? Vector2Int.zero);
 
-            if (pixel != null)
-                SendPointPrompt(pixel.Value.x, pixel.Value.y);
+            int label = depthCursor.CurrentMode == DepthCursor.ProbeEditMode.Add ? 1 : 0;
+            string mode = label > 0 ? "add" : "del";
+            int frameWidth = rgbStreamModule != null ? rgbStreamModule.LatestFrameWidth : 0;
+            int frameHeight = rgbStreamModule != null ? rgbStreamModule.LatestFrameHeight : 0;
+            PromptPointMarkerManager.AddMarker(hitPoint, label);
+
+            if (trackingManager != null)
+            {
+                trackingManager.ReportStatus(label > 0 ? "Sending positive point..." : "Sending negative point...");
+                _ = trackingManager.HandlePointPromptAsync(
+                    hitPoint,
+                    pixel ?? new Vector2Int(-1, -1),
+                    label,
+                    mode,
+                    frameWidth,
+                    frameHeight);
+            }
+            else if (pixel != null)
+            {
+                SendPointPrompt(pixel.Value.x, pixel.Value.y, hitPoint, label, mode);
+            }
 
             IsGrabbing = false;
             return true;
         }
 
-        private void SendPointPrompt(int px, int py)
+        private void SendPointPrompt(int px, int py, Vector3 hitPoint, int label, string mode)
         {
             if (backendManager == null)
             {
@@ -154,21 +234,33 @@ namespace SmartRoom.Interaction
                 type = "point_prompt",
                 x = px,
                 y = py,
-                label = 1,
+                label = label > 0 ? 1 : 0,
+                mode = mode,
+                is_hitting = true,
+                hit_world_x = hitPoint.x,
+                hit_world_y = hitPoint.y,
+                hit_world_z = hitPoint.z,
                 frame_width = rgbStreamModule != null ? rgbStreamModule.LatestFrameWidth : 640,
                 frame_height = rgbStreamModule != null ? rgbStreamModule.LatestFrameHeight : 480,
-                timestamp_ms = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+                timestamp_ms = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                room_id = RoomCoordinateSystemPanel.CurrentRoomId,
+                room_name = RoomCoordinateSystemPanel.CurrentRoomName,
+                device_id = SystemInfo.deviceUniqueIdentifier,
+                object_session_id = RoomObjectSession.CurrentObjectId,
+                force_new_capture = RoomCaptureSession.ConsumeForceNextCapture(),
             };
 
             string json = JsonUtility.ToJson(payload);
             backendManager.QueueControlJson(json);
-            Debug.Log($"[ObjectGrabber] Sent point prompt: x={px} y={py}");
+            Debug.Log($"[ObjectGrabber] Sent point prompt: x={px} y={py} label={payload.label}");
         }
 
         private void FailGrab(string reason)
         {
             LastGrabValid = false;
             Debug.Log($"[ObjectGrabber] Grab failed: {reason}");
+            if (trackingManager != null)
+                trackingManager.ReportStatus("Point not sent: " + reason);
             OnGrabFailed?.Invoke(reason);
         }
 
@@ -184,9 +276,19 @@ namespace SmartRoom.Interaction
             public int x;
             public int y;
             public int label;
+            public string mode;
+            public bool is_hitting;
+            public float hit_world_x;
+            public float hit_world_y;
+            public float hit_world_z;
             public int frame_width;
             public int frame_height;
             public long timestamp_ms;
+            public string room_id;
+            public string room_name;
+            public string device_id;
+            public string object_session_id;
+            public bool force_new_capture;
         }
     }
 }

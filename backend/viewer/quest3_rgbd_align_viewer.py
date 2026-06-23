@@ -4,6 +4,7 @@ import argparse
 import http.server
 import json
 import math
+import re
 import subprocess
 import sys
 import threading
@@ -169,6 +170,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sam2-config", default=None)
     parser.add_argument("--sam2-device", default="cuda")
     parser.add_argument("--segment-cache-dir", type=Path, default=Path("viewer_device_segments"))
+    parser.add_argument(
+        "--room-store-dir",
+        type=Path,
+        default=Path("viewer_room_store"),
+        help="Room/device/object capture store used by Quest point prompts.",
+    )
+    parser.add_argument("--point-debounce-ms", type=int, default=250)
+    parser.add_argument("--point-debounce-world-m", type=float, default=0.02)
+    parser.add_argument("--point-delete-world-m", type=float, default=0.08)
+    parser.add_argument("--image-match-depth-abs-m", type=float, default=0.12)
+    parser.add_argument("--image-match-depth-rel", type=float, default=0.10)
     parser.add_argument("--cursor-nearest-depth-radius-px", type=int, default=10)
     parser.add_argument("--seg-depth-abs-band-m", type=float, default=0.18)
     parser.add_argument("--seg-depth-rel-band", type=float, default=0.12)
@@ -941,12 +953,14 @@ def run_device_segmentation(
         return frame
 
     depth = frame.any2full_depth if frame.any2full_depth is not None else frame.aligned_depth
-    prompt = build_cursor_prompt(
-        frame.meta,
-        cursor_payload,
-        depth,
-        CursorPromptConfig(nearest_depth_radius_px=args.cursor_nearest_depth_radius_px),
-    )
+    prompt = frame.meta.get("cursor_prompt")
+    if not isinstance(prompt, dict) or not prompt.get("valid", False):
+        prompt = build_cursor_prompt(
+            frame.meta,
+            cursor_payload,
+            depth,
+            CursorPromptConfig(nearest_depth_radius_px=args.cursor_nearest_depth_radius_px),
+        )
     frame.meta["cursor_prompt"] = prompt
 
     work_dir = frame.frame_dir
@@ -973,6 +987,10 @@ def run_device_segmentation(
     if not prompt.get("valid", False):
         print(f"[device-seg] skipped: invalid cursor prompt ({prompt.get('reason')})", flush=True)
         return frame
+    explicit_labels = prompt.get("sam_point_labels") or prompt.get("point_labels") or []
+    if isinstance(explicit_labels, list) and explicit_labels and not any(int(label) > 0 for label in explicit_labels):
+        print("[device-seg] skipped: prompt has no positive point", flush=True)
+        return frame
 
     rgbd_prompt_path = work_dir / "cursor_prompt_rgbd.json"
     depth_component_path = work_dir / "device_depth_component_mask.png"
@@ -997,7 +1015,9 @@ def run_device_segmentation(
     print(
         "[device-seg] rgbd prompt "
         f"valid={prompt.get('rgbd_prompt_valid')} area={prompt.get('rgbd_component_area_px')} "
-        f"box={prompt.get('sam_box_xyxy')}",
+        f"box={prompt.get('sam_box_xyxy')} "
+        f"points=+{prompt.get('positive_point_count', '?')}/-{prompt.get('negative_point_count', '?')} "
+        f"user_only={prompt.get('rgbd_prompt_user_points_only', False)}",
         flush=True,
     )
 
@@ -1302,10 +1322,559 @@ def _parse_multipart(body: bytes, content_type: str) -> dict[str, bytes]:
     return parts
 
 
+_SAFE_PATH_RE = re.compile(r"[^A-Za-z0-9_.-]+")
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _safe_path_component(value: object, fallback: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        text = fallback
+    text = _SAFE_PATH_RE.sub("_", text).strip("._")
+    return text or fallback
+
+
+def _room_context(cursor: dict) -> dict:
+    room_raw = cursor.get("room_id") or cursor.get("room_name") or "room_default"
+    device_raw = cursor.get("device_id") or cursor.get("device_name") or "device_default"
+    object_raw = cursor.get("object_session_id") or cursor.get("object_id") or "object_default"
+    return {
+        "room_id": _safe_path_component(room_raw, "room_default"),
+        "room_name": str(cursor.get("room_name") or room_raw),
+        "device_id": _safe_path_component(device_raw, "device_default"),
+        "device_name": str(cursor.get("device_name") or device_raw),
+        "device_model": str(cursor.get("device_model") or ""),
+        "object_id": _safe_path_component(object_raw, "object_default"),
+    }
+
+
+def _room_store_root(args: argparse.Namespace) -> Path:
+    root = args.room_store_dir
+    return root if root.is_absolute() else Path.cwd() / root
+
+
+def _room_device_paths(args: argparse.Namespace, cursor: dict) -> tuple[dict, Path, Path]:
+    ctx = _room_context(cursor)
+    device_dir = _room_store_root(args) / ctx["room_id"] / ctx["device_id"]
+    return ctx, device_dir, device_dir / "points.json"
+
+
+def _load_point_store(args: argparse.Namespace, cursor: dict) -> tuple[dict, Path, dict]:
+    ctx, device_dir, points_path = _room_device_paths(args, cursor)
+    if points_path.exists():
+        try:
+            store = json.loads(points_path.read_text(encoding="utf-8"))
+        except Exception:
+            store = {}
+    else:
+        store = {}
+    store.setdefault("schema_version", 1)
+    store["room_id"] = ctx["room_id"]
+    store["room_name"] = ctx["room_name"]
+    store["device_id"] = ctx["device_id"]
+    store["device_name"] = ctx["device_name"]
+    store["device_model"] = ctx["device_model"]
+    store["active_object_id"] = ctx["object_id"]
+    store.setdefault("images", [])
+    store.setdefault("points", [])
+    return ctx, device_dir, store
+
+
+def _save_point_store(device_dir: Path, store: dict) -> None:
+    device_dir.mkdir(parents=True, exist_ok=True)
+    path = device_dir / "points.json"
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(store, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _resolve_store_path(device_dir: Path, value: object) -> Path:
+    return device_dir / str(value or "")
+
+
+def _load_room_image_depth(device_dir: Path, image_record: dict) -> np.ndarray | None:
+    capture_dir = _resolve_store_path(device_dir, image_record.get("capture_dir"))
+    for name in ("dense_depth_any2full.npy", "aligned_depth.npy"):
+        path = capture_dir / name
+        if path.exists():
+            try:
+                depth = np.load(path).astype(np.float32, copy=False)
+            except Exception as exc:
+                print(f"[room-store] failed to load depth {path}: {exc}", flush=True)
+                continue
+            if depth.ndim == 2:
+                return depth
+    return None
+
+
+def _prompt_depth_match(args: argparse.Namespace, prompt: dict, require_depth: bool = True) -> bool:
+    if not prompt.get("valid", False):
+        return False
+    sampled = prompt.get("depth_sample_m")
+    camera_z = prompt.get("rgb_camera_z_m")
+    if sampled is None or camera_z is None:
+        return not require_depth
+    try:
+        sampled_f = float(sampled)
+        camera_z_f = float(camera_z)
+    except (TypeError, ValueError):
+        return not require_depth
+    if not np.isfinite(sampled_f) or not np.isfinite(camera_z_f) or sampled_f <= 0.0 or camera_z_f <= 0.0:
+        return not require_depth
+    threshold = max(float(args.image_match_depth_abs_m), abs(camera_z_f) * float(args.image_match_depth_rel))
+    diff = abs(sampled_f - camera_z_f)
+    if diff <= threshold:
+        prompt["image_match_depth_diff_m"] = float(diff)
+        prompt["image_match_depth_threshold_m"] = float(threshold)
+        return True
+    prompt["reason"] = "depth_mismatch"
+    prompt["image_match_depth_diff_m"] = float(diff)
+    prompt["image_match_depth_threshold_m"] = float(threshold)
+    return False
+
+
+def _next_image_id(store: dict) -> str:
+    max_index = 0
+    for image in store.get("images", []):
+        raw = str(image.get("image_id", ""))
+        match = re.search(r"(\d+)$", raw)
+        if match:
+            max_index = max(max_index, int(match.group(1)))
+    return f"pic_{max_index + 1:06d}"
+
+
+def _create_room_capture(
+    frame: FrameData,
+    viewer: "RgbdViewer",
+    rgb_payload_bytes: bytes,
+    rgb_format: str,
+    depth_raw_bytes: bytes,
+    meta_json_bytes: bytes,
+    cursor: dict,
+) -> tuple[dict, Path, dict, dict]:
+    ctx, device_dir, store = _load_point_store(viewer.args, cursor)
+    image_id = _next_image_id(store)
+    capture_dir = device_dir / image_id
+    capture_dir.mkdir(parents=True, exist_ok=True)
+
+    (capture_dir / "meta.json").write_bytes(meta_json_bytes)
+    (capture_dir / "depth.raw").write_bytes(depth_raw_bytes)
+    if rgb_format == "raw_rgb24":
+        (capture_dir / "rgb.raw").write_bytes(rgb_payload_bytes)
+        Image.fromarray(frame.rgb.astype(np.uint8)).save(capture_dir / "rgb.jpg", quality=95)
+    else:
+        (capture_dir / "rgb.jpg").write_bytes(rgb_payload_bytes)
+    Image.fromarray(frame.rgb.astype(np.uint8)).save(device_dir / f"{image_id}.png")
+    np.save(capture_dir / "aligned_depth.npy", frame.aligned_depth.astype(np.float32))
+
+    record = {
+        "image_id": image_id,
+        "object_id": ctx["object_id"],
+        "created_at_ms": _now_ms(),
+        "rgb_png": f"{image_id}.png",
+        "capture_dir": image_id,
+        "meta_json": f"{image_id}/meta.json",
+        "rgb_jpg": f"{image_id}/rgb.jpg",
+        "depth_raw": f"{image_id}/depth.raw",
+    }
+    if rgb_format == "raw_rgb24":
+        record["rgb_raw"] = f"{image_id}/rgb.raw"
+    store["images"].append(record)
+    _save_point_store(device_dir, store)
+    frame.frame_dir = capture_dir
+    return ctx, device_dir, store, record
+
+
+def _finalize_room_capture_frame(frame: FrameData, capture_dir: Path) -> None:
+    if frame.any2full_depth is not None:
+        dense_path = capture_dir / "dense_depth_any2full.npy"
+        np.save(dense_path, frame.any2full_depth.astype(np.float32))
+        frame.any2full_path = dense_path
+    frame.frame_dir = capture_dir
+    (capture_dir / "meta.json").write_text(json.dumps(frame.meta, indent=2), encoding="utf-8")
+
+
+def _project_cursor_for_image(
+    args: argparse.Namespace,
+    device_dir: Path,
+    image_record: dict,
+    cursor: dict,
+    depth: np.ndarray | None = None,
+) -> dict:
+    meta_path = _resolve_store_path(device_dir, image_record.get("meta_json"))
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    return build_cursor_prompt(
+        meta,
+        cursor,
+        depth,
+        CursorPromptConfig(nearest_depth_radius_px=args.cursor_nearest_depth_radius_px),
+    )
+
+
+def _find_matching_room_image(
+    viewer: "RgbdViewer",
+    cursor: dict,
+) -> tuple[dict, Path, dict, dict | None, dict | None]:
+    ctx, device_dir, store = _load_point_store(viewer.args, cursor)
+    if bool(cursor.get("force_new_capture", False)):
+        return ctx, device_dir, store, None, None
+    object_id = ctx["object_id"]
+    for image in reversed(store.get("images", [])):
+        if str(image.get("object_id") or "object_default") != object_id:
+            continue
+        try:
+            depth = _load_room_image_depth(device_dir, image)
+            prompt = _project_cursor_for_image(viewer.args, device_dir, image, cursor, depth)
+        except Exception as exc:
+            print(f"[room-store] image projection failed for {image.get('image_id')}: {exc}", flush=True)
+            continue
+        if _prompt_depth_match(viewer.args, prompt, require_depth=depth is not None):
+            return ctx, device_dir, store, image, prompt
+    return ctx, device_dir, store, None, None
+
+
+def _point_world_xyz(cursor: dict, prompt: dict) -> list[float]:
+    if isinstance(prompt.get("world_xyz_m"), list) and len(prompt["world_xyz_m"]) == 3:
+        return [float(v) for v in prompt["world_xyz_m"]]
+    return [
+        float(cursor.get("hit_world_x", 0.0)),
+        float(cursor.get("hit_world_y", 0.0)),
+        float(cursor.get("hit_world_z", 0.0)),
+    ]
+
+
+def _is_duplicate_point(args: argparse.Namespace, store: dict, point: dict) -> bool:
+    debounce_ms = max(0, int(args.point_debounce_ms))
+    debounce_world = max(0.0, float(args.point_debounce_world_m))
+    if debounce_ms <= 0 and debounce_world <= 0:
+        return False
+    ts = int(point.get("timestamp_ms") or 0)
+    world = np.asarray(point.get("world_xyz_m") or [0.0, 0.0, 0.0], dtype=np.float32)
+    for prev in reversed(store.get("points", [])):
+        if prev.get("image_id") != point.get("image_id"):
+            continue
+        if prev.get("object_id") != point.get("object_id"):
+            continue
+        if int(prev.get("label", 1)) != int(point.get("label", 1)):
+            continue
+        prev_ts = int(prev.get("timestamp_ms") or 0)
+        prev_world = np.asarray(prev.get("world_xyz_m") or [0.0, 0.0, 0.0], dtype=np.float32)
+        world_close = debounce_world > 0 and float(np.linalg.norm(world - prev_world)) <= debounce_world
+        time_close = debounce_ms > 0 and ts > 0 and prev_ts > 0 and abs(ts - prev_ts) <= debounce_ms
+        if world_close or (debounce_world <= 0 and time_close):
+            return True
+    return False
+
+
+def _append_room_point(
+    args: argparse.Namespace,
+    device_dir: Path,
+    store: dict,
+    image_record: dict,
+    cursor: dict,
+    prompt: dict,
+) -> tuple[bool, dict]:
+    label = 1 if int(cursor.get("label", cursor.get("point_label", 1))) > 0 else 0
+    timestamp_ms = int(cursor.get("timestamp_ms") or _now_ms())
+    point = {
+        "point_id": f"pt_{timestamp_ms}_{len(store.get('points', [])) + 1:04d}",
+        "image_id": image_record["image_id"],
+        "object_id": image_record.get("object_id") or store.get("active_object_id") or "object_default",
+        "label": label,
+        "mode": cursor.get("mode") or ("add" if label > 0 else "del"),
+        "rgb_xy": [int(prompt["rgb_x"]), int(prompt["rgb_y"])],
+        "world_xyz_m": _point_world_xyz(cursor, prompt),
+        "timestamp_ms": timestamp_ms,
+        "rgb_camera_z_m": float(prompt.get("rgb_camera_z_m", 0.0)),
+    }
+    if _is_duplicate_point(args, store, point):
+        return False, point
+    store.setdefault("points", []).append(point)
+    image_record["updated_at_ms"] = timestamp_ms
+    _save_point_store(device_dir, store)
+    return True, point
+
+
+def _cursor_for_stored_point(point: dict, fallback_cursor: dict) -> dict:
+    cursor = dict(fallback_cursor)
+    world = point.get("world_xyz_m")
+    if isinstance(world, list) and len(world) == 3:
+        cursor["hit_world_x"] = float(world[0])
+        cursor["hit_world_y"] = float(world[1])
+        cursor["hit_world_z"] = float(world[2])
+    cursor["is_hitting"] = True
+    cursor["label"] = 1 if int(point.get("label", 1)) > 0 else 0
+    cursor["mode"] = point.get("mode") or ("add" if int(point.get("label", 1)) > 0 else "del")
+    cursor["timestamp_ms"] = int(cursor.get("timestamp_ms") or _now_ms())
+    return cursor
+
+
+def _preseed_visible_points_for_new_image(
+    args: argparse.Namespace,
+    device_dir: Path,
+    store: dict,
+    image_record: dict,
+    frame: FrameData,
+    fallback_cursor: dict,
+) -> int:
+    object_id = image_record.get("object_id") or store.get("active_object_id") or "object_default"
+    depth = frame.any2full_depth if frame.any2full_depth is not None else frame.aligned_depth
+    existing_source_ids = {
+        str(point.get("source_point_id") or point.get("point_id"))
+        for point in store.get("points", [])
+        if point.get("image_id") == image_record.get("image_id")
+    }
+    source_points: list[dict] = []
+    seen_source_ids: set[str] = set()
+    for point in store.get("points", []):
+        if point.get("image_id") == image_record.get("image_id"):
+            continue
+        if point.get("object_id") != object_id:
+            continue
+        if not isinstance(point.get("world_xyz_m"), list):
+            continue
+        source_id = str(point.get("source_point_id") or point.get("point_id"))
+        if source_id in seen_source_ids or source_id in existing_source_ids:
+            continue
+        seen_source_ids.add(source_id)
+        source_points.append(point)
+
+    added_count = 0
+    for source in source_points:
+        cursor = _cursor_for_stored_point(source, fallback_cursor)
+        prompt = build_cursor_prompt(
+            frame.meta,
+            cursor,
+            depth,
+            CursorPromptConfig(nearest_depth_radius_px=args.cursor_nearest_depth_radius_px),
+        )
+        if not _prompt_depth_match(args, prompt, require_depth=depth is not None):
+            continue
+
+        timestamp_ms = _now_ms()
+        point = {
+            "point_id": f"pt_{timestamp_ms}_{len(store.get('points', [])) + 1:04d}",
+            "image_id": image_record["image_id"],
+            "object_id": object_id,
+            "label": 1 if int(source.get("label", 1)) > 0 else 0,
+            "mode": source.get("mode") or ("add" if int(source.get("label", 1)) > 0 else "del"),
+            "rgb_xy": [int(prompt["rgb_x"]), int(prompt["rgb_y"])],
+            "world_xyz_m": _point_world_xyz(cursor, prompt),
+            "timestamp_ms": timestamp_ms,
+            "rgb_camera_z_m": float(prompt.get("rgb_camera_z_m", 0.0)),
+            "source_point_id": str(source.get("source_point_id") or source.get("point_id")),
+            "source_image_id": str(source.get("image_id") or ""),
+            "preseeded": True,
+        }
+        if _is_duplicate_point(args, store, point):
+            continue
+        store.setdefault("points", []).append(point)
+        added_count += 1
+
+    if added_count:
+        image_record["preseeded_point_count"] = int(image_record.get("preseeded_point_count", 0)) + added_count
+        image_record["updated_at_ms"] = _now_ms()
+        _save_point_store(device_dir, store)
+    return added_count
+
+
+def _remove_room_points_near_world(
+    args: argparse.Namespace,
+    store: dict,
+    cursor: dict,
+) -> list[dict]:
+    object_id = _room_context(cursor)["object_id"]
+    try:
+        target = np.asarray(
+            [
+                float(cursor["hit_world_x"]),
+                float(cursor["hit_world_y"]),
+                float(cursor["hit_world_z"]),
+            ],
+            dtype=np.float32,
+        )
+    except (KeyError, TypeError, ValueError):
+        return []
+
+    max_distance = max(0.0, float(args.point_delete_world_m))
+    best_index = -1
+    best_distance = float("inf")
+    for index, point in enumerate(store.get("points", [])):
+        if point.get("object_id") != object_id:
+            continue
+        world = point.get("world_xyz_m")
+        if not isinstance(world, list) or len(world) != 3:
+            continue
+        point_world = np.asarray(world, dtype=np.float32)
+        distance = float(np.linalg.norm(point_world - target))
+        if distance < best_distance:
+            best_distance = distance
+            best_index = index
+
+    if best_index < 0 or best_distance > max_distance:
+        return []
+
+    best_point = store["points"][best_index]
+    best_world = np.asarray(best_point.get("world_xyz_m") or [0.0, 0.0, 0.0], dtype=np.float32)
+    source_id = str(best_point.get("source_point_id") or best_point.get("point_id") or "")
+    removed: list[dict] = []
+    kept: list[dict] = []
+    for point in store.get("points", []):
+        if point.get("object_id") != object_id:
+            kept.append(point)
+            continue
+
+        point_source_id = str(point.get("source_point_id") or point.get("point_id") or "")
+        world = point.get("world_xyz_m")
+        world_close = False
+        if isinstance(world, list) and len(world) == 3:
+            point_world = np.asarray(world, dtype=np.float32)
+            world_close = float(np.linalg.norm(point_world - best_world)) <= max_distance
+        same_source = bool(source_id) and point_source_id == source_id
+        if same_source or world_close:
+            item = dict(point)
+            item["delete_distance_m"] = float(np.linalg.norm(np.asarray(point.get("world_xyz_m") or best_world, dtype=np.float32) - target))
+            removed.append(item)
+        else:
+            kept.append(point)
+
+    store["points"] = kept
+    return removed
+
+
+def _points_for_image(store: dict, image_record: dict) -> list[dict]:
+    image_id = image_record.get("image_id")
+    object_id = image_record.get("object_id") or store.get("active_object_id") or "object_default"
+    return [
+        point
+        for point in store.get("points", [])
+        if point.get("image_id") == image_id and point.get("object_id") == object_id
+    ]
+
+
+def _build_prompt_from_room_points(
+    frame: FrameData,
+    args: argparse.Namespace,
+    store: dict,
+    image_record: dict,
+    fallback_cursor: dict,
+) -> dict:
+    points = _points_for_image(store, image_record)
+    coords: list[list[int]] = []
+    labels: list[int] = []
+    for point in points:
+        coord = point.get("rgb_xy")
+        if not isinstance(coord, list) or len(coord) != 2:
+            continue
+        coords.append([int(coord[0]), int(coord[1])])
+        labels.append(1 if int(point.get("label", 1)) > 0 else 0)
+    positives = [point for point in points if int(point.get("label", 1)) > 0 and isinstance(point.get("rgb_xy"), list)]
+    if not positives:
+        return {
+            "valid": False,
+            "reason": "no_positive_point",
+            "sam_point_coords": coords,
+            "sam_point_labels": labels,
+            "user_point_coords": coords,
+            "user_point_labels": labels,
+        }
+
+    seed = positives[-1]
+    seed_cursor = dict(fallback_cursor)
+    world = seed.get("world_xyz_m") or fallback_cursor
+    if isinstance(world, list) and len(world) == 3:
+        seed_cursor["hit_world_x"] = float(world[0])
+        seed_cursor["hit_world_y"] = float(world[1])
+        seed_cursor["hit_world_z"] = float(world[2])
+    seed_cursor["is_hitting"] = True
+    seed_cursor["label"] = 1
+    seed_cursor["mode"] = "add"
+
+    depth = frame.any2full_depth if frame.any2full_depth is not None else frame.aligned_depth
+    prompt = build_cursor_prompt(
+        frame.meta,
+        seed_cursor,
+        depth,
+        CursorPromptConfig(nearest_depth_radius_px=args.cursor_nearest_depth_radius_px),
+    )
+    if not prompt.get("valid", False):
+        sx, sy = seed["rgb_xy"]
+        prompt = {
+            "valid": True,
+            "reason": "ok_from_stored_pixel",
+            "rgb_x": int(sx),
+            "rgb_y": int(sy),
+            "point_coords": [[int(sx), int(sy)]],
+            "point_labels": [1],
+            "world_xyz_m": seed.get("world_xyz_m"),
+            "cursor": seed_cursor,
+        }
+    prompt["user_point_coords"] = [[int(coord[0]), int(coord[1])] for coord in coords]
+    prompt["user_point_labels"] = labels
+    prompt["sam_point_coords"] = prompt["user_point_coords"]
+    prompt["sam_point_labels"] = labels
+    prompt["point_coords"] = prompt["sam_point_coords"]
+    prompt["point_labels"] = labels
+    prompt["room_id"] = store.get("room_id")
+    prompt["device_id"] = store.get("device_id")
+    prompt["object_id"] = image_record.get("object_id")
+    prompt["point_count"] = len(coords)
+    prompt["positive_point_count"] = sum(1 for label in labels if label > 0)
+    prompt["negative_point_count"] = sum(1 for label in labels if label <= 0)
+    frame.meta["cursor"] = seed_cursor
+    frame.meta["cursor_prompt"] = prompt
+    return prompt
+
+
+def _apply_room_segmentation(
+    frame: FrameData,
+    viewer: "RgbdViewer",
+    device_dir: Path,
+    store: dict,
+    image_record: dict,
+    cursor: dict,
+) -> FrameData:
+    prompt = _build_prompt_from_room_points(frame, viewer.args, store, image_record, cursor)
+    frame.meta["cursor_prompt"] = prompt
+    if prompt.get("valid", False):
+        frame = run_device_segmentation(frame, viewer.args, viewer.device_segmenter)
+        image_record["last_segmented_at_ms"] = _now_ms()
+        if frame.device_mask_path is not None:
+            image_record["device_mask"] = str(frame.device_mask_path)
+        _save_point_store(device_dir, store)
+    else:
+        print(f"[room-store] segmentation skipped: {prompt.get('reason')}", flush=True)
+        image_record.pop("device_mask", None)
+        _save_point_store(device_dir, store)
+    return frame
+
+
+def _load_room_frame(viewer: "RgbdViewer", device_dir: Path, image_record: dict) -> FrameData:
+    capture_dir = _resolve_store_path(device_dir, image_record.get("capture_dir"))
+    return load_frame(
+        capture_dir,
+        viewer.args.min_depth,
+        viewer.args.max_depth,
+        viewer.args.mode,
+        viewer.args.depth_origin,
+    )
+
+
 class _PayloadHandler(http.server.BaseHTTPRequestHandler):
     viewer_ref: "RgbdViewer | None" = None
 
     def do_POST(self) -> None:
+        if self.path == "/api/room/point/delete":
+            self._handle_room_point_delete()
+            return
+
+        if self.path == "/api/room/point":
+            self._handle_room_point()
+            return
+
         if self.path != "/api/track/start-final-rgbd":
             self.send_error(404)
             return
@@ -1333,6 +1902,11 @@ class _PayloadHandler(http.server.BaseHTTPRequestHandler):
         depth_raw = parts.get("depth_raw")
         meta_json = parts.get("meta_json")
         cursor_json = parts.get("cursor_json")
+        try:
+            cursor_payload = json.loads(cursor_json.decode("utf-8")) if cursor_json is not None else None
+        except Exception as exc:
+            self.send_error(400, f"invalid cursor_json: {exc}")
+            return
         if rgb_raw is None and rgb_jpeg is None:
             self.send_error(400, "missing RGB field: need rgb_raw or rgb_jpeg")
             return
@@ -1346,17 +1920,59 @@ class _PayloadHandler(http.server.BaseHTTPRequestHandler):
             return
 
         try:
+            rgb_payload_bytes = rgb_raw if rgb_raw is not None else rgb_jpeg
+            rgb_format = "raw_rgb24" if rgb_raw is not None else "jpeg"
             frame = load_frame_from_payload(
-                rgb_payload_bytes=rgb_raw if rgb_raw is not None else rgb_jpeg,
-                rgb_format="raw_rgb24" if rgb_raw is not None else "jpeg",
+                rgb_payload_bytes=rgb_payload_bytes,
+                rgb_format=rgb_format,
                 depth_raw_bytes=depth_raw,
                 meta_json_str=meta_json.decode("utf-8"),
                 min_depth=viewer.args.min_depth,
                 max_depth=viewer.args.max_depth,
                 cursor_json_str=cursor_json.decode("utf-8") if cursor_json is not None else None,
             )
+            room_device_dir = None
+            room_store = None
+            room_image = None
+            if isinstance(cursor_payload, dict) and (cursor_payload.get("room_id") or cursor_payload.get("room_name")):
+                _ctx, room_device_dir, room_store, room_image = _create_room_capture(
+                    frame,
+                    viewer,
+                    rgb_payload_bytes,
+                    rgb_format,
+                    depth_raw,
+                    meta_json,
+                    cursor_payload,
+                )
+
             frame = run_any2full_completion(frame, viewer.args, viewer.any2full_service)
-            frame = run_device_segmentation(frame, viewer.args, viewer.device_segmenter)
+            if room_image is not None and room_device_dir is not None and room_store is not None:
+                capture_dir = _resolve_store_path(room_device_dir, room_image.get("capture_dir"))
+                _finalize_room_capture_frame(frame, capture_dir)
+                preseeded_count = _preseed_visible_points_for_new_image(
+                    viewer.args,
+                    room_device_dir,
+                    room_store,
+                    room_image,
+                    frame,
+                    cursor_payload,
+                )
+                if preseeded_count:
+                    print(f"[room-store] preseeded {preseeded_count} visible point(s) into {room_image.get('image_id')}", flush=True)
+                depth = frame.any2full_depth if frame.any2full_depth is not None else frame.aligned_depth
+                prompt = build_cursor_prompt(
+                    frame.meta,
+                    cursor_payload,
+                    depth,
+                    CursorPromptConfig(nearest_depth_radius_px=viewer.args.cursor_nearest_depth_radius_px),
+                )
+                if prompt.get("valid", False):
+                    _append_room_point(viewer.args, room_device_dir, room_store, room_image, cursor_payload, prompt)
+                else:
+                    print(f"[room-store] uploaded point outside new image: {prompt.get('reason')}", flush=True)
+                frame = _apply_room_segmentation(frame, viewer, room_device_dir, room_store, room_image, cursor_payload)
+            else:
+                frame = run_device_segmentation(frame, viewer.args, viewer.device_segmenter)
         except Exception as exc:
             print(f"[server] alignment failed: {exc}", flush=True)
             self.send_error(500, str(exc))
@@ -1388,6 +2004,120 @@ class _PayloadHandler(http.server.BaseHTTPRequestHandler):
         }
         body = json.dumps(response).encode("utf-8")
         self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _handle_room_point(self) -> None:
+        viewer = self.viewer_ref
+        if viewer is None:
+            self._send_json(503, {"ok": False, "needs_capture": True, "reason": "viewer_not_ready"})
+            return
+
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self._send_json(400, {"ok": False, "needs_capture": True, "reason": "invalid_content_length"})
+            return
+
+        try:
+            cursor = json.loads(self.rfile.read(content_length).decode("utf-8"))
+        except Exception as exc:
+            self._send_json(400, {"ok": False, "needs_capture": True, "reason": f"invalid_json: {exc}"})
+            return
+
+        try:
+            _ctx, device_dir, store, image_record, projected = _find_matching_room_image(viewer, cursor)
+            if image_record is None or projected is None:
+                _save_point_store(device_dir, store)
+                reason = "forced_new_capture" if bool(cursor.get("force_new_capture", False)) else "no_matching_image"
+                self._send_json(200, {"ok": True, "needs_capture": True, "reason": reason})
+                return
+
+            added, point = _append_room_point(viewer.args, device_dir, store, image_record, cursor, projected)
+            frame = _load_room_frame(viewer, device_dir, image_record)
+            frame = _apply_room_segmentation(frame, viewer, device_dir, store, image_record, cursor)
+        except Exception as exc:
+            print(f"[room-store] point handling failed: {exc}", flush=True)
+            self._send_json(500, {"ok": False, "needs_capture": True, "reason": str(exc)})
+            return
+
+        viewer.root.after(0, lambda: viewer._on_network_frame(frame))
+        self._send_json(
+            200,
+            {
+                "ok": True,
+                "needs_capture": False,
+                "reason": "matched_existing_image",
+                "image_id": image_record.get("image_id"),
+                "point_added": added,
+                "point": point,
+            },
+        )
+
+    def _handle_room_point_delete(self) -> None:
+        viewer = self.viewer_ref
+        if viewer is None:
+            self._send_json(503, {"ok": False, "deleted": False, "reason": "viewer_not_ready"})
+            return
+
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self._send_json(400, {"ok": False, "deleted": False, "reason": "invalid_content_length"})
+            return
+
+        try:
+            cursor = json.loads(self.rfile.read(content_length).decode("utf-8"))
+        except Exception as exc:
+            self._send_json(400, {"ok": False, "deleted": False, "reason": f"invalid_json: {exc}"})
+            return
+
+        try:
+            _ctx, device_dir, store = _load_point_store(viewer.args, cursor)
+            removed_points = _remove_room_points_near_world(viewer.args, store, cursor)
+            if not removed_points:
+                self._send_json(200, {"ok": True, "deleted": False, "reason": "no_point_nearby"})
+                return
+
+            affected_image_ids = sorted({str(point.get("image_id")) for point in removed_points if point.get("image_id")})
+            image_records = [
+                image
+                for image in store.get("images", [])
+                if str(image.get("image_id")) in affected_image_ids
+            ]
+            for image_record in image_records:
+                image_record["updated_at_ms"] = _now_ms()
+            _save_point_store(device_dir, store)
+
+            frame = None
+            for image_record in image_records:
+                frame = _load_room_frame(viewer, device_dir, image_record)
+                frame = _apply_room_segmentation(frame, viewer, device_dir, store, image_record, cursor)
+        except Exception as exc:
+            print(f"[room-store] point delete failed: {exc}", flush=True)
+            self._send_json(500, {"ok": False, "deleted": False, "reason": str(exc)})
+            return
+
+        if frame is not None:
+            viewer.root.after(0, lambda: viewer._on_network_frame(frame))
+        self._send_json(
+            200,
+            {
+                "ok": True,
+                "deleted": True,
+                "reason": "deleted",
+                "image_ids": affected_image_ids,
+                "deleted_count": len(removed_points),
+                "point": removed_points[0],
+                "points": removed_points,
+            },
+        )
+
+    def _send_json(self, status: int, payload: dict) -> None:
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -1657,10 +2387,17 @@ class RgbdViewer:
         prompt = self.get_cursor_prompt()
         if prompt is None:
             return "missing"
+        coords = prompt.get("user_point_coords") or prompt.get("point_coords") or []
+        labels = prompt.get("user_point_labels") or prompt.get("point_labels") or []
+        point_note = ""
+        if isinstance(coords, list) and isinstance(labels, list) and len(coords) == len(labels) and coords:
+            positive_count = sum(1 for label in labels if int(label) > 0)
+            negative_count = len(labels) - positive_count
+            point_note = f" +{positive_count}/-{negative_count}"
         if prompt.get("valid", False):
             x = prompt.get("rgb_x", "?")
             y = prompt.get("rgb_y", "?")
-            return f"ok({x},{y})"
+            return f"ok({x},{y}){point_note}"
         return str(prompt.get("reason", "invalid"))
 
     def get_active_nearest_index(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -1787,13 +2524,48 @@ class RgbdViewer:
         prompt = self.get_cursor_prompt()
         if prompt is None or not prompt.get("valid", False):
             return
+        assert self.frame is not None
+        rgb_h, rgb_w = self.frame.rgb.shape[:2]
+        coords = prompt.get("user_point_coords") or prompt.get("point_coords") or []
+        labels = prompt.get("user_point_labels") or prompt.get("point_labels") or []
+        if isinstance(coords, list) and isinstance(labels, list) and len(coords) == len(labels):
+            for index, (coord, label) in enumerate(zip(coords, labels), start=1):
+                if not isinstance(coord, (list, tuple)) or len(coord) != 2:
+                    continue
+                try:
+                    px = float(coord[0])
+                    py = float(coord[1])
+                    point_label = 1 if int(label) > 0 else 0
+                except (TypeError, ValueError):
+                    continue
+                if px < 0 or px >= rgb_w or py < 0 or py >= rgb_h:
+                    continue
+                cx = int(np.clip(round(px * self.rgb_scale), 0, max(0, canvas_w - 1)))
+                cy = int(np.clip(round(py * self.rgb_scale), 0, max(0, canvas_h - 1)))
+                color = "#00e676" if point_label > 0 else "#ff4d4f"
+                radius = 8
+                self.rgb_canvas.create_oval(
+                    cx - radius,
+                    cy - radius,
+                    cx + radius,
+                    cy + radius,
+                    fill=color,
+                    outline="#101010",
+                    width=2,
+                )
+                self.rgb_canvas.create_text(
+                    cx,
+                    cy,
+                    text=str(index),
+                    fill="#101010",
+                    anchor=tk.CENTER,
+                    font=("Consolas", 8, "bold"),
+                )
         try:
             rgb_x = float(prompt["rgb_x"])
             rgb_y = float(prompt["rgb_y"])
         except (KeyError, TypeError, ValueError):
             return
-        assert self.frame is not None
-        rgb_h, rgb_w = self.frame.rgb.shape[:2]
         if rgb_x < 0 or rgb_x >= rgb_w or rgb_y < 0 or rgb_y >= rgb_h:
             return
 

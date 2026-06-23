@@ -1,3 +1,5 @@
+using System;
+using System.Globalization;
 using SmartRoom.Interaction;
 using TMPro;
 using UnityEngine;
@@ -151,6 +153,10 @@ namespace SmartRoom.UI
 
                 if (releasedIndex == 0)
                     RoomCoordinateSystemPanel.OpenSelectionPanel();
+                else if (releasedIndex == 1)
+                    RoomObjectSession.StartNewObject();
+                else if (releasedIndex == 2)
+                    RoomCaptureSession.ForceNextCapture();
             }
         }
 
@@ -202,7 +208,7 @@ namespace SmartRoom.UI
                 _slotLocalPositions[i] = localPosition;
 
                 GameObject slot = GameObject.CreatePrimitive(PrimitiveType.Sphere);
-                slot.name = i == 0 ? "Slot_RoomPanel" : "Slot_Empty_" + i;
+                slot.name = i == 0 ? "Slot_RoomPanel" : i == 1 ? "Slot_NewObject" : i == 2 ? "Slot_NewImage" : "Slot_Empty_" + i;
                 slot.transform.SetParent(_visualRoot, false);
                 slot.transform.localPosition = localPosition;
                 slot.transform.localScale = Vector3.one * (slotRadius * 2f);
@@ -212,7 +218,7 @@ namespace SmartRoom.UI
                     Destroy(slotCollider);
 
                 MeshRenderer renderer = slot.GetComponent<MeshRenderer>();
-                Material material = CreateMaterial(i == 0 ? activeColor : inactiveColor);
+                Material material = CreateMaterial(IsActiveSlot(i) ? activeColor : inactiveColor);
                 renderer.sharedMaterial = material;
                 _slotTransforms[i] = slot.transform;
                 _slotRenderers[i] = renderer;
@@ -220,6 +226,10 @@ namespace SmartRoom.UI
 
                 if (i == 0)
                     _labels[i] = CreateLabel("RoomsLabel", "Rooms", localPosition + new Vector3(0f, 0.042f, 0f), activeColor);
+                else if (i == 1)
+                    _labels[i] = CreateLabel("NewObjectLabel", "New Obj", localPosition + new Vector3(0f, 0.042f, 0f), activeColor);
+                else if (i == 2)
+                    _labels[i] = CreateLabel("NewImageLabel", "New Img", localPosition + new Vector3(0f, 0.042f, 0f), activeColor);
             }
 
             GameObject cursor = GameObject.CreatePrimitive(PrimitiveType.Sphere);
@@ -333,7 +343,7 @@ namespace SmartRoom.UI
         {
             for (int i = 0; i < SlotCount; i++)
             {
-                Color baseColor = i == 0 ? activeColor : inactiveColor;
+                Color baseColor = IsActiveSlot(i) ? activeColor : inactiveColor;
                 Color color = i == _selectedIndex ? selectedColor : baseColor;
                 SetMaterialColor(_slotMaterials[i], color);
 
@@ -378,6 +388,63 @@ namespace SmartRoom.UI
         {
             if (material != null)
                 Destroy(material);
+        }
+
+        private static bool IsActiveSlot(int index)
+        {
+            return index == 0 || index == 1 || index == 2;
+        }
+    }
+
+    public static class RoomObjectSession
+    {
+        private static string _currentObjectId = string.Empty;
+
+        public static string CurrentObjectId
+        {
+            get
+            {
+                if (string.IsNullOrWhiteSpace(_currentObjectId))
+                    StartNewObject();
+                return _currentObjectId;
+            }
+        }
+
+        public static string StartNewObject()
+        {
+            string timestamp = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
+            _currentObjectId = "object_" + timestamp;
+            PromptPointMarkerManager.ClearMarkers();
+            Debug.Log("[RoomObjectSession] Started " + _currentObjectId);
+            return _currentObjectId;
+        }
+
+        public static void Reset()
+        {
+            _currentObjectId = string.Empty;
+        }
+    }
+
+    public static class RoomCaptureSession
+    {
+        private static bool _forceNextCapture;
+
+        public static void ForceNextCapture()
+        {
+            _forceNextCapture = true;
+            Debug.Log("[RoomCaptureSession] Next point prompt will capture a new image.");
+        }
+
+        public static bool ConsumeForceNextCapture()
+        {
+            bool value = _forceNextCapture;
+            _forceNextCapture = false;
+            return value;
+        }
+
+        public static void Reset()
+        {
+            _forceNextCapture = false;
         }
     }
 }

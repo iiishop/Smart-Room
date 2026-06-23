@@ -16,6 +16,12 @@ namespace SmartRoom.Interaction
     /// </summary>
     public sealed class DepthCursor : MonoBehaviour
     {
+        public enum ProbeEditMode
+        {
+            Add,
+            Del
+        }
+
         [Header("References")]
         [SerializeField] private EnvironmentRaycastManager raycastManager;
         [SerializeField] private ControllerRaycaster controllerRaycaster;
@@ -24,7 +30,8 @@ namespace SmartRoom.Interaction
         [Header("Cursor Visuals")]
         [SerializeField] private bool interactionEnabledAtStartup;
         [SerializeField] private float baseRadius = 0.02f; // 2cm
-        [SerializeField] private Color hitColor = Color.green;
+        [SerializeField] private Color addHitColor = Color.green;
+        [SerializeField] private Color delHitColor = Color.red;
         [SerializeField] private Color missColor = Color.red;
 
         [Header("World Coordinate Label")]
@@ -49,8 +56,10 @@ namespace SmartRoom.Interaction
         public Vector3 HitPoint { get; private set; }
         public Vector3 HitNormal { get; private set; }
         public float HitDistance { get; private set; }
+        public ProbeEditMode CurrentMode { get; private set; } = ProbeEditMode.Add;
 
         public event System.Action<bool, Vector3, Vector3> OnHitChanged;
+        public event System.Action<ProbeEditMode> OnModeChanged;
 
         private Transform _cursorTransform;
         private MeshRenderer _cursorRenderer;
@@ -165,6 +174,12 @@ namespace SmartRoom.Interaction
             UpdateCursor(ray);
         }
 
+        private void Update()
+        {
+            if (OVRInput.GetDown(OVRInput.Button.One, OVRInput.Controller.RTouch))
+                ToggleMode();
+        }
+
         /// <summary>
         /// 时序平滑 + 丢失容忍的射线更新。
         /// - 命中时：指数平滑位置，防止微小抖动
@@ -191,7 +206,7 @@ namespace SmartRoom.Interaction
             {
                 targetPos = hit.point;
                 targetNormal = hit.normal != Vector3.zero ? hit.normal : Vector3.up;
-                targetColor = hitColor;
+                targetColor = GetActiveHitColor();
                 targetHitting = true;
                 _consecutiveMisses = 0;
             }
@@ -326,6 +341,22 @@ namespace SmartRoom.Interaction
             if (_coordinateLabelTransform != null) _coordinateLabelTransform.gameObject.SetActive(false);
         }
 
+        public void ToggleMode()
+        {
+            SetMode(CurrentMode == ProbeEditMode.Add ? ProbeEditMode.Del : ProbeEditMode.Add);
+        }
+
+        public void SetMode(ProbeEditMode mode)
+        {
+            if (CurrentMode == mode) return;
+
+            CurrentMode = mode;
+            _smoothColor = IsHitting ? GetActiveHitColor() : missColor;
+            SetCursorColor(_smoothColor);
+            OnModeChanged?.Invoke(CurrentMode);
+            Debug.Log("[DepthCursor] Mode switched to " + CurrentMode);
+        }
+
         public void SetInteractionEnabled(bool isEnabled)
         {
             _interactionEnabled = isEnabled;
@@ -339,6 +370,11 @@ namespace SmartRoom.Interaction
         public Vector3 GetHitPoint()
         {
             return HitPoint;
+        }
+
+        private Color GetActiveHitColor()
+        {
+            return CurrentMode == ProbeEditMode.Add ? addHitColor : delHitColor;
         }
 
         private void OnDestroy()

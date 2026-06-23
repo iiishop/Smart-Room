@@ -3,6 +3,7 @@ using System.Net.Http;
 using System.Text;
 using System.Threading.Tasks;
 using SmartRoom.Capture;
+using SmartRoom.UI;
 using UnityEngine;
 
 namespace SmartRoom.Tracking
@@ -24,9 +25,12 @@ namespace SmartRoom.Tracking
         [Header("Viewer")]
         [SerializeField] private string backendBaseUrl = "http://127.0.0.1:8500";
         [SerializeField] private string uploadPath = "/api/track/start-final-rgbd";
+        [SerializeField] private string pointPath = "/api/room/point";
+        [SerializeField] private string deletePointPath = "/api/room/point/delete";
         [SerializeField] private float requestTimeoutSeconds = 300f;
 
         [Header("Input")]
+        [SerializeField] private bool listenForTriggerInput = false;
         [SerializeField] private float triggerCooldownSeconds = 0.75f;
 
         [Header("Optional Headset Status")]
@@ -59,10 +63,13 @@ namespace SmartRoom.Tracking
 
         private void Update()
         {
-            bool triggerPressed = OVRInput.Get(OVRInput.RawButton.RIndexTrigger);
-            if (triggerPressed && !_prevTriggerPressed)
-                OnTriggerPressed();
-            _prevTriggerPressed = triggerPressed;
+            if (listenForTriggerInput)
+            {
+                bool triggerPressed = OVRInput.Get(OVRInput.RawButton.RIndexTrigger);
+                if (triggerPressed && !_prevTriggerPressed)
+                    OnTriggerPressed();
+                _prevTriggerPressed = triggerPressed;
+            }
 
             if (_statusTextObject != null && _hideStatusAt > 0f && Time.time >= _hideStatusAt)
             {
@@ -92,13 +99,14 @@ namespace SmartRoom.Tracking
                 }
 
                 ShowStatus("Uploading RGB-D...");
-                bool ok = await UploadCaptureAsync(capture);
-                ShowStatus(ok ? "RGB-D sent to viewer" : "RGB-D upload failed");
+                bool ok = await UploadCaptureAsync(capture, null);
+                if (ok)
+                    ShowStatus("RGB-D sent to viewer");
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[TrackingManager] RGB-D upload error: {ex.Message}");
-                ShowStatus("RGB-D upload error");
+                Debug.LogWarning($"[TrackingManager] RGB-D upload error: {ex}");
+                ShowStatus("RGB-D upload error: " + BuildVisibleError(ex));
             }
             finally
             {
@@ -106,16 +114,161 @@ namespace SmartRoom.Tracking
             }
         }
 
-        private async Task<bool> UploadCaptureAsync(Quest3RgbdCaptureFinal.CapturePayload capture)
+        public async Task<bool> HandlePointPromptAsync(
+            Vector3 worldPoint,
+            Vector2Int pixel,
+            int label,
+            string mode,
+            int frameWidth,
+            int frameHeight)
+        {
+            if (_uploadInFlight)
+                return false;
+
+            _lastTriggerAt = Time.time;
+            _uploadInFlight = true;
+
+            try
+            {
+                string cursorJson = BuildCursorJson(worldPoint, pixel, label, mode, frameWidth, frameHeight);
+                ShowStatus(label > 0 ? "Positive point: checking saved images..." : "Negative point: checking saved images...");
+
+                if (await TrySendPointOnlyAsync(cursorJson))
+                {
+                    ShowStatus("Point sent to existing image");
+                    return true;
+                }
+
+                ShowStatus("Capturing RGB-D...");
+                if (finalRgbdCapture == null || !finalRgbdCapture.CaptureOnceToPayload(out var capture) || capture == null)
+                {
+                    Debug.LogWarning("[TrackingManager] RGB-D capture unavailable.");
+                    ShowStatus("RGB-D capture unavailable");
+                    return false;
+                }
+
+                ShowStatus("Uploading RGB-D...");
+                bool ok = await UploadCaptureAsync(capture, cursorJson);
+                if (ok)
+                    ShowStatus("RGB-D point sent");
+                return ok;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[TrackingManager] Point prompt error: {ex}");
+                ShowStatus("Point prompt error: " + BuildVisibleError(ex));
+                return false;
+            }
+            finally
+            {
+                _uploadInFlight = false;
+            }
+        }
+
+        public async Task<bool> DeletePointPromptAsync(Vector3 worldPoint)
+        {
+            if (_uploadInFlight)
+                return false;
+
+            _uploadInFlight = true;
+            try
+            {
+                string deleteJson = BuildDeletePointJson(worldPoint);
+                string url = BuildUrl(backendBaseUrl, deletePointPath);
+                using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(Mathf.Max(1f, requestTimeoutSeconds)) };
+                using var content = new StringContent(deleteJson, Encoding.UTF8, "application/json");
+                using HttpResponseMessage response = await http.PostAsync(url, content);
+                string body = await response.Content.ReadAsStringAsync();
+                if (!response.IsSuccessStatusCode)
+                {
+                    Debug.LogWarning($"[TrackingManager] Point delete failed ({response.StatusCode}): {body}");
+                    ReportStatus($"Point delete failed {(int)response.StatusCode}: {ShortStatus(body)}");
+                    return false;
+                }
+
+                PointDeleteResponse parsed = null;
+                try
+                {
+                    parsed = JsonUtility.FromJson<PointDeleteResponse>(body);
+                }
+                catch
+                {
+                    // Keep the HTTP success as the source of truth if the body shape changes.
+                }
+
+                bool deleted = parsed == null || parsed.deleted;
+                ReportStatus(deleted ? "Point deleted" : "No saved point near cursor");
+                return deleted;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[TrackingManager] Point delete error: {ex}");
+                ReportStatus("Point delete error: " + BuildVisibleError(ex));
+                return false;
+            }
+            finally
+            {
+                _uploadInFlight = false;
+            }
+        }
+
+        private async Task<bool> TrySendPointOnlyAsync(string cursorJson)
+        {
+            if (string.IsNullOrWhiteSpace(cursorJson))
+                return false;
+
+            string url = BuildUrl(backendBaseUrl, pointPath);
+            try
+            {
+                using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(Mathf.Max(1f, requestTimeoutSeconds)) };
+                using var content = new StringContent(cursorJson, Encoding.UTF8, "application/json");
+                using HttpResponseMessage response = await http.PostAsync(url, content);
+                string body = await response.Content.ReadAsStringAsync();
+                if (!response.IsSuccessStatusCode)
+                {
+                    Debug.Log($"[TrackingManager] Point-only probe fell back to capture ({response.StatusCode}): {body}");
+                    ReportStatus($"Saved-image check {(int)response.StatusCode}; capturing RGB-D...");
+                    return false;
+                }
+
+                PointOnlyResponse parsed = null;
+                try
+                {
+                    parsed = JsonUtility.FromJson<PointOnlyResponse>(body);
+                }
+                catch
+                {
+                    // Unknown response shape means we should capture a fresh frame.
+                }
+
+                bool usedExistingImage = parsed != null && parsed.ok && !parsed.needs_capture;
+                if (!usedExistingImage)
+                {
+                    Debug.Log($"[TrackingManager] Point-only probe requested capture: {body}");
+                    ReportStatus("No saved image hit; capturing RGB-D...");
+                }
+                return usedExistingImage;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[TrackingManager] Point-only probe failed; falling back to capture. url={url} error={ex}");
+                ReportStatus("Saved-image check failed: " + BuildVisibleError(ex));
+                return false;
+            }
+        }
+
+        private async Task<bool> UploadCaptureAsync(Quest3RgbdCaptureFinal.CapturePayload capture, string cursorJson)
         {
             if (capture.depthRawBytes == null || capture.depthRawBytes.Length == 0)
             {
                 Debug.LogWarning("[TrackingManager] Capture has no depth_raw payload.");
+                ReportStatus("RGB-D upload failed: no depth_raw");
                 return false;
             }
             if (string.IsNullOrWhiteSpace(capture.metaJson))
             {
                 Debug.LogWarning("[TrackingManager] Capture has no meta_json payload.");
+                ReportStatus("RGB-D upload failed: no meta_json");
                 return false;
             }
 
@@ -124,37 +277,50 @@ namespace SmartRoom.Tracking
             if (!canSendRaw && !canSendJpeg)
             {
                 Debug.LogWarning("[TrackingManager] Capture has no RGB payload.");
+                ReportStatus("RGB-D upload failed: no RGB payload");
                 return false;
             }
-
-            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(Mathf.Max(1f, requestTimeoutSeconds)) };
-            using var form = new MultipartFormDataContent();
-
-            if (canSendRaw)
-                AddBinaryPart(form, "rgb_raw", "rgb.raw", capture.rgbRawBytes, "application/octet-stream");
-            else
-                AddBinaryPart(form, "rgb_jpeg", "rgb.jpg", capture.rgbJpegBytes, "image/jpeg");
-
-            if (includeJpegFallback && canSendRaw && canSendJpeg)
-                AddBinaryPart(form, "rgb_jpeg", "rgb.jpg", capture.rgbJpegBytes, "image/jpeg");
-
-            AddBinaryPart(form, "depth_raw", "depth.raw", capture.depthRawBytes, "application/octet-stream");
-            form.Add(new StringContent(capture.metaJson, Encoding.UTF8, "application/json"), "meta_json");
 
             string url = BuildUrl(backendBaseUrl, uploadPath);
-            using HttpResponseMessage response = await http.PostAsync(url, form);
-            string body = await response.Content.ReadAsStringAsync();
-            if (!response.IsSuccessStatusCode)
+            try
             {
-                Debug.LogWarning($"[TrackingManager] Viewer upload failed ({response.StatusCode}): {body}");
+                using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(Mathf.Max(1f, requestTimeoutSeconds)) };
+                using var form = new MultipartFormDataContent();
+
+                if (canSendRaw)
+                    AddBinaryPart(form, "rgb_raw", "rgb.raw", capture.rgbRawBytes, "application/octet-stream");
+                else
+                    AddBinaryPart(form, "rgb_jpeg", "rgb.jpg", capture.rgbJpegBytes, "image/jpeg");
+
+                if (includeJpegFallback && canSendRaw && canSendJpeg)
+                    AddBinaryPart(form, "rgb_jpeg", "rgb.jpg", capture.rgbJpegBytes, "image/jpeg");
+
+                AddBinaryPart(form, "depth_raw", "depth.raw", capture.depthRawBytes, "application/octet-stream");
+                form.Add(new StringContent(capture.metaJson, Encoding.UTF8, "application/json"), "meta_json");
+                if (!string.IsNullOrWhiteSpace(cursorJson))
+                    form.Add(new StringContent(cursorJson, Encoding.UTF8, "application/json"), "cursor_json");
+
+                using HttpResponseMessage response = await http.PostAsync(url, form);
+                string body = await response.Content.ReadAsStringAsync();
+                if (!response.IsSuccessStatusCode)
+                {
+                    Debug.LogWarning($"[TrackingManager] Viewer upload failed ({response.StatusCode}): {body}");
+                    ReportStatus($"RGB-D upload failed {(int)response.StatusCode}: {ShortStatus(body)}");
+                    return false;
+                }
+
+                Debug.Log(
+                    $"[TrackingManager] Uploaded RGB-D to viewer: rgb={capture.rgbWidth}x{capture.rgbHeight} " +
+                    $"depth={capture.depthWidth}x{capture.depthHeight} rawRgb={canSendRaw} response={body}"
+                );
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[TrackingManager] Viewer upload exception. url={url} error={ex}");
+                ReportStatus("RGB-D upload error: " + BuildVisibleError(ex));
                 return false;
             }
-
-            Debug.Log(
-                $"[TrackingManager] Uploaded RGB-D to viewer: rgb={capture.rgbWidth}x{capture.rgbHeight} " +
-                $"depth={capture.depthWidth}x{capture.depthHeight} rawRgb={canSendRaw} response={body}"
-            );
-            return true;
         }
 
         private static void AddBinaryPart(
@@ -178,6 +344,97 @@ namespace SmartRoom.Tracking
             return root + suffix;
         }
 
+        private string BuildVisibleError(Exception ex)
+        {
+            string message = ex == null ? string.Empty : ex.Message;
+            if (ex?.InnerException != null && !string.IsNullOrWhiteSpace(ex.InnerException.Message))
+                message = string.IsNullOrWhiteSpace(message)
+                    ? ex.InnerException.Message
+                    : message + " / " + ex.InnerException.Message;
+
+            if (IsLocalhostBackendOnAndroid())
+                return "Quest localhost needs adb reverse tcp:8500 tcp:8500 or PC IP";
+
+            return ShortStatus(message);
+        }
+
+        private bool IsLocalhostBackendOnAndroid()
+        {
+#if UNITY_ANDROID && !UNITY_EDITOR
+            string root = backendBaseUrl ?? string.Empty;
+            return root.IndexOf("localhost", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   root.IndexOf("127.0.0.1", StringComparison.OrdinalIgnoreCase) >= 0;
+#else
+            return false;
+#endif
+        }
+
+        private static string ShortStatus(string message, int maxLength = 96)
+        {
+            if (string.IsNullOrWhiteSpace(message))
+                return "unknown";
+
+            string cleaned = message.Replace('\r', ' ').Replace('\n', ' ').Trim();
+            while (cleaned.Contains("  ", StringComparison.Ordinal))
+                cleaned = cleaned.Replace("  ", " ");
+
+            if (cleaned.Length <= maxLength)
+                return cleaned;
+            return cleaned.Substring(0, Mathf.Max(0, maxLength - 3)) + "...";
+        }
+
+        private static string BuildCursorJson(
+            Vector3 worldPoint,
+            Vector2Int pixel,
+            int label,
+            string mode,
+            int frameWidth,
+            int frameHeight)
+        {
+            var payload = new CursorPointPayload
+            {
+                type = "room_point_prompt",
+                is_hitting = true,
+                hit_world_x = worldPoint.x,
+                hit_world_y = worldPoint.y,
+                hit_world_z = worldPoint.z,
+                x = pixel.x,
+                y = pixel.y,
+                label = label > 0 ? 1 : 0,
+                mode = string.IsNullOrWhiteSpace(mode) ? (label > 0 ? "add" : "del") : mode,
+                frame_width = frameWidth > 0 ? frameWidth : 0,
+                frame_height = frameHeight > 0 ? frameHeight : 0,
+                timestamp_ms = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                room_id = RoomCoordinateSystemPanel.CurrentRoomId,
+                room_name = RoomCoordinateSystemPanel.CurrentRoomName,
+                device_id = SystemInfo.deviceUniqueIdentifier,
+                device_name = SystemInfo.deviceName,
+                device_model = SystemInfo.deviceModel,
+                object_session_id = RoomObjectSession.CurrentObjectId,
+                force_new_capture = RoomCaptureSession.ConsumeForceNextCapture(),
+            };
+            return JsonUtility.ToJson(payload);
+        }
+
+        private static string BuildDeletePointJson(Vector3 worldPoint)
+        {
+            var payload = new PointDeletePayload
+            {
+                type = "room_point_delete",
+                hit_world_x = worldPoint.x,
+                hit_world_y = worldPoint.y,
+                hit_world_z = worldPoint.z,
+                timestamp_ms = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                room_id = RoomCoordinateSystemPanel.CurrentRoomId,
+                room_name = RoomCoordinateSystemPanel.CurrentRoomName,
+                device_id = SystemInfo.deviceUniqueIdentifier,
+                device_name = SystemInfo.deviceName,
+                device_model = SystemInfo.deviceModel,
+                object_session_id = RoomObjectSession.CurrentObjectId,
+            };
+            return JsonUtility.ToJson(payload);
+        }
+
         private void CreateStatusText()
         {
             if (_statusTextObject != null)
@@ -196,6 +453,11 @@ namespace SmartRoom.Tracking
 
         private void ShowStatus(string message)
         {
+            ReportStatus(message);
+        }
+
+        public void ReportStatus(string message)
+        {
             Debug.Log($"[TrackingManager] {message}");
             if (!showStatusText || _statusText == null || _statusTextObject == null || xrCamera == null)
                 return;
@@ -206,7 +468,63 @@ namespace SmartRoom.Tracking
                 xrCamera.transform.position + xrCamera.transform.forward * statusDistanceMeters;
             _statusTextObject.transform.LookAt(xrCamera.transform);
             _statusTextObject.transform.Rotate(0f, 180f, 0f);
-            _hideStatusAt = Time.time + statusVisibleSeconds;
+            _hideStatusAt = Time.time + Mathf.Max(statusVisibleSeconds, 4f);
+        }
+
+        [Serializable]
+        private sealed class CursorPointPayload
+        {
+            public string type;
+            public bool is_hitting;
+            public float hit_world_x;
+            public float hit_world_y;
+            public float hit_world_z;
+            public int x;
+            public int y;
+            public int label;
+            public string mode;
+            public int frame_width;
+            public int frame_height;
+            public long timestamp_ms;
+            public string room_id;
+            public string room_name;
+            public string device_id;
+            public string device_name;
+            public string device_model;
+            public string object_session_id;
+            public bool force_new_capture;
+        }
+
+        [Serializable]
+        private sealed class PointDeletePayload
+        {
+            public string type;
+            public float hit_world_x;
+            public float hit_world_y;
+            public float hit_world_z;
+            public long timestamp_ms;
+            public string room_id;
+            public string room_name;
+            public string device_id;
+            public string device_name;
+            public string device_model;
+            public string object_session_id;
+        }
+
+        [Serializable]
+        private sealed class PointOnlyResponse
+        {
+            public bool ok = false;
+            public bool needs_capture = true;
+            public string reason = string.Empty;
+        }
+
+        [Serializable]
+        private sealed class PointDeleteResponse
+        {
+            public bool ok = false;
+            public bool deleted = false;
+            public string reason = string.Empty;
         }
     }
 }

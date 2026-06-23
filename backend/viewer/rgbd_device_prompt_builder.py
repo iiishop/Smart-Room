@@ -41,6 +41,44 @@ def _seed_xy(prompt: dict) -> tuple[int, int]:
     return int(coords[0][0]), int(coords[0][1])
 
 
+def _normalized_point_pairs(coords: object, labels: object) -> tuple[list[list[int]], list[int]]:
+    if not isinstance(coords, list) or not isinstance(labels, list) or len(coords) != len(labels):
+        return [], []
+
+    out_coords: list[list[int]] = []
+    out_labels: list[int] = []
+    seen: set[tuple[int, int, int]] = set()
+    for coord, label in zip(coords, labels):
+        if not isinstance(coord, (list, tuple)) or len(coord) != 2:
+            continue
+        try:
+            x = int(round(float(coord[0])))
+            y = int(round(float(coord[1])))
+            lbl = 1 if int(label) > 0 else 0
+        except (TypeError, ValueError):
+            continue
+        key = (x, y, lbl)
+        if key in seen:
+            continue
+        seen.add(key)
+        out_coords.append([x, y])
+        out_labels.append(lbl)
+    return out_coords, out_labels
+
+
+def _user_points_from_prompt(cursor_prompt: dict) -> tuple[list[list[int]], list[int]]:
+    coords, labels = _normalized_point_pairs(
+        cursor_prompt.get("user_point_coords"),
+        cursor_prompt.get("user_point_labels"),
+    )
+    if coords:
+        return coords, labels
+    return _normalized_point_pairs(
+        cursor_prompt.get("sam_point_coords"),
+        cursor_prompt.get("sam_point_labels"),
+    )
+
+
 def _seed_depth(prompt: dict, depth: np.ndarray, x: int, y: int) -> float | None:
     for key in ("depth_sample_m", "rgb_camera_z_m"):
         value = prompt.get(key)
@@ -285,6 +323,30 @@ def build_rgbd_device_prompt(
     point_coords = positives + negatives
     point_labels = [1] * len(positives) + [0] * len(negatives)
 
+    explicit_coords, explicit_labels = _user_points_from_prompt(cursor_prompt)
+    explicit_has_negative = any(label <= 0 for label in explicit_labels)
+    explicit_has_multiple = len(explicit_coords) > 1
+    prefer_user_points_only = bool(explicit_coords) and (explicit_has_multiple or explicit_has_negative)
+    if prefer_user_points_only:
+        point_coords = explicit_coords
+        point_labels = explicit_labels
+    elif explicit_coords:
+        merged_coords = list(explicit_coords)
+        merged_labels = list(explicit_labels)
+        seen = {(int(coord[0]), int(coord[1]), int(label)) for coord, label in zip(merged_coords, merged_labels)}
+        for coord, label in zip(point_coords, point_labels):
+            x = int(coord[0])
+            y = int(coord[1])
+            lbl = 1 if int(label) > 0 else 0
+            key = (x, y, lbl)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged_coords.append([x, y])
+            merged_labels.append(lbl)
+        point_coords = merged_coords
+        point_labels = merged_labels
+
     prompt = {
         **cursor_prompt,
         "rgb_x": int(seed_x),
@@ -293,9 +355,10 @@ def build_rgbd_device_prompt(
         "rgbd_prompt_valid": bbox is not None,
         "rgbd_component_area_px": component_area,
         "rgbd_component_bbox_area_ratio": bbox_area_ratio,
-        "sam_box_xyxy": bbox,
+        "sam_box_xyxy": None if prefer_user_points_only else bbox,
         "sam_point_coords": point_coords,
         "sam_point_labels": point_labels,
+        "rgbd_prompt_user_points_only": prefer_user_points_only,
     }
     return RgbdPromptResult(prompt, component)
 

@@ -55,3 +55,6 @@ archive_code/
 backend/checkpoints/
 backend/viewer_any2full_cache/
 .codegraph/
+backend/viewer/viewer_any2full_cache/
+backend/viewer/viewer_room_store/
+unity/Quest3Client/Assets/_Recovery/

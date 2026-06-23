@@ -168,6 +168,11 @@ def build_cursor_prompt(
         prompt["depth_sample_m"] = float(sampled_depth)
         prompt["depth_sample_x"] = int(sampled_x)
         prompt["depth_sample_y"] = int(sampled_y)
+    label = int(cursor.get("label", cursor.get("point_label", 1)))
+    label = 1 if label > 0 else 0
+    prompt["point_labels"] = [label]
+    prompt["sam_point_coords"] = [[int(x), int(y)]]
+    prompt["sam_point_labels"] = [label]
     return prompt
 
 

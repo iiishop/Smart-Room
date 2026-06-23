@@ -57,6 +57,17 @@ namespace SmartRoom.UI
         public static bool IsUiBlockingSceneInput { get; private set; }
         public static bool IsPanelVisible => _instance != null && _instance._panelVisible;
         public static bool HasEnteredRoom => _instance != null && _instance._hasEnteredRoom;
+        public static string CurrentRoomId =>
+            _instance != null && _instance._hasEnteredRoom ? _instance._database.selected_id : string.Empty;
+        public static string CurrentRoomName
+        {
+            get
+            {
+                if (_instance == null || !_instance._hasEnteredRoom) return string.Empty;
+                RoomCoordinateRecord record = _instance.FindRoom(_instance._database.selected_id);
+                return record != null ? record.name : string.Empty;
+            }
+        }
 
         private static RoomCoordinateSystemPanel _instance;
 
@@ -157,6 +168,8 @@ namespace SmartRoom.UI
             CloseRenameDialog();
             RefreshList();
             SetSceneInteractionEnabled(false);
+            RoomObjectSession.Reset();
+            RoomCaptureSession.Reset();
         }
 
         private void HidePanel()
@@ -546,6 +559,7 @@ namespace SmartRoom.UI
             SaveRooms();
             RefreshList();
             ApplySelectedRoomOrigin();
+            RoomObjectSession.StartNewObject();
             if (_hasEnteredRoom)
                 HidePanel();
         }
@@ -557,6 +571,7 @@ namespace SmartRoom.UI
             SaveRooms();
             RefreshList();
             ApplySelectedRoomOrigin();
+            RoomObjectSession.StartNewObject();
             if (_hasEnteredRoom)
                 HidePanel();
         }
@@ -680,23 +695,30 @@ namespace SmartRoom.UI
             SetEnabledOnAll<VisionReceiverModule>(isEnabled);
             SetEnabledOnAll<DepthFrameSampler>(isEnabled);
             SetEnabledOnAll<TriggerDepthProbe>(isEnabled);
-            SetEnabledOnAll<ObjectGrabber>(isEnabled);
+            SetEnabledOnAll<ObjectGrabber>(isEnabled, activateGameObjectWhenEnabled: true);
 
             DepthCursor depthCursor = FindFirstObjectByType<DepthCursor>();
             if (depthCursor != null)
                 depthCursor.SetInteractionEnabled(isEnabled);
 
             if (!isEnabled)
+            {
+                PromptPointMarkerManager.ClearMarkers();
                 WorldOriginReference.DestroyExisting();
+            }
         }
 
-        private static void SetEnabledOnAll<T>(bool isEnabled) where T : Behaviour
+        private static void SetEnabledOnAll<T>(bool isEnabled, bool activateGameObjectWhenEnabled = false) where T : Behaviour
         {
-            T[] components = FindObjectsByType<T>(FindObjectsSortMode.None);
+            T[] components = FindObjectsByType<T>(FindObjectsInactive.Include, FindObjectsSortMode.None);
             for (int i = 0; i < components.Length; i++)
             {
                 if (components[i] != null)
+                {
+                    if (isEnabled && activateGameObjectWhenEnabled && !components[i].gameObject.activeSelf)
+                        components[i].gameObject.SetActive(true);
                     components[i].enabled = isEnabled;
+                }
             }
         }
 
