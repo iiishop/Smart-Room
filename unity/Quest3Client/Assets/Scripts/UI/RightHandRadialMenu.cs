@@ -154,7 +154,7 @@ namespace SmartRoom.UI
                 if (releasedIndex == 0)
                     RoomCoordinateSystemPanel.OpenSelectionPanel();
                 else if (releasedIndex == 1)
-                    RoomObjectSession.StartNewObject();
+                    DeviceAnnotationController.StartNewObjectFromMenu();
                 else if (releasedIndex == 2)
                     RoomCaptureSession.ForceNextCapture();
             }
@@ -164,6 +164,7 @@ namespace SmartRoom.UI
         {
             return RoomCoordinateSystemPanel.HasEnteredRoom
                    && !RoomCoordinateSystemPanel.IsPanelVisible
+                   && !DeviceArchivePanel.IsPanelVisible
                    && controllerRaycaster != null;
         }
 
@@ -399,6 +400,8 @@ namespace SmartRoom.UI
     public static class RoomObjectSession
     {
         private static string _currentObjectId = string.Empty;
+        private static string _currentEditSessionId = string.Empty;
+        private static bool _editingSavedObject;
 
         public static string CurrentObjectId
         {
@@ -410,18 +413,43 @@ namespace SmartRoom.UI
             }
         }
 
+        public static bool HasCurrentObject => !string.IsNullOrWhiteSpace(_currentObjectId);
+        public static string CurrentEditSessionId => _currentEditSessionId;
+        public static bool IsEditingSavedObject => _editingSavedObject;
+
         public static string StartNewObject()
         {
             string timestamp = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
             _currentObjectId = "object_" + timestamp;
+            _currentEditSessionId = string.Empty;
+            _editingSavedObject = false;
             PromptPointMarkerManager.ClearMarkers();
             Debug.Log("[RoomObjectSession] Started " + _currentObjectId);
             return _currentObjectId;
         }
 
+        public static void EnterSavedObject(string objectId, string editSessionId)
+        {
+            if (string.IsNullOrWhiteSpace(objectId))
+                return;
+
+            _currentObjectId = objectId;
+            _currentEditSessionId = editSessionId ?? string.Empty;
+            _editingSavedObject = true;
+            Debug.Log("[RoomObjectSession] Editing saved object " + _currentObjectId);
+        }
+
+        public static void SetEditSession(string editSessionId)
+        {
+            _currentEditSessionId = editSessionId ?? string.Empty;
+            _editingSavedObject = !string.IsNullOrWhiteSpace(_currentEditSessionId);
+        }
+
         public static void Reset()
         {
             _currentObjectId = string.Empty;
+            _currentEditSessionId = string.Empty;
+            _editingSavedObject = false;
         }
     }
 

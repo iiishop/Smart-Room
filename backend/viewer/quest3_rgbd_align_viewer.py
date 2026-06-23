@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import http.server
 import json
 import math
+import io
 import re
+import shutil
 import subprocess
 import sys
 import threading
 import time
+import urllib.parse
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -16,6 +22,7 @@ import cv2
 import numpy as np
 from PIL import Image, ImageTk
 import tkinter as tk
+from tkinter import scrolledtext
 from tkinter import ttk
 
 from cursor_prompt_projector import CursorPromptConfig, build_cursor_prompt
@@ -176,11 +183,18 @@ def parse_args() -> argparse.Namespace:
         default=Path("viewer_room_store"),
         help="Room/device/object capture store used by Quest point prompts.",
     )
+    parser.add_argument("--vlm-timeout-seconds", type=float, default=120.0)
     parser.add_argument("--point-debounce-ms", type=int, default=250)
     parser.add_argument("--point-debounce-world-m", type=float, default=0.02)
     parser.add_argument("--point-delete-world-m", type=float, default=0.08)
-    parser.add_argument("--image-match-depth-abs-m", type=float, default=0.12)
-    parser.add_argument("--image-match-depth-rel", type=float, default=0.10)
+    parser.add_argument("--image-match-depth-abs-m", type=float, default=0.08)
+    parser.add_argument("--image-match-depth-rel", type=float, default=0.06)
+    parser.add_argument(
+        "--image-match-depth-source",
+        choices=("sparse", "any2full"),
+        default="sparse",
+        help="Depth source for deciding whether a world point is visible in a saved image. Sparse is stricter and avoids reusing occluded 2D views.",
+    )
     parser.add_argument("--cursor-nearest-depth-radius-px", type=int, default=10)
     parser.add_argument("--seg-depth-abs-band-m", type=float, default=0.18)
     parser.add_argument("--seg-depth-rel-band", type=float, default=0.12)
@@ -1356,6 +1370,129 @@ def _room_store_root(args: argparse.Namespace) -> Path:
     return root if root.is_absolute() else Path.cwd() / root
 
 
+def _vlm_config_path(args: argparse.Namespace) -> Path:
+    return _room_store_root(args) / "vlm_config.json"
+
+
+def _load_vlm_config(args: argparse.Namespace) -> dict:
+    path = _vlm_config_path(args)
+    if not path.exists():
+        return {
+            "base_url": "",
+            "token": "",
+            "model": "",
+            "tested_at_ms": 0,
+            "saved_at_ms": 0,
+        }
+    try:
+        config = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        config = {}
+    if not isinstance(config, dict):
+        config = {}
+    config.setdefault("base_url", "")
+    config.setdefault("token", "")
+    config.setdefault("model", "")
+    config.setdefault("tested_at_ms", 0)
+    config.setdefault("saved_at_ms", 0)
+    return config
+
+
+def _save_vlm_config(args: argparse.Namespace, config: dict) -> None:
+    path = _vlm_config_path(args)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "base_url": str(config.get("base_url") or "").strip(),
+        "token": str(config.get("token") or "").strip(),
+        "model": str(config.get("model") or "").strip(),
+        "tested_at_ms": int(config.get("tested_at_ms") or 0),
+        "saved_at_ms": _now_ms(),
+    }
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _vlm_api_url(base_url: str, suffix: str) -> str:
+    root = str(base_url or "").strip().rstrip("/")
+    if not root:
+        raise ValueError("missing VLM base URL")
+    if root.endswith("/v1"):
+        root = root[:-3]
+    if not suffix.startswith("/"):
+        suffix = "/" + suffix
+    return root + "/v1" + suffix
+
+
+def _vlm_json_request(method: str, url: str, token: str, payload: dict | None = None, timeout: float = 60.0) -> dict:
+    body = None if payload is None else json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(url, data=body, method=method.upper())
+    request.add_header("Accept", "application/json")
+    if payload is not None:
+        request.add_header("Content-Type", "application/json")
+    token = str(token or "").strip()
+    if token:
+        request.add_header("Authorization", "Bearer " + token)
+    try:
+        with urllib.request.urlopen(request, timeout=max(1.0, float(timeout))) as response:
+            raw = response.read()
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"HTTP {exc.code}: {detail[:500]}") from exc
+    return json.loads(raw.decode("utf-8"))
+
+
+def _vlm_list_models(config: dict, timeout: float = 60.0) -> list[str]:
+    url = _vlm_api_url(str(config.get("base_url") or ""), "/models")
+    data = _vlm_json_request("GET", url, str(config.get("token") or ""), timeout=timeout)
+    models: list[str] = []
+    for item in data.get("data", []):
+        if isinstance(item, dict) and item.get("id"):
+            models.append(str(item["id"]))
+    return models
+
+
+def _vlm_chat_completion(config: dict, messages: list[dict], timeout: float = 120.0, max_tokens: int = 1200) -> str:
+    model = str(config.get("model") or "").strip()
+    if not model:
+        raise ValueError("missing VLM model")
+    url = _vlm_api_url(str(config.get("base_url") or ""), "/chat/completions")
+    payload = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": 0.2,
+    }
+    data = _vlm_json_request("POST", url, str(config.get("token") or ""), payload=payload, timeout=timeout)
+    choices = data.get("choices") or []
+    if not choices:
+        return ""
+    message = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
+    content = message.get("content", "")
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, dict) and part.get("text"):
+                parts.append(str(part["text"]))
+        return "\n".join(parts).strip()
+    return str(content or "").strip()
+
+
+def _vlm_test_connection(config: dict, timeout: float = 60.0) -> tuple[list[str], str]:
+    models = _vlm_list_models(config, timeout=timeout)
+    model = str(config.get("model") or "").strip()
+    if model:
+        response = _vlm_chat_completion(
+            config,
+            [{"role": "user", "content": "Reply with exactly: Smart Room VLM OK"}],
+            timeout=timeout,
+            max_tokens=32,
+        )
+    else:
+        response = "model list ok"
+    return models, response
+
+
 def _room_device_paths(args: argparse.Namespace, cursor: dict) -> tuple[dict, Path, Path]:
     ctx = _room_context(cursor)
     device_dir = _room_store_root(args) / ctx["room_id"] / ctx["device_id"]
@@ -1395,9 +1532,13 @@ def _resolve_store_path(device_dir: Path, value: object) -> Path:
     return device_dir / str(value or "")
 
 
-def _load_room_image_depth(device_dir: Path, image_record: dict) -> np.ndarray | None:
+def _load_room_image_depth(device_dir: Path, image_record: dict, source: str = "any2full") -> np.ndarray | None:
     capture_dir = _resolve_store_path(device_dir, image_record.get("capture_dir"))
-    for name in ("dense_depth_any2full.npy", "aligned_depth.npy"):
+    if source == "sparse":
+        names = ("aligned_depth.npy",)
+    else:
+        names = ("dense_depth_any2full.npy", "aligned_depth.npy")
+    for name in names:
         path = capture_dir / name
         if path.exists():
             try:
@@ -1408,6 +1549,11 @@ def _load_room_image_depth(device_dir: Path, image_record: dict) -> np.ndarray |
             if depth.ndim == 2:
                 return depth
     return None
+
+
+def _load_room_match_depth(args: argparse.Namespace, device_dir: Path, image_record: dict) -> np.ndarray | None:
+    source = str(getattr(args, "image_match_depth_source", "sparse") or "sparse")
+    return _load_room_image_depth(device_dir, image_record, source=source)
 
 
 def _prompt_depth_match(args: argparse.Namespace, prompt: dict, require_depth: bool = True) -> bool:
@@ -1526,7 +1672,7 @@ def _find_matching_room_image(
         if str(image.get("object_id") or "object_default") != object_id:
             continue
         try:
-            depth = _load_room_image_depth(device_dir, image)
+            depth = _load_room_match_depth(viewer.args, device_dir, image)
             prompt = _project_cursor_for_image(viewer.args, device_dir, image, cursor, depth)
         except Exception as exc:
             print(f"[room-store] image projection failed for {image.get('image_id')}: {exc}", flush=True)
@@ -1534,6 +1680,28 @@ def _find_matching_room_image(
         if _prompt_depth_match(viewer.args, prompt, require_depth=depth is not None):
             return ctx, device_dir, store, image, prompt
     return ctx, device_dir, store, None, None
+
+
+def _project_cursor_to_visible_object_images(
+    viewer: "RgbdViewer",
+    device_dir: Path,
+    store: dict,
+    cursor: dict,
+    object_id: str,
+) -> list[tuple[dict, dict]]:
+    matches: list[tuple[dict, dict]] = []
+    for image in store.get("images", []):
+        if str(image.get("object_id") or "object_default") != object_id:
+            continue
+        try:
+            depth = _load_room_match_depth(viewer.args, device_dir, image)
+            prompt = _project_cursor_for_image(viewer.args, device_dir, image, cursor, depth)
+        except Exception as exc:
+            print(f"[room-store] visible projection failed for {image.get('image_id')}: {exc}", flush=True)
+            continue
+        if _prompt_depth_match(viewer.args, prompt, require_depth=depth is not None):
+            matches.append((image, prompt))
+    return matches
 
 
 def _point_world_xyz(cursor: dict, prompt: dict) -> list[float]:
@@ -1579,6 +1747,7 @@ def _append_room_point(
 ) -> tuple[bool, dict]:
     label = 1 if int(cursor.get("label", cursor.get("point_label", 1))) > 0 else 0
     timestamp_ms = int(cursor.get("timestamp_ms") or _now_ms())
+    logical_point_id = str(cursor.get("logical_point_id") or "").strip()
     point = {
         "point_id": f"pt_{timestamp_ms}_{len(store.get('points', [])) + 1:04d}",
         "image_id": image_record["image_id"],
@@ -1590,8 +1759,12 @@ def _append_room_point(
         "timestamp_ms": timestamp_ms,
         "rgb_camera_z_m": float(prompt.get("rgb_camera_z_m", 0.0)),
     }
+    if logical_point_id:
+        point["logical_point_id"] = logical_point_id
     if _is_duplicate_point(args, store, point):
         return False, point
+    if not logical_point_id:
+        point["logical_point_id"] = point["point_id"]
     store.setdefault("points", []).append(point)
     image_record["updated_at_ms"] = timestamp_ms
     _save_point_store(device_dir, store)
@@ -1621,7 +1794,9 @@ def _preseed_visible_points_for_new_image(
     fallback_cursor: dict,
 ) -> int:
     object_id = image_record.get("object_id") or store.get("active_object_id") or "object_default"
-    depth = frame.any2full_depth if frame.any2full_depth is not None else frame.aligned_depth
+    depth = frame.aligned_depth if str(getattr(args, "image_match_depth_source", "sparse") or "sparse") == "sparse" else (
+        frame.any2full_depth if frame.any2full_depth is not None else frame.aligned_depth
+    )
     existing_source_ids = {
         str(point.get("source_point_id") or point.get("point_id"))
         for point in store.get("points", [])
@@ -1669,6 +1844,7 @@ def _preseed_visible_points_for_new_image(
             "source_image_id": str(source.get("image_id") or ""),
             "preseeded": True,
         }
+        point["logical_point_id"] = str(source.get("logical_point_id") or source.get("source_point_id") or source.get("point_id"))
         if _is_duplicate_point(args, store, point):
             continue
         store.setdefault("points", []).append(point)
@@ -1719,7 +1895,8 @@ def _remove_room_points_near_world(
 
     best_point = store["points"][best_index]
     best_world = np.asarray(best_point.get("world_xyz_m") or [0.0, 0.0, 0.0], dtype=np.float32)
-    source_id = str(best_point.get("source_point_id") or best_point.get("point_id") or "")
+    logical_id = str(best_point.get("logical_point_id") or "").strip()
+    source_id = str(best_point.get("source_point_id") or best_point.get("point_id") or "").strip()
     removed: list[dict] = []
     kept: list[dict] = []
     for point in store.get("points", []):
@@ -1727,14 +1904,12 @@ def _remove_room_points_near_world(
             kept.append(point)
             continue
 
-        point_source_id = str(point.get("source_point_id") or point.get("point_id") or "")
-        world = point.get("world_xyz_m")
-        world_close = False
-        if isinstance(world, list) and len(world) == 3:
-            point_world = np.asarray(world, dtype=np.float32)
-            world_close = float(np.linalg.norm(point_world - best_world)) <= max_distance
-        same_source = bool(source_id) and point_source_id == source_id
-        if same_source or world_close:
+        point_logical_id = str(point.get("logical_point_id") or "").strip()
+        point_source_id = str(point.get("source_point_id") or point.get("point_id") or "").strip()
+        point_id = str(point.get("point_id") or "").strip()
+        same_logical = bool(logical_id) and point_logical_id == logical_id
+        same_source = not logical_id and bool(source_id) and (point_source_id == source_id or point_id == source_id)
+        if same_logical or same_source:
             item = dict(point)
             item["delete_distance_m"] = float(np.linalg.norm(np.asarray(point.get("world_xyz_m") or best_world, dtype=np.float32) - target))
             removed.append(item)
@@ -1753,6 +1928,590 @@ def _points_for_image(store: dict, image_record: dict) -> list[dict]:
         for point in store.get("points", [])
         if point.get("image_id") == image_id and point.get("object_id") == object_id
     ]
+
+
+def _object_records(store: dict) -> list[dict]:
+    objects = store.setdefault("objects", [])
+    if isinstance(objects, dict):
+        converted: list[dict] = []
+        for object_id, record in objects.items():
+            item = dict(record) if isinstance(record, dict) else {}
+            item.setdefault("object_id", str(object_id))
+            converted.append(item)
+        store["objects"] = converted
+        objects = converted
+    if not isinstance(objects, list):
+        store["objects"] = []
+    return store["objects"]
+
+
+def _find_object_record(store: dict, object_id: str) -> dict | None:
+    for record in _object_records(store):
+        if str(record.get("object_id") or "") == object_id:
+            return record
+    return None
+
+
+def _object_images(store: dict, object_id: str) -> list[dict]:
+    records = [
+        image
+        for image in store.get("images", [])
+        if str(image.get("object_id") or "object_default") == object_id
+    ]
+    records.sort(key=lambda image: int(image.get("created_at_ms") or 0))
+    return records
+
+
+def _object_points(store: dict, object_id: str) -> list[dict]:
+    return [
+        point
+        for point in store.get("points", [])
+        if str(point.get("object_id") or "object_default") == object_id
+    ]
+
+
+def _object_spatial_points(store: dict, object_id: str) -> list[dict]:
+    deduped: list[dict] = []
+    seen: set[str] = set()
+    for point in _object_points(store, object_id):
+        world = point.get("world_xyz_m")
+        if not isinstance(world, list) or len(world) != 3:
+            continue
+        key = str(point.get("source_point_id") or point.get("point_id") or "")
+        if not key:
+            try:
+                key = "world:" + ",".join(f"{float(value):.4f}" for value in world)
+            except (TypeError, ValueError):
+                continue
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(
+            {
+                "point_id": str(point.get("point_id") or key),
+                "label": 1 if int(point.get("label", 1)) > 0 else 0,
+                "world_xyz_m": [float(world[0]), float(world[1]), float(world[2])],
+                "image_id": str(point.get("image_id") or ""),
+            }
+        )
+    return deduped
+
+
+def _format_local_timestamp_s(timestamp_ms: int | None = None) -> str:
+    seconds = (int(timestamp_ms) if timestamp_ms is not None else _now_ms()) / 1000.0
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(seconds))
+
+
+def _path_inside(root: Path, path: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except Exception:
+        return False
+
+
+def _delete_store_path(device_dir: Path, path: Path | None) -> None:
+    if path is None:
+        return
+    try:
+        resolved = path.resolve()
+    except Exception:
+        return
+    if not _path_inside(device_dir, resolved) or not resolved.exists():
+        return
+    if resolved.is_dir():
+        shutil.rmtree(resolved)
+    else:
+        resolved.unlink()
+
+
+def _remove_object_content(device_dir: Path, store: dict, object_id: str) -> int:
+    removed_images = 0
+    kept_images: list[dict] = []
+    for image in store.get("images", []):
+        if str(image.get("object_id") or "object_default") != object_id:
+            kept_images.append(image)
+            continue
+        removed_images += 1
+        rgb_png = image.get("rgb_png")
+        if rgb_png:
+            _delete_store_path(device_dir, _resolve_store_path(device_dir, rgb_png))
+        capture_dir = image.get("capture_dir")
+        if capture_dir:
+            _delete_store_path(device_dir, _resolve_store_path(device_dir, capture_dir))
+    store["images"] = kept_images
+    store["points"] = [
+        point
+        for point in store.get("points", [])
+        if str(point.get("object_id") or "object_default") != object_id
+    ]
+    store["objects"] = [
+        record
+        for record in _object_records(store)
+        if str(record.get("object_id") or "") != object_id
+    ]
+    return removed_images
+
+
+def _object_backup_root(device_dir: Path) -> Path:
+    return device_dir / ".object_edit_backups"
+
+
+def _object_backup_dir(device_dir: Path, edit_session_id: str) -> Path:
+    return _object_backup_root(device_dir) / _safe_path_component(edit_session_id, "edit_default")
+
+
+def _relative_to_device(device_dir: Path, path: Path) -> str | None:
+    try:
+        return str(path.resolve().relative_to(device_dir.resolve()).as_posix())
+    except Exception:
+        return None
+
+
+def _begin_object_edit(device_dir: Path, store: dict, object_id: str) -> tuple[str, list[dict]]:
+    edit_session_id = f"edit_{_now_ms()}_{object_id}"
+    backup_dir = _object_backup_dir(device_dir, edit_session_id)
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    (backup_dir / "points.json").write_text(json.dumps(store, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    mask_entries: list[dict] = []
+    for image in _object_images(store, object_id):
+        image_id = str(image.get("image_id") or "")
+        capture_dir = _resolve_store_path(device_dir, image.get("capture_dir"))
+        candidates: list[Path] = []
+        raw_mask = image.get("device_mask")
+        if raw_mask:
+            candidates.append(Path(str(raw_mask)))
+        candidates.extend(
+            [
+                capture_dir / "device_mask.png",
+                capture_dir / "device_mask_raw.png",
+                capture_dir / "device_mask_raw_overlay.png",
+            ]
+        )
+        for path in candidates:
+            if not path.exists() or not _path_inside(device_dir, path):
+                continue
+            rel = _relative_to_device(device_dir, path)
+            if rel is None:
+                continue
+            dst = backup_dir / "files" / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, dst)
+            mask_entries.append({"image_id": image_id, "relative_path": rel})
+
+    manifest = {
+        "schema_version": 1,
+        "object_id": object_id,
+        "created_at_ms": _now_ms(),
+        "image_ids": [str(image.get("image_id") or "") for image in _object_images(store, object_id)],
+        "file_backups": mask_entries,
+    }
+    (backup_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+    return edit_session_id, _object_spatial_points(store, object_id)
+
+
+def _discard_object_edit_backup(device_dir: Path, edit_session_id: str) -> None:
+    if not edit_session_id:
+        return
+    _delete_store_path(device_dir, _object_backup_dir(device_dir, edit_session_id))
+
+
+def _restore_object_edit_backup(device_dir: Path, edit_session_id: str) -> dict:
+    backup_dir = _object_backup_dir(device_dir, edit_session_id)
+    points_path = backup_dir / "points.json"
+    manifest_path = backup_dir / "manifest.json"
+    if not points_path.exists():
+        raise FileNotFoundError(f"edit backup not found: {edit_session_id}")
+
+    backup_store = json.loads(points_path.read_text(encoding="utf-8"))
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
+    object_id = str(manifest.get("object_id") or "")
+    original_image_ids = {str(value) for value in manifest.get("image_ids", [])}
+
+    current_store_path = device_dir / "points.json"
+    if object_id and current_store_path.exists():
+        try:
+            current_store = json.loads(current_store_path.read_text(encoding="utf-8"))
+        except Exception:
+            current_store = {}
+        for image in _object_images(current_store, object_id):
+            image_id = str(image.get("image_id") or "")
+            if image_id in original_image_ids:
+                continue
+            rgb_png = image.get("rgb_png")
+            if rgb_png:
+                _delete_store_path(device_dir, _resolve_store_path(device_dir, rgb_png))
+            capture_dir = image.get("capture_dir")
+            if capture_dir:
+                _delete_store_path(device_dir, _resolve_store_path(device_dir, capture_dir))
+
+    for entry in manifest.get("file_backups", []):
+        rel = str(entry.get("relative_path") or "")
+        if not rel:
+            continue
+        src = backup_dir / "files" / rel
+        dst = device_dir / rel
+        if src.exists():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+
+    _save_point_store(device_dir, backup_store)
+    _discard_object_edit_backup(device_dir, edit_session_id)
+    return backup_store
+
+
+def _complete_object(device_dir: Path, store: dict, object_id: str, edit_session_id: str = "") -> dict:
+    images = _object_images(store, object_id)
+    points = _object_points(store, object_id)
+    if not images:
+        raise ValueError("object has no captured images")
+    if not any(int(point.get("label", 1)) > 0 for point in points):
+        raise ValueError("object needs at least one positive point")
+
+    now_ms = _now_ms()
+    record = _find_object_record(store, object_id)
+    if record is None:
+        record = {"object_id": object_id}
+        _object_records(store).append(record)
+    if not str(record.get("name") or "").strip():
+        record["name"] = _format_local_timestamp_s(now_ms)
+    record["status"] = "completed"
+    record.setdefault("created_at_ms", now_ms)
+    record["completed_at_ms"] = int(record.get("completed_at_ms") or now_ms)
+    record["updated_at_ms"] = now_ms
+    record["image_count"] = len(images)
+    record["point_count"] = len(points)
+    record["positive_point_count"] = sum(1 for point in points if int(point.get("label", 1)) > 0)
+    record["negative_point_count"] = len(points) - int(record["positive_point_count"])
+    record["thumbnail_version"] = now_ms
+    _save_point_store(device_dir, store)
+    _discard_object_edit_backup(device_dir, edit_session_id)
+    return record
+
+
+def _completed_object_records(store: dict) -> list[dict]:
+    records: list[dict] = []
+    for record in _object_records(store):
+        if str(record.get("status") or "") != "completed":
+            continue
+        object_id = str(record.get("object_id") or "")
+        images = _object_images(store, object_id)
+        points = _object_points(store, object_id)
+        records.append(
+            {
+                "object_id": object_id,
+                "name": str(record.get("name") or _format_local_timestamp_s(int(record.get("completed_at_ms") or _now_ms()))),
+                "status": "completed",
+                "created_at_ms": int(record.get("created_at_ms") or record.get("completed_at_ms") or 0),
+                "completed_at_ms": int(record.get("completed_at_ms") or 0),
+                "updated_at_ms": int(record.get("updated_at_ms") or record.get("completed_at_ms") or 0),
+                "image_count": len(images),
+                "point_count": len(points),
+                "positive_point_count": sum(1 for point in points if int(point.get("label", 1)) > 0),
+                "negative_point_count": sum(1 for point in points if int(point.get("label", 1)) <= 0),
+                "thumbnail_version": int(record.get("thumbnail_version") or record.get("updated_at_ms") or 0),
+            }
+        )
+    records.sort(key=lambda record: int(record.get("completed_at_ms") or 0), reverse=True)
+    return records
+
+
+def _load_rgb_for_image(viewer: "RgbdViewer", device_dir: Path, image_record: dict) -> np.ndarray:
+    rgb_png = image_record.get("rgb_png")
+    if rgb_png:
+        path = _resolve_store_path(device_dir, rgb_png)
+        if path.exists():
+            return np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8)
+    frame = _load_room_frame(viewer, device_dir, image_record)
+    return frame.rgb.astype(np.uint8, copy=False)
+
+
+def _masked_rgb_pil_for_image(
+    viewer: "RgbdViewer",
+    device_dir: Path,
+    image_record: dict,
+    *,
+    crop_to_mask: bool = True,
+    output_size: tuple[int, int] | None = None,
+    max_side: int | None = None,
+) -> Image.Image:
+    rgb = _load_rgb_for_image(viewer, device_dir, image_record)
+    canvas = np.full_like(rgb, 255, dtype=np.uint8)
+    mask_path = _mask_path_for_image(device_dir, image_record)
+    if mask_path is not None:
+        mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+        if mask is not None and mask.shape == rgb.shape[:2]:
+            mask_bool = mask > 0
+            canvas[mask_bool] = rgb[mask_bool]
+            if crop_to_mask:
+                ys, xs = np.where(mask_bool)
+                if len(xs) > 0 and len(ys) > 0:
+                    pad = 24
+                    x0 = max(0, int(xs.min()) - pad)
+                    x1 = min(canvas.shape[1], int(xs.max()) + pad + 1)
+                    y0 = max(0, int(ys.min()) - pad)
+                    y1 = min(canvas.shape[0], int(ys.max()) + pad + 1)
+                    canvas = canvas[y0:y1, x0:x1]
+    else:
+        canvas = rgb
+
+    image = Image.fromarray(canvas.astype(np.uint8)).convert("RGB")
+    if output_size is not None:
+        return image.resize(output_size, Image.Resampling.LANCZOS)
+    if max_side is not None and max(image.size) > max_side:
+        scale = max_side / float(max(image.size))
+        size = (max(1, int(round(image.width * scale))), max(1, int(round(image.height * scale))))
+        return image.resize(size, Image.Resampling.LANCZOS)
+    return image
+
+
+def _object_masked_images(viewer: "RgbdViewer", device_dir: Path, store: dict, object_id: str) -> list[tuple[dict, Image.Image]]:
+    images: list[tuple[dict, Image.Image]] = []
+    for image_record in _object_images(store, object_id):
+        if _mask_path_for_image(device_dir, image_record) is None:
+            continue
+        try:
+            image = _masked_rgb_pil_for_image(viewer, device_dir, image_record, crop_to_mask=True, max_side=1024)
+        except Exception as exc:
+            print(f"[room-object] masked image failed for {image_record.get('image_id')}: {exc}", flush=True)
+            continue
+        images.append((image_record, image))
+    return images
+
+
+def _pil_to_data_url(image: Image.Image, quality: int = 90) -> str:
+    buffer = io.BytesIO()
+    image.convert("RGB").save(buffer, format="JPEG", quality=quality)
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    return "data:image/jpeg;base64," + encoded
+
+
+def _build_object_thumbnail(viewer: "RgbdViewer", device_dir: Path, store: dict, object_id: str) -> bytes:
+    image_record = next((image for image in _object_images(store, object_id) if _mask_path_for_image(device_dir, image) is not None), None)
+    if image_record is None:
+        images = _object_images(store, object_id)
+        image_record = images[0] if images else None
+    if image_record is None:
+        image = Image.fromarray(np.full((192, 256, 3), 255, dtype=np.uint8))
+    else:
+        image = _masked_rgb_pil_for_image(viewer, device_dir, image_record, crop_to_mask=True, output_size=(256, 192))
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _object_detail_images(viewer: "RgbdViewer", device_dir: Path, store: dict, object_id: str) -> list[tuple[dict, Image.Image]]:
+    images: list[tuple[dict, Image.Image]] = []
+    for image_record in _object_images(store, object_id):
+        try:
+            image = _masked_rgb_pil_for_image(viewer, device_dir, image_record, crop_to_mask=True, max_side=900)
+        except Exception as exc:
+            print(f"[room-object] detail image failed for {image_record.get('image_id')}: {exc}", flush=True)
+            continue
+        images.append((image_record, image))
+    return images
+
+
+def _vlm_object_prompt() -> str:
+    return (
+        "你正在分析一个智能房间系统中被用户完成标注的设备。"
+        "下面的每张图片都是从不同视角截取的同一个设备，图像已经用分割 mask 抠出设备主体，背景为白色。"
+        "请综合所有图片判断这个设备的信息。"
+        "如果你所连接的模型或服务支持联网/网络搜索，可以使用搜索来辅助识别；如果不支持，请只基于图像内容推断，并明确不确定性。\n\n"
+        "请用中文输出，结构如下：\n"
+        "1. 设备类型/名称：给出最可能的名称，必要时列出候选。\n"
+        "2. 可见特征：形状、颜色、接口、按钮、屏幕、线缆、安装方式、品牌/文字/型号等。\n"
+        "3. 可能用途：说明这个设备在房间中的功能。\n"
+        "4. 位置和朝向线索：基于视角图片描述可能的摆放/安装状态。\n"
+        "5. 不确定点：列出图像无法确认、需要补拍或需要人工确认的信息。\n"
+        "6. 建议补充视角：如果要提高识别准确率，说明还应该从哪些角度拍。\n\n"
+        "不要编造不存在的品牌或型号。能确定、可能、不能确定三类要区分清楚。"
+    )
+
+
+def _build_vlm_object_messages(viewer: "RgbdViewer", device_dir: Path, store: dict, object_id: str) -> list[dict]:
+    content: list[dict] = [{"type": "text", "text": _vlm_object_prompt()}]
+    for image_record, image in _object_masked_images(viewer, device_dir, store, object_id):
+        content.append({"type": "text", "text": f"Image {image_record.get('image_id', '')}"})
+        content.append({"type": "image_url", "image_url": {"url": _pil_to_data_url(image)}})
+    return [{"role": "user", "content": content}]
+
+
+def _run_vlm_object_analysis(viewer: "RgbdViewer", cursor: dict, object_id: str) -> None:
+    config = _load_vlm_config(viewer.args)
+    if not str(config.get("base_url") or "").strip() or not str(config.get("model") or "").strip():
+        print("[vlm] skipped: VLM config is incomplete", flush=True)
+        return
+
+    ctx, device_dir, store = _load_point_store(viewer.args, cursor)
+    _ = ctx
+    record = _find_object_record(store, object_id)
+    if record is None:
+        return
+    record["vlm_status"] = "processing"
+    record["vlm_started_at_ms"] = _now_ms()
+    record["vlm_error"] = ""
+    _save_point_store(device_dir, store)
+    if hasattr(viewer, "root"):
+        viewer.root.after(0, viewer.refresh_device_tree)
+
+    try:
+        messages = _build_vlm_object_messages(viewer, device_dir, store, object_id)
+        if len(messages[0]["content"]) <= 1:
+            raise ValueError("no masked images available for VLM")
+        description = _vlm_chat_completion(
+            config,
+            messages,
+            timeout=float(getattr(viewer.args, "vlm_timeout_seconds", 120.0)),
+            max_tokens=1600,
+        )
+        ctx, device_dir, store = _load_point_store(viewer.args, cursor)
+        _ = ctx
+        record = _find_object_record(store, object_id)
+        if record is not None:
+            record["vlm_status"] = "done"
+            record["vlm_model"] = str(config.get("model") or "")
+            record["vlm_description"] = description
+            record["vlm_prompt"] = _vlm_object_prompt()
+            record["vlm_completed_at_ms"] = _now_ms()
+            record["vlm_error"] = ""
+            _save_point_store(device_dir, store)
+    except Exception as exc:
+        ctx, device_dir, store = _load_point_store(viewer.args, cursor)
+        _ = ctx
+        record = _find_object_record(store, object_id)
+        if record is not None:
+            record["vlm_status"] = "error"
+            record["vlm_error"] = str(exc)
+            record["vlm_completed_at_ms"] = _now_ms()
+            _save_point_store(device_dir, store)
+        print(f"[vlm] object analysis failed for {object_id}: {exc}", flush=True)
+    finally:
+        if hasattr(viewer, "root"):
+            viewer.root.after(0, viewer.refresh_device_tree)
+
+
+def _schedule_vlm_object_analysis(viewer: "RgbdViewer", cursor: dict, object_id: str) -> None:
+    config = _load_vlm_config(viewer.args)
+    if not str(config.get("base_url") or "").strip() or not str(config.get("model") or "").strip():
+        return
+    worker = threading.Thread(
+        target=_run_vlm_object_analysis,
+        args=(viewer, dict(cursor), object_id),
+        daemon=True,
+    )
+    worker.start()
+
+
+def _preview_query_to_cursor(query: dict[str, list[str]]) -> dict:
+    def first(*names: str, fallback: str = "") -> str:
+        for name in names:
+            values = query.get(name)
+            if values:
+                return values[0]
+        return fallback
+
+    return {
+        "room_id": first("room_id", "room_name", fallback="room_default"),
+        "room_name": first("room_name", "room_id", fallback="room_default"),
+        "device_id": first("device_id", "device_name", fallback="device_default"),
+        "device_name": first("device_name", "device_id", fallback="device_default"),
+        "device_model": first("device_model", fallback=""),
+        "object_session_id": first("object_id", "object_session_id", fallback="object_default"),
+    }
+
+
+def _room_preview_records(store: dict, image_records: list[dict]) -> list[dict]:
+    records: list[dict] = []
+    for image in image_records:
+        points = _points_for_image(store, image)
+        positive_count = sum(1 for point in points if int(point.get("label", 1)) > 0)
+        negative_count = len(points) - positive_count
+        records.append(
+            {
+                "image_id": str(image.get("image_id") or ""),
+                "created_at_ms": int(image.get("created_at_ms") or 0),
+                "updated_at_ms": int(image.get("updated_at_ms") or image.get("created_at_ms") or 0),
+                "last_segmented_at_ms": int(image.get("last_segmented_at_ms") or 0),
+                "point_count": len(points),
+                "positive_point_count": positive_count,
+                "negative_point_count": negative_count,
+                "preseeded_point_count": int(image.get("preseeded_point_count") or 0),
+                "segmented": bool(image.get("device_mask")),
+            }
+        )
+    return records
+
+
+def _mask_path_for_image(device_dir: Path, image_record: dict) -> Path | None:
+    raw_path = image_record.get("device_mask")
+    candidates: list[Path] = []
+    if raw_path:
+        candidates.append(Path(str(raw_path)))
+    capture_dir = _resolve_store_path(device_dir, image_record.get("capture_dir"))
+    candidates.extend(
+        [
+            capture_dir / "device_mask.png",
+            capture_dir / "device_mask_raw.png",
+        ]
+    )
+    for path in candidates:
+        if path.exists():
+            return path
+    return None
+
+
+def _draw_preview_points(image: np.ndarray, points: list[dict]) -> np.ndarray:
+    out = image.astype(np.uint8, copy=True)
+    h, w = out.shape[:2]
+    for index, point in enumerate(points, start=1):
+        coord = point.get("rgb_xy")
+        if not isinstance(coord, list) or len(coord) != 2:
+            continue
+        try:
+            x = int(round(float(coord[0])))
+            y = int(round(float(coord[1])))
+        except (TypeError, ValueError):
+            continue
+        if x < 0 or x >= w or y < 0 or y >= h:
+            continue
+
+        positive = int(point.get("label", 1)) > 0
+        color = (0, 230, 118) if positive else (255, 77, 79)
+        cv2.circle(out, (x, y), 12, (16, 16, 16), -1, lineType=cv2.LINE_AA)
+        cv2.circle(out, (x, y), 10, color, -1, lineType=cv2.LINE_AA)
+        cv2.circle(out, (x, y), 12, (255, 255, 255), 2, lineType=cv2.LINE_AA)
+        label = str(index)
+        cv2.putText(
+            out,
+            label,
+            (x - 5, y + 4),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.36,
+            (8, 8, 8),
+            1,
+            cv2.LINE_AA,
+        )
+    return out
+
+
+def _build_room_preview_image(viewer: "RgbdViewer", device_dir: Path, store: dict, image_record: dict) -> bytes:
+    frame = _load_room_frame(viewer, device_dir, image_record)
+    base_overlay = frame.any2full_overlay_rgb if frame.any2full_overlay_rgb is not None else frame.overlay_rgb
+    preview = base_overlay.astype(np.uint8, copy=True)
+    mask_path = _mask_path_for_image(device_dir, image_record)
+    if mask_path is not None:
+        mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+        if mask is not None and mask.shape == preview.shape[:2]:
+            preview = overlay_device_mask(preview, mask > 0)
+
+    points = _points_for_image(store, image_record)
+    preview = _draw_preview_points(preview, points)
+
+    buffer = io.BytesIO()
+    Image.fromarray(preview).save(buffer, format="PNG")
+    return buffer.getvalue()
 
 
 def _build_prompt_from_room_points(
@@ -1866,7 +2625,46 @@ def _load_room_frame(viewer: "RgbdViewer", device_dir: Path, image_record: dict)
 class _PayloadHandler(http.server.BaseHTTPRequestHandler):
     viewer_ref: "RgbdViewer | None" = None
 
+    def do_GET(self) -> None:
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/api/room/preview/list":
+            self._handle_room_preview_list(parsed)
+            return
+        if parsed.path == "/api/room/preview/image":
+            self._handle_room_preview_image(parsed)
+            return
+        if parsed.path == "/api/room/object/list":
+            self._handle_room_object_list(parsed)
+            return
+        if parsed.path == "/api/room/object/thumbnail":
+            self._handle_room_object_thumbnail(parsed)
+            return
+        if parsed.path == "/api/room/object/points":
+            self._handle_room_object_points(parsed)
+            return
+        self.send_error(404)
+
     def do_POST(self) -> None:
+        if self.path == "/api/room/object/begin_edit":
+            self._handle_room_object_begin_edit()
+            return
+
+        if self.path == "/api/room/object/complete":
+            self._handle_room_object_complete()
+            return
+
+        if self.path == "/api/room/object/abandon":
+            self._handle_room_object_abandon()
+            return
+
+        if self.path == "/api/room/object/delete":
+            self._handle_room_object_delete()
+            return
+
+        if self.path == "/api/room/object/rename":
+            self._handle_room_object_rename()
+            return
+
         if self.path == "/api/room/point/delete":
             self._handle_room_point_delete()
             return
@@ -1907,6 +2705,9 @@ class _PayloadHandler(http.server.BaseHTTPRequestHandler):
         except Exception as exc:
             self.send_error(400, f"invalid cursor_json: {exc}")
             return
+        if isinstance(cursor_payload, dict) and not str(cursor_payload.get("logical_point_id") or "").strip():
+            timestamp_ms = int(cursor_payload.get("timestamp_ms") or _now_ms())
+            cursor_payload["logical_point_id"] = f"lp_{timestamp_ms}"
         if rgb_raw is None and rgb_jpeg is None:
             self.send_error(400, "missing RGB field: need rgb_raw or rgb_jpeg")
             return
@@ -2009,6 +2810,19 @@ class _PayloadHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _read_json_payload(self) -> tuple[dict | None, str | None]:
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            return None, "invalid_content_length"
+        try:
+            payload = json.loads(self.rfile.read(content_length).decode("utf-8"))
+        except Exception as exc:
+            return None, f"invalid_json: {exc}"
+        if not isinstance(payload, dict):
+            return None, "json_body_must_be_object"
+        return payload, None
+
     def _handle_room_point(self) -> None:
         viewer = self.viewer_ref
         if viewer is None:
@@ -2026,6 +2840,9 @@ class _PayloadHandler(http.server.BaseHTTPRequestHandler):
         except Exception as exc:
             self._send_json(400, {"ok": False, "needs_capture": True, "reason": f"invalid_json: {exc}"})
             return
+        if not str(cursor.get("logical_point_id") or "").strip():
+            timestamp_ms = int(cursor.get("timestamp_ms") or _now_ms())
+            cursor["logical_point_id"] = f"lp_{timestamp_ms}"
 
         try:
             _ctx, device_dir, store, image_record, projected = _find_matching_room_image(viewer, cursor)
@@ -2035,9 +2852,35 @@ class _PayloadHandler(http.server.BaseHTTPRequestHandler):
                 self._send_json(200, {"ok": True, "needs_capture": True, "reason": reason})
                 return
 
-            added, point = _append_room_point(viewer.args, device_dir, store, image_record, cursor, projected)
-            frame = _load_room_frame(viewer, device_dir, image_record)
-            frame = _apply_room_segmentation(frame, viewer, device_dir, store, image_record, cursor)
+            object_id = image_record.get("object_id") or _room_context(cursor)["object_id"]
+            visible_matches = _project_cursor_to_visible_object_images(viewer, device_dir, store, cursor, object_id)
+            primary_image_id = str(image_record.get("image_id") or "")
+            if not any(str(match_image.get("image_id") or "") == primary_image_id for match_image, _prompt in visible_matches):
+                visible_matches.append((image_record, projected))
+
+            added = False
+            point = None
+            affected_image_ids: list[str] = []
+            frame = None
+            primary_frame = None
+            primary_point = None
+            for match_image, match_prompt in visible_matches:
+                point_added, point_record = _append_room_point(viewer.args, device_dir, store, match_image, cursor, match_prompt)
+                added = added or point_added
+                point = point_record
+                if str(match_image.get("image_id") or "") == primary_image_id:
+                    primary_point = point_record
+                if point_added:
+                    affected_image_ids.append(str(match_image.get("image_id") or ""))
+                current_frame = _load_room_frame(viewer, device_dir, match_image)
+                current_frame = _apply_room_segmentation(current_frame, viewer, device_dir, store, match_image, cursor)
+                if str(match_image.get("image_id") or "") == primary_image_id:
+                    primary_frame = current_frame
+                frame = current_frame
+            if primary_frame is not None:
+                frame = primary_frame
+            if primary_point is not None:
+                point = primary_point
         except Exception as exc:
             print(f"[room-store] point handling failed: {exc}", flush=True)
             self._send_json(500, {"ok": False, "needs_capture": True, "reason": str(exc)})
@@ -2051,6 +2894,7 @@ class _PayloadHandler(http.server.BaseHTTPRequestHandler):
                 "needs_capture": False,
                 "reason": "matched_existing_image",
                 "image_id": image_record.get("image_id"),
+                "affected_image_ids": affected_image_ids,
                 "point_added": added,
                 "point": point,
             },
@@ -2115,6 +2959,350 @@ class _PayloadHandler(http.server.BaseHTTPRequestHandler):
             },
         )
 
+    def _handle_room_preview_list(self, parsed: urllib.parse.ParseResult) -> None:
+        viewer = self.viewer_ref
+        if viewer is None:
+            self._send_json(503, {"ok": False, "reason": "viewer_not_ready", "images": []})
+            return
+
+        query = urllib.parse.parse_qs(parsed.query)
+        cursor = _preview_query_to_cursor(query)
+        try:
+            ctx, _device_dir, store = _load_point_store(viewer.args, cursor)
+            object_id = ctx["object_id"]
+            image_records = [
+                image
+                for image in store.get("images", [])
+                if str(image.get("object_id") or "object_default") == object_id
+            ]
+            image_records.sort(key=lambda image: int(image.get("created_at_ms") or 0))
+            records = _room_preview_records(store, image_records)
+            selected_index = max(0, len(records) - 1) if records else -1
+        except Exception as exc:
+            print(f"[room-preview] list failed: {exc}", flush=True)
+            self._send_json(500, {"ok": False, "reason": str(exc), "images": []})
+            return
+
+        payload = {
+            "ok": True,
+            "room_id": ctx["room_id"],
+            "device_id": ctx["device_id"],
+            "object_id": object_id,
+            "selected_index": selected_index,
+            "images": records,
+        }
+        self._send_json(200, payload)
+
+    def _handle_room_preview_image(self, parsed: urllib.parse.ParseResult) -> None:
+        viewer = self.viewer_ref
+        if viewer is None:
+            self._send_json(503, {"ok": False, "reason": "viewer_not_ready"})
+            return
+
+        query = urllib.parse.parse_qs(parsed.query)
+        cursor = _preview_query_to_cursor(query)
+        image_id = (query.get("image_id") or [""])[0]
+        if not image_id:
+            self.send_error(400, "missing image_id")
+            return
+
+        try:
+            ctx, device_dir, store = _load_point_store(viewer.args, cursor)
+            object_id = ctx["object_id"]
+            image_record = next(
+                (
+                    image
+                    for image in store.get("images", [])
+                    if str(image.get("image_id") or "") == image_id
+                    and str(image.get("object_id") or "object_default") == object_id
+                ),
+                None,
+            )
+            if image_record is None:
+                self.send_error(404, "image not found")
+                return
+            body = _build_room_preview_image(viewer, device_dir, store, image_record)
+        except Exception as exc:
+            print(f"[room-preview] image failed: {exc}", flush=True)
+            self.send_error(500, str(exc))
+            return
+
+        self.send_response(200)
+        self.send_header("Content-Type", "image/png")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _handle_room_object_list(self, parsed: urllib.parse.ParseResult) -> None:
+        viewer = self.viewer_ref
+        if viewer is None:
+            self._send_json(503, {"ok": False, "reason": "viewer_not_ready", "objects": []})
+            return
+
+        query = urllib.parse.parse_qs(parsed.query)
+        cursor = _preview_query_to_cursor(query)
+        try:
+            ctx, _device_dir, store = _load_point_store(viewer.args, cursor)
+            records = _completed_object_records(store)
+        except Exception as exc:
+            print(f"[room-object] list failed: {exc}", flush=True)
+            self._send_json(500, {"ok": False, "reason": str(exc), "objects": []})
+            return
+
+        self._send_json(
+            200,
+            {
+                "ok": True,
+                "room_id": ctx["room_id"],
+                "device_id": ctx["device_id"],
+                "objects": records,
+            },
+        )
+
+    def _handle_room_object_thumbnail(self, parsed: urllib.parse.ParseResult) -> None:
+        viewer = self.viewer_ref
+        if viewer is None:
+            self.send_error(503, "viewer not ready")
+            return
+
+        query = urllib.parse.parse_qs(parsed.query)
+        cursor = _preview_query_to_cursor(query)
+        object_id = _safe_path_component((query.get("object_id") or query.get("object_session_id") or [""])[0], "")
+        if not object_id:
+            self.send_error(400, "missing object_id")
+            return
+
+        try:
+            _ctx, device_dir, store = _load_point_store(viewer.args, cursor)
+            if _find_object_record(store, object_id) is None:
+                self.send_error(404, "object not found")
+                return
+            body = _build_object_thumbnail(viewer, device_dir, store, object_id)
+        except Exception as exc:
+            print(f"[room-object] thumbnail failed: {exc}", flush=True)
+            self.send_error(500, str(exc))
+            return
+
+        self.send_response(200)
+        self.send_header("Content-Type", "image/png")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _handle_room_object_points(self, parsed: urllib.parse.ParseResult) -> None:
+        viewer = self.viewer_ref
+        if viewer is None:
+            self._send_json(503, {"ok": False, "reason": "viewer_not_ready", "points": []})
+            return
+
+        query = urllib.parse.parse_qs(parsed.query)
+        cursor = _preview_query_to_cursor(query)
+        object_id = _safe_path_component((query.get("object_id") or query.get("object_session_id") or [""])[0], "")
+        if not object_id:
+            self._send_json(400, {"ok": False, "reason": "missing_object_id", "points": []})
+            return
+
+        try:
+            _ctx, _device_dir, store = _load_point_store(viewer.args, cursor)
+            points = _object_spatial_points(store, object_id)
+        except Exception as exc:
+            print(f"[room-object] points failed: {exc}", flush=True)
+            self._send_json(500, {"ok": False, "reason": str(exc), "points": []})
+            return
+
+        self._send_json(200, {"ok": True, "object_id": object_id, "points": points})
+
+    def _handle_room_object_begin_edit(self) -> None:
+        viewer = self.viewer_ref
+        if viewer is None:
+            self._send_json(503, {"ok": False, "reason": "viewer_not_ready", "points": []})
+            return
+
+        payload, error = self._read_json_payload()
+        if error is not None:
+            self._send_json(400, {"ok": False, "reason": error, "points": []})
+            return
+
+        object_id = _safe_path_component(payload.get("object_id") or payload.get("object_session_id"), "")
+        if not object_id:
+            self._send_json(400, {"ok": False, "reason": "missing_object_id", "points": []})
+            return
+
+        try:
+            ctx, device_dir, store = _load_point_store(viewer.args, payload)
+            record = _find_object_record(store, object_id)
+            if record is None or str(record.get("status") or "") != "completed":
+                self._send_json(404, {"ok": False, "reason": "completed_object_not_found", "points": []})
+                return
+            edit_session_id, points = _begin_object_edit(device_dir, store, object_id)
+        except Exception as exc:
+            print(f"[room-object] begin_edit failed: {exc}", flush=True)
+            self._send_json(500, {"ok": False, "reason": str(exc), "points": []})
+            return
+
+        self._send_json(
+            200,
+            {
+                "ok": True,
+                "room_id": ctx["room_id"],
+                "device_id": ctx["device_id"],
+                "object_id": object_id,
+                "edit_session_id": edit_session_id,
+                "name": str(record.get("name") or object_id),
+                "points": points,
+            },
+        )
+
+    def _handle_room_object_complete(self) -> None:
+        viewer = self.viewer_ref
+        if viewer is None:
+            self._send_json(503, {"ok": False, "reason": "viewer_not_ready"})
+            return
+
+        payload, error = self._read_json_payload()
+        if error is not None:
+            self._send_json(400, {"ok": False, "reason": error})
+            return
+
+        object_id = _safe_path_component(payload.get("object_id") or payload.get("object_session_id"), "")
+        if not object_id:
+            self._send_json(400, {"ok": False, "reason": "missing_object_id"})
+            return
+        edit_session_id = str(payload.get("edit_session_id") or "")
+
+        try:
+            ctx, device_dir, store = _load_point_store(viewer.args, payload)
+            record = _complete_object(device_dir, store, object_id, edit_session_id)
+            _schedule_vlm_object_analysis(viewer, payload, object_id)
+        except ValueError as exc:
+            self._send_json(400, {"ok": False, "reason": str(exc)})
+            return
+        except Exception as exc:
+            print(f"[room-object] complete failed: {exc}", flush=True)
+            self._send_json(500, {"ok": False, "reason": str(exc)})
+            return
+
+        self._send_json(
+            200,
+            {
+                "ok": True,
+                "room_id": ctx["room_id"],
+                "device_id": ctx["device_id"],
+                "object_id": object_id,
+                "object": record,
+                "points": _object_spatial_points(store, object_id),
+            },
+        )
+        viewer.root.after(0, viewer.refresh_device_tree)
+
+    def _handle_room_object_abandon(self) -> None:
+        viewer = self.viewer_ref
+        if viewer is None:
+            self._send_json(503, {"ok": False, "reason": "viewer_not_ready"})
+            return
+
+        payload, error = self._read_json_payload()
+        if error is not None:
+            self._send_json(400, {"ok": False, "reason": error})
+            return
+
+        object_id = _safe_path_component(payload.get("object_id") or payload.get("object_session_id"), "")
+        if not object_id:
+            self._send_json(400, {"ok": False, "reason": "missing_object_id"})
+            return
+        edit_session_id = str(payload.get("edit_session_id") or "")
+
+        try:
+            _ctx, device_dir, store = _load_point_store(viewer.args, payload)
+            if edit_session_id:
+                store = _restore_object_edit_backup(device_dir, edit_session_id)
+                mode = "restored_edit_snapshot"
+            else:
+                removed_images = _remove_object_content(device_dir, store, object_id)
+                _save_point_store(device_dir, store)
+                mode = f"deleted_unfinished_object_images_{removed_images}"
+        except Exception as exc:
+            print(f"[room-object] abandon failed: {exc}", flush=True)
+            self._send_json(500, {"ok": False, "reason": str(exc)})
+            return
+
+        self._send_json(
+            200,
+            {
+                "ok": True,
+                "object_id": object_id,
+                "reason": mode,
+                "points": _object_spatial_points(store, object_id),
+            },
+        )
+
+    def _handle_room_object_delete(self) -> None:
+        viewer = self.viewer_ref
+        if viewer is None:
+            self._send_json(503, {"ok": False, "reason": "viewer_not_ready"})
+            return
+
+        payload, error = self._read_json_payload()
+        if error is not None:
+            self._send_json(400, {"ok": False, "reason": error})
+            return
+
+        object_id = _safe_path_component(payload.get("object_id") or payload.get("object_session_id"), "")
+        if not object_id:
+            self._send_json(400, {"ok": False, "reason": "missing_object_id"})
+            return
+
+        try:
+            _ctx, device_dir, store = _load_point_store(viewer.args, payload)
+            removed_images = _remove_object_content(device_dir, store, object_id)
+            _save_point_store(device_dir, store)
+        except Exception as exc:
+            print(f"[room-object] delete failed: {exc}", flush=True)
+            self._send_json(500, {"ok": False, "reason": str(exc)})
+            return
+
+        self._send_json(200, {"ok": True, "object_id": object_id, "deleted_images": removed_images})
+        viewer.root.after(0, viewer.refresh_device_tree)
+
+    def _handle_room_object_rename(self) -> None:
+        viewer = self.viewer_ref
+        if viewer is None:
+            self._send_json(503, {"ok": False, "reason": "viewer_not_ready"})
+            return
+
+        payload, error = self._read_json_payload()
+        if error is not None:
+            self._send_json(400, {"ok": False, "reason": error})
+            return
+
+        object_id = _safe_path_component(payload.get("object_id") or payload.get("object_session_id"), "")
+        name = str(payload.get("name") or "").strip()
+        if not object_id:
+            self._send_json(400, {"ok": False, "reason": "missing_object_id"})
+            return
+        if not name:
+            self._send_json(400, {"ok": False, "reason": "missing_name"})
+            return
+
+        try:
+            _ctx, device_dir, store = _load_point_store(viewer.args, payload)
+            record = _find_object_record(store, object_id)
+            if record is None:
+                self._send_json(404, {"ok": False, "reason": "object_not_found"})
+                return
+            record["name"] = name
+            record["updated_at_ms"] = _now_ms()
+            _save_point_store(device_dir, store)
+        except Exception as exc:
+            print(f"[room-object] rename failed: {exc}", flush=True)
+            self._send_json(500, {"ok": False, "reason": str(exc)})
+            return
+
+        self._send_json(200, {"ok": True, "object_id": object_id, "object": record})
+        viewer.root.after(0, viewer.refresh_device_tree)
+
     def _send_json(self, status: int, payload: dict) -> None:
         body = json.dumps(payload).encode("utf-8")
         self.send_response(status)
@@ -2155,6 +3343,9 @@ class RgbdViewer:
         self._current_frame_name = "network"
         self.any2full_service: Any2FullService | None = None
         self.device_segmenter: Sam2DeviceSegmenter | None = None
+        self._device_tree_item_context: dict[str, dict] = {}
+        self._vlm_last_test_ok = False
+        self._vlm_last_test_signature = ""
 
         self.root = tk.Tk()
         self.root.title("Quest 3 RGB-D Alignment Viewer")
@@ -2234,8 +3425,12 @@ class RgbdViewer:
 
         rgb_tab = ttk.Frame(notebook, padding=8)
         cloud_tab = ttk.Frame(notebook, padding=8)
+        devices_tab = ttk.Frame(notebook, padding=8)
+        vlm_tab = ttk.Frame(notebook, padding=8)
         notebook.add(rgb_tab, text="RGB depth")
         notebook.add(cloud_tab, text="Point cloud")
+        notebook.add(devices_tab, text="Room Devices")
+        notebook.add(vlm_tab, text="VLM Settings")
 
         rgb_main = ttk.Frame(rgb_tab)
         rgb_main.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
@@ -2288,6 +3483,330 @@ class RgbdViewer:
             value="Drag to rotate. Mouse wheel zooms. Points are raw valid depth samples colored by projected RGB pixels.",
         )
         ttk.Label(cloud_tab, textvariable=self.cloud_var).pack(side=tk.TOP, fill=tk.X, pady=(8, 0))
+
+        self._build_device_tree_tab(devices_tab)
+        self._build_vlm_settings_tab(vlm_tab)
+
+    def _build_device_tree_tab(self, parent: ttk.Frame) -> None:
+        toolbar = ttk.Frame(parent)
+        toolbar.pack(side=tk.TOP, fill=tk.X, pady=(0, 8))
+        ttk.Button(toolbar, text="Refresh", command=self.refresh_device_tree).pack(side=tk.LEFT)
+        self.device_tree_status_var = tk.StringVar(value="")
+        ttk.Label(toolbar, textvariable=self.device_tree_status_var).pack(side=tk.LEFT, padx=12)
+
+        columns = ("name", "completed", "images", "vlm")
+        self.device_tree = ttk.Treeview(parent, columns=columns, show="tree headings", height=18)
+        self.device_tree.heading("#0", text="Room / Quest / Device")
+        self.device_tree.heading("name", text="Name")
+        self.device_tree.heading("completed", text="Completed")
+        self.device_tree.heading("images", text="Images")
+        self.device_tree.heading("vlm", text="VLM")
+        ttk.Style().configure("Device.Treeview", rowheight=56)
+        self.device_tree.configure(style="Device.Treeview")
+        self.device_tree.column("#0", width=320, anchor=tk.W)
+        self.device_tree.column("name", width=220, anchor=tk.W)
+        self.device_tree.column("completed", width=160, anchor=tk.W)
+        self.device_tree.column("images", width=80, anchor=tk.CENTER)
+        self.device_tree.column("vlm", width=120, anchor=tk.W)
+        tree_scroll = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=self.device_tree.yview)
+        self.device_tree.configure(yscrollcommand=tree_scroll.set)
+        self.device_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.device_tree.bind("<Double-1>", self.on_device_tree_double_click)
+        self.refresh_device_tree()
+
+    def _build_vlm_settings_tab(self, parent: ttk.Frame) -> None:
+        config = _load_vlm_config(self.args)
+        self.vlm_base_url_var = tk.StringVar(value=str(config.get("base_url") or ""))
+        self.vlm_token_var = tk.StringVar(value=str(config.get("token") or ""))
+        self.vlm_model_var = tk.StringVar(value=str(config.get("model") or ""))
+        self.vlm_status_var = tk.StringVar(value="VLM config loaded" if config.get("model") else "Configure VLM endpoint")
+
+        form = ttk.Frame(parent)
+        form.pack(side=tk.TOP, fill=tk.X)
+        ttk.Label(form, text="Base URL").grid(row=0, column=0, sticky=tk.W, padx=(0, 8), pady=6)
+        ttk.Entry(form, textvariable=self.vlm_base_url_var, width=72).grid(row=0, column=1, sticky=tk.EW, pady=6)
+        ttk.Label(form, text="Token").grid(row=1, column=0, sticky=tk.W, padx=(0, 8), pady=6)
+        ttk.Entry(form, textvariable=self.vlm_token_var, width=72, show="*").grid(row=1, column=1, sticky=tk.EW, pady=6)
+        ttk.Label(form, text="Model").grid(row=2, column=0, sticky=tk.W, padx=(0, 8), pady=6)
+        self.vlm_model_combo = ttk.Combobox(form, textvariable=self.vlm_model_var, values=(), width=68)
+        self.vlm_model_combo.grid(row=2, column=1, sticky=tk.EW, pady=6)
+        form.columnconfigure(1, weight=1)
+
+        actions = ttk.Frame(parent)
+        actions.pack(side=tk.TOP, fill=tk.X, pady=(10, 6))
+        ttk.Button(actions, text="Connect / Load Models", command=self.on_vlm_connect).pack(side=tk.LEFT)
+        ttk.Button(actions, text="Test", command=self.on_vlm_test).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(actions, text="Save", command=self.on_vlm_save).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Label(actions, textvariable=self.vlm_status_var).pack(side=tk.LEFT, padx=14)
+
+        prompt_group = ttk.LabelFrame(parent, text="Device Analysis Prompt", padding=8)
+        prompt_group.pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=(8, 0))
+        prompt_text = scrolledtext.ScrolledText(prompt_group, height=12, wrap=tk.WORD)
+        prompt_text.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        prompt_text.insert(tk.END, _vlm_object_prompt())
+        prompt_text.configure(state=tk.DISABLED)
+
+    def _vlm_form_config(self) -> dict:
+        return {
+            "base_url": self.vlm_base_url_var.get().strip(),
+            "token": self.vlm_token_var.get().strip(),
+            "model": self.vlm_model_var.get().strip(),
+        }
+
+    def _vlm_form_signature(self) -> str:
+        config = self._vlm_form_config()
+        return json.dumps(
+            {
+                "base_url": config["base_url"],
+                "token": config["token"],
+                "model": config["model"],
+            },
+            sort_keys=True,
+        )
+
+    def on_vlm_connect(self) -> None:
+        config = self._vlm_form_config()
+        self.vlm_status_var.set("Connecting...")
+
+        def worker() -> None:
+            try:
+                models = _vlm_list_models(config, timeout=float(getattr(self.args, "vlm_timeout_seconds", 120.0)))
+                self.root.after(0, lambda: self._on_vlm_models_loaded(models))
+            except Exception as exc:
+                self.root.after(0, lambda: self.vlm_status_var.set("Connect failed: " + str(exc)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_vlm_models_loaded(self, models: list[str]) -> None:
+        self.vlm_model_combo.configure(values=models)
+        if models and not self.vlm_model_var.get().strip():
+            self.vlm_model_var.set(models[0])
+        self._vlm_last_test_ok = False
+        self.vlm_status_var.set(f"Loaded {len(models)} model(s)")
+
+    def on_vlm_test(self) -> None:
+        config = self._vlm_form_config()
+        if not config["base_url"] or not config["model"]:
+            self.vlm_status_var.set("Base URL and model are required")
+            return
+        signature = self._vlm_form_signature()
+        self.vlm_status_var.set("Testing...")
+
+        def worker() -> None:
+            try:
+                models, response = _vlm_test_connection(config, timeout=float(getattr(self.args, "vlm_timeout_seconds", 120.0)))
+                self.root.after(0, lambda: self._on_vlm_test_ok(models, response, signature))
+            except Exception as exc:
+                self.root.after(0, lambda: self._on_vlm_test_failed(str(exc)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_vlm_test_ok(self, models: list[str], response: str, signature: str) -> None:
+        if models:
+            self.vlm_model_combo.configure(values=models)
+        self._vlm_last_test_ok = True
+        self._vlm_last_test_signature = signature
+        self.vlm_status_var.set("Test passed: " + (response[:80] if response else "empty response"))
+
+    def _on_vlm_test_failed(self, reason: str) -> None:
+        self._vlm_last_test_ok = False
+        self.vlm_status_var.set("Test failed: " + reason)
+
+    def on_vlm_save(self) -> None:
+        config = self._vlm_form_config()
+        if not config["base_url"] or not config["model"]:
+            self.vlm_status_var.set("Base URL and model are required")
+            return
+        if not self._vlm_last_test_ok or self._vlm_last_test_signature != self._vlm_form_signature():
+            self.vlm_status_var.set("Run Test successfully before saving")
+            return
+        config["tested_at_ms"] = _now_ms()
+        _save_vlm_config(self.args, config)
+        self.vlm_status_var.set("Saved")
+
+    def scan_completed_room_objects(self) -> list[dict]:
+        root = _room_store_root(self.args)
+        items: list[dict] = []
+        if not root.exists():
+            return items
+        for room_dir in sorted([path for path in root.iterdir() if path.is_dir()], key=lambda p: p.name):
+            for device_dir in sorted([path for path in room_dir.iterdir() if path.is_dir()], key=lambda p: p.name):
+                points_path = device_dir / "points.json"
+                if not points_path.exists():
+                    continue
+                try:
+                    store = json.loads(points_path.read_text(encoding="utf-8"))
+                except Exception as exc:
+                    print(f"[viewer] failed to read {points_path}: {exc}", flush=True)
+                    continue
+                if not isinstance(store, dict):
+                    continue
+                for record in _object_records(store):
+                    if str(record.get("status") or "") != "completed":
+                        continue
+                    object_id = str(record.get("object_id") or "")
+                    images = _object_images(store, object_id)
+                    points = _object_points(store, object_id)
+                    items.append(
+                        {
+                            "room_id": str(store.get("room_id") or room_dir.name),
+                            "room_name": str(store.get("room_name") or room_dir.name),
+                            "device_id": str(store.get("device_id") or device_dir.name),
+                            "device_name": str(store.get("device_name") or device_dir.name),
+                            "device_model": str(store.get("device_model") or ""),
+                            "device_dir": device_dir,
+                            "store": store,
+                            "object": record,
+                            "object_id": object_id,
+                            "image_count": len(images),
+                            "point_count": len(points),
+                        }
+                    )
+        items.sort(key=lambda item: int(item["object"].get("completed_at_ms") or 0), reverse=True)
+        return items
+
+    def refresh_device_tree(self) -> None:
+        if not hasattr(self, "device_tree"):
+            return
+        self.device_tree.delete(*self.device_tree.get_children())
+        self._device_tree_item_context.clear()
+        self._device_tree_photo_refs = []
+        room_items: dict[str, str] = {}
+        device_items: dict[tuple[str, str], str] = {}
+        objects = self.scan_completed_room_objects()
+        for item in objects:
+            room_key = item["room_id"]
+            if room_key not in room_items:
+                room_items[room_key] = self.device_tree.insert(
+                    "",
+                    tk.END,
+                    text=item["room_name"],
+                    values=("", "", "", ""),
+                    open=True,
+                )
+            device_key = (item["room_id"], item["device_id"])
+            if device_key not in device_items:
+                device_label = item["device_name"]
+                if item["device_model"]:
+                    device_label += f" ({item['device_model']})"
+                device_items[device_key] = self.device_tree.insert(
+                    room_items[room_key],
+                    tk.END,
+                    text=device_label,
+                    values=("", "", "", ""),
+                    open=True,
+                )
+            record = item["object"]
+            completed = _format_local_timestamp_s(int(record.get("completed_at_ms") or _now_ms()))
+            vlm_status = str(record.get("vlm_status") or "not run")
+            photo = self._make_tree_thumbnail(item)
+            insert_kwargs = {
+                "text": item["object_id"],
+                "values": (
+                    str(record.get("name") or item["object_id"]),
+                    completed,
+                    str(item["image_count"]),
+                    vlm_status,
+                ),
+            }
+            if photo is not None:
+                insert_kwargs["image"] = photo
+            object_item = self.device_tree.insert(device_items[device_key], tk.END, **insert_kwargs)
+            self._device_tree_item_context[object_item] = item
+        self.device_tree_status_var.set(f"{len(objects)} completed device(s)")
+
+    def _make_tree_thumbnail(self, item: dict) -> ImageTk.PhotoImage | None:
+        try:
+            body = _build_object_thumbnail(self, Path(item["device_dir"]), item["store"], str(item["object_id"]))
+            image = Image.open(io.BytesIO(body)).convert("RGB").resize((64, 48), Image.Resampling.LANCZOS)
+            photo = ImageTk.PhotoImage(image)
+            self._device_tree_photo_refs.append(photo)
+            return photo
+        except Exception as exc:
+            print(f"[viewer] thumbnail failed for {item.get('object_id')}: {exc}", flush=True)
+            return None
+
+    def on_device_tree_double_click(self, _event: tk.Event) -> None:
+        item_id = self.device_tree.focus()
+        context = self._device_tree_item_context.get(item_id)
+        if context is None:
+            return
+        self.open_object_detail_window(context)
+
+    def open_object_detail_window(self, context: dict) -> None:
+        device_dir = Path(context["device_dir"])
+        try:
+            store = json.loads((device_dir / "points.json").read_text(encoding="utf-8"))
+        except Exception:
+            store = context["store"]
+        object_id = str(context["object_id"])
+        record = _find_object_record(store, object_id) or context["object"]
+
+        window = tk.Toplevel(self.root)
+        window.title(str(record.get("name") or object_id))
+        window.geometry("980x720")
+        window.photo_refs = []  # type: ignore[attr-defined]
+
+        header = ttk.Frame(window, padding=8)
+        header.pack(side=tk.TOP, fill=tk.X)
+        title = f"{record.get('name') or object_id} | {context['room_name']} / {context['device_name']}"
+        ttk.Label(header, text=title, font=("Segoe UI", 12, "bold")).pack(side=tk.LEFT)
+
+        main = ttk.PanedWindow(window, orient=tk.HORIZONTAL)
+        main.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+
+        image_outer = ttk.Frame(main)
+        text_outer = ttk.Frame(main)
+        main.add(image_outer, weight=3)
+        main.add(text_outer, weight=2)
+
+        canvas = tk.Canvas(image_outer, background="#f5f5f5", highlightthickness=0)
+        scrollbar = ttk.Scrollbar(image_outer, orient=tk.VERTICAL, command=canvas.yview)
+        inner = ttk.Frame(canvas)
+        inner.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=inner, anchor=tk.NW)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        detail_images = _object_detail_images(self, device_dir, store, object_id)
+        if not detail_images:
+            ttk.Label(inner, text="No mask images available").pack(side=tk.TOP, padx=12, pady=12)
+        for image_record, image in detail_images:
+            display = image.copy()
+            if display.width > 420:
+                scale = 420 / float(display.width)
+                display = display.resize((420, max(1, int(display.height * scale))), Image.Resampling.LANCZOS)
+            photo = ImageTk.PhotoImage(display)
+            window.photo_refs.append(photo)  # type: ignore[attr-defined]
+            ttk.Label(inner, text=str(image_record.get("image_id") or ""), font=("Segoe UI", 10, "bold")).pack(side=tk.TOP, anchor=tk.W, padx=8, pady=(10, 2))
+            ttk.Label(inner, image=photo).pack(side=tk.TOP, anchor=tk.W, padx=8)
+
+        meta = ttk.LabelFrame(text_outer, text="Saved Device", padding=8)
+        meta.pack(side=tk.TOP, fill=tk.X)
+        lines = [
+            f"Object: {object_id}",
+            f"Completed: {_format_local_timestamp_s(int(record.get('completed_at_ms') or _now_ms()))}",
+            f"Images: {len(_object_images(store, object_id))}",
+            f"Points: {len(_object_points(store, object_id))}",
+            f"VLM: {record.get('vlm_status') or 'not run'}",
+        ]
+        if record.get("vlm_model"):
+            lines.append(f"Model: {record.get('vlm_model')}")
+        if record.get("vlm_error"):
+            lines.append(f"Error: {record.get('vlm_error')}")
+        ttk.Label(meta, text="\n".join(lines), justify=tk.LEFT).pack(side=tk.TOP, fill=tk.X)
+
+        desc_group = ttk.LabelFrame(text_outer, text="VLM Description", padding=8)
+        desc_group.pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=(8, 0))
+        desc = scrolledtext.ScrolledText(desc_group, wrap=tk.WORD)
+        desc.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        description = str(record.get("vlm_description") or "")
+        if not description:
+            description = "No VLM description yet."
+        desc.insert(tk.END, description)
+        desc.configure(state=tk.DISABLED)
 
     def load_current_frame(self) -> None:
         if not self.frames:

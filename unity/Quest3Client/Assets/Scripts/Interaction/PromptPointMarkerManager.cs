@@ -57,6 +57,12 @@ namespace SmartRoom.Interaction
             _instance.RemoveMarkerInternal(marker);
         }
 
+        public static int RemoveMarkersNear(Vector3 worldPoint, float radius)
+        {
+            if (_instance == null) return 0;
+            return _instance.RemoveMarkersNearInternal(worldPoint, Mathf.Max(0f, radius));
+        }
+
         public static void ClearMarkers()
         {
             if (_instance == null) return;
@@ -197,6 +203,31 @@ namespace SmartRoom.Interaction
                 _hoveredMarker = null;
             _markers.Remove(marker);
             DestroyMarker(marker);
+        }
+
+        private int RemoveMarkersNearInternal(Vector3 worldPoint, float radius)
+        {
+            int removed = 0;
+            float radiusSq = radius * radius;
+            for (int i = _markers.Count - 1; i >= 0; i--)
+            {
+                MarkerHandle marker = _markers[i];
+                if (marker == null || !marker.IsValid)
+                {
+                    _markers.RemoveAt(i);
+                    continue;
+                }
+
+                if ((marker.WorldPoint - worldPoint).sqrMagnitude <= radiusSq)
+                {
+                    if (_hoveredMarker == marker)
+                        _hoveredMarker = null;
+                    _markers.RemoveAt(i);
+                    DestroyMarker(marker);
+                    removed++;
+                }
+            }
+            return removed;
         }
 
         private void DestroyMarker(MarkerHandle marker)

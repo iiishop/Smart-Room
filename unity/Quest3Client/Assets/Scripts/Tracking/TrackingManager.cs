@@ -27,6 +27,11 @@ namespace SmartRoom.Tracking
         [SerializeField] private string uploadPath = "/api/track/start-final-rgbd";
         [SerializeField] private string pointPath = "/api/room/point";
         [SerializeField] private string deletePointPath = "/api/room/point/delete";
+        [SerializeField] private string objectBeginEditPath = "/api/room/object/begin_edit";
+        [SerializeField] private string objectCompletePath = "/api/room/object/complete";
+        [SerializeField] private string objectAbandonPath = "/api/room/object/abandon";
+        [SerializeField] private string objectDeletePath = "/api/room/object/delete";
+        [SerializeField] private string objectRenamePath = "/api/room/object/rename";
         [SerializeField] private float requestTimeoutSeconds = 300f;
 
         [Header("Input")]
@@ -45,6 +50,13 @@ namespace SmartRoom.Tracking
         private float _hideStatusAt = -1f;
         private GameObject _statusTextObject;
         private TextMesh _statusText;
+
+        public bool IsBusy => _uploadInFlight;
+
+        public string BuildViewerUrl(string path)
+        {
+            return BuildUrl(backendBaseUrl, path);
+        }
 
         private void Awake()
         {
@@ -209,6 +221,86 @@ namespace SmartRoom.Tracking
             finally
             {
                 _uploadInFlight = false;
+            }
+        }
+
+        public Task<ObjectActionResponse> BeginEditObjectAsync(string objectId)
+        {
+            return PostObjectActionAsync(objectBeginEditPath, objectId, string.Empty, string.Empty, "Opening saved device...");
+        }
+
+        public Task<ObjectActionResponse> CompleteObjectAsync(string objectId, string editSessionId)
+        {
+            return PostObjectActionAsync(objectCompletePath, objectId, editSessionId, string.Empty, "Saving device...");
+        }
+
+        public Task<ObjectActionResponse> AbandonObjectAsync(string objectId, string editSessionId)
+        {
+            return PostObjectActionAsync(objectAbandonPath, objectId, editSessionId, string.Empty, "Abandoning device...");
+        }
+
+        public async Task<bool> DeleteObjectAsync(string objectId)
+        {
+            ObjectActionResponse response = await PostObjectActionAsync(objectDeletePath, objectId, string.Empty, string.Empty, "Deleting device...");
+            return response != null && response.ok;
+        }
+
+        public async Task<bool> RenameObjectAsync(string objectId, string name)
+        {
+            ObjectActionResponse response = await PostObjectActionAsync(objectRenamePath, objectId, string.Empty, name, "Renaming device...");
+            return response != null && response.ok;
+        }
+
+        private async Task<ObjectActionResponse> PostObjectActionAsync(
+            string path,
+            string objectId,
+            string editSessionId,
+            string name,
+            string status)
+        {
+            string cleanObjectId = string.IsNullOrWhiteSpace(objectId) ? RoomObjectSession.CurrentObjectId : objectId;
+            if (string.IsNullOrWhiteSpace(cleanObjectId))
+                return new ObjectActionResponse { ok = false, reason = "missing_object_id" };
+
+            try
+            {
+                ReportStatus(status);
+                string url = BuildUrl(backendBaseUrl, path);
+                string json = BuildObjectActionJson(cleanObjectId, editSessionId, name);
+                using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(Mathf.Max(1f, requestTimeoutSeconds)) };
+                using var content = new StringContent(json, Encoding.UTF8, "application/json");
+                using HttpResponseMessage response = await http.PostAsync(url, content);
+                string body = await response.Content.ReadAsStringAsync();
+                if (!response.IsSuccessStatusCode)
+                {
+                    Debug.LogWarning($"[TrackingManager] Object action failed ({response.StatusCode}): {body}");
+                    ReportStatus($"Device action failed {(int)response.StatusCode}: {ShortStatus(body)}");
+                    return new ObjectActionResponse { ok = false, reason = body };
+                }
+
+                ObjectActionResponse parsed = null;
+                try
+                {
+                    parsed = JsonUtility.FromJson<ObjectActionResponse>(body);
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogWarning($"[TrackingManager] Object action JSON parse failed: {ex.Message} body={body}");
+                }
+
+                if (parsed == null)
+                    parsed = new ObjectActionResponse { ok = true, object_id = cleanObjectId };
+                if (parsed.ok)
+                    ReportStatus("Device action complete");
+                else
+                    ReportStatus("Device action failed: " + ShortStatus(parsed.reason));
+                return parsed;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[TrackingManager] Object action error: {ex}");
+                ReportStatus("Device action error: " + BuildVisibleError(ex));
+                return new ObjectActionResponse { ok = false, reason = BuildVisibleError(ex) };
             }
         }
 
@@ -435,6 +527,24 @@ namespace SmartRoom.Tracking
             return JsonUtility.ToJson(payload);
         }
 
+        private static string BuildObjectActionJson(string objectId, string editSessionId, string name)
+        {
+            var payload = new ObjectActionPayload
+            {
+                room_id = RoomCoordinateSystemPanel.CurrentRoomId,
+                room_name = RoomCoordinateSystemPanel.CurrentRoomName,
+                device_id = SystemInfo.deviceUniqueIdentifier,
+                device_name = SystemInfo.deviceName,
+                device_model = SystemInfo.deviceModel,
+                object_id = objectId,
+                object_session_id = objectId,
+                edit_session_id = editSessionId ?? string.Empty,
+                name = name ?? string.Empty,
+                timestamp_ms = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            };
+            return JsonUtility.ToJson(payload);
+        }
+
         private void CreateStatusText()
         {
             if (_statusTextObject != null)
@@ -525,6 +635,43 @@ namespace SmartRoom.Tracking
             public bool ok = false;
             public bool deleted = false;
             public string reason = string.Empty;
+        }
+
+        [Serializable]
+        private sealed class ObjectActionPayload
+        {
+            public string room_id;
+            public string room_name;
+            public string device_id;
+            public string device_name;
+            public string device_model;
+            public string object_id;
+            public string object_session_id;
+            public string edit_session_id;
+            public string name;
+            public long timestamp_ms;
+        }
+
+        [Serializable]
+        public sealed class RoomObjectPointRecord
+        {
+            public string point_id = string.Empty;
+            public int label = 1;
+            public float[] world_xyz_m = Array.Empty<float>();
+            public string image_id = string.Empty;
+        }
+
+        [Serializable]
+        public sealed class ObjectActionResponse
+        {
+            public bool ok = false;
+            public string reason = string.Empty;
+            public string room_id = string.Empty;
+            public string device_id = string.Empty;
+            public string object_id = string.Empty;
+            public string edit_session_id = string.Empty;
+            public string name = string.Empty;
+            public RoomObjectPointRecord[] points = Array.Empty<RoomObjectPointRecord>();
         }
     }
 }

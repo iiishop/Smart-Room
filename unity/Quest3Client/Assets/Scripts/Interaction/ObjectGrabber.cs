@@ -69,7 +69,7 @@ namespace SmartRoom.Interaction
 
         private void Update()
         {
-            if (SmartRoom.UI.RoomCoordinateSystemPanel.IsUiBlockingSceneInput)
+            if (SmartRoom.UI.RoomCoordinateSystemPanel.IsUiBlockingSceneInput || SmartRoom.UI.DeviceArchivePanel.IsPanelVisible)
             {
                 _prevTriggerPressed = OVRInput.Get(OVRInput.RawButton.RIndexTrigger);
                 _prevDeletePressed = OVRInput.Get(OVRInput.Button.Two, OVRInput.Controller.RTouch);
@@ -130,7 +130,10 @@ namespace SmartRoom.Interaction
                 trackingManager.ReportStatus("Deleting point...");
                 bool deleted = await trackingManager.DeletePointPromptAsync(marker.WorldPoint);
                 if (deleted)
+                {
                     PromptPointMarkerManager.RemoveMarker(marker);
+                    PromptPointMarkerManager.RemoveMarkersNear(marker.WorldPoint, 0.03f);
+                }
             }
             finally
             {
@@ -140,6 +143,13 @@ namespace SmartRoom.Interaction
 
         public bool TryGrab()
         {
+            if (trackingManager != null && trackingManager.IsBusy)
+            {
+                _lastGrabTime = Time.time;
+                FailGrab("Still processing previous point");
+                return false;
+            }
+
             if (depthCursor == null)
             {
                 FailGrab("DepthCursor not assigned");
@@ -199,12 +209,13 @@ namespace SmartRoom.Interaction
             string mode = label > 0 ? "add" : "del";
             int frameWidth = rgbStreamModule != null ? rgbStreamModule.LatestFrameWidth : 0;
             int frameHeight = rgbStreamModule != null ? rgbStreamModule.LatestFrameHeight : 0;
-            PromptPointMarkerManager.AddMarker(hitPoint, label);
+            PromptPointMarkerManager.MarkerHandle marker = PromptPointMarkerManager.AddMarker(hitPoint, label);
 
             if (trackingManager != null)
             {
                 trackingManager.ReportStatus(label > 0 ? "Sending positive point..." : "Sending negative point...");
-                _ = trackingManager.HandlePointPromptAsync(
+                _ = SendTrackedPointPromptAsync(
+                    marker,
                     hitPoint,
                     pixel ?? new Vector2Int(-1, -1),
                     label,
@@ -219,6 +230,20 @@ namespace SmartRoom.Interaction
 
             IsGrabbing = false;
             return true;
+        }
+
+        private async Task SendTrackedPointPromptAsync(
+            PromptPointMarkerManager.MarkerHandle marker,
+            Vector3 hitPoint,
+            Vector2Int pixel,
+            int label,
+            string mode,
+            int frameWidth,
+            int frameHeight)
+        {
+            bool sent = await trackingManager.HandlePointPromptAsync(hitPoint, pixel, label, mode, frameWidth, frameHeight);
+            if (!sent)
+                PromptPointMarkerManager.RemoveMarker(marker);
         }
 
         private void SendPointPrompt(int px, int py, Vector3 hitPoint, int label, string mode)
