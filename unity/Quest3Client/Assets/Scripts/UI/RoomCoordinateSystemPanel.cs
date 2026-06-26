@@ -116,6 +116,7 @@ namespace SmartRoom.UI
             RoomPreviewPanel.EnsureExists(uiCamera);
             DeviceAnnotationController.EnsureExists(uiCamera);
             DeviceArchivePanel.EnsureExists(uiCamera);
+            DevicePlaceholderBoardManager.EnsureExists(uiCamera);
         }
 
         private void LateUpdate()
@@ -707,6 +708,7 @@ namespace SmartRoom.UI
             if (!isEnabled)
             {
                 PromptPointMarkerManager.ClearMarkers();
+                DevicePlaceholderBoardManager.ClearBoards();
                 WorldOriginReference.DestroyExisting();
             }
         }

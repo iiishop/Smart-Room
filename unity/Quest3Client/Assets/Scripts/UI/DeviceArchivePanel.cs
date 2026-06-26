@@ -571,6 +571,7 @@ namespace SmartRoom.UI
 
             RoomObjectSession.EnterSavedObject(response.object_id, response.edit_session_id);
             DeviceAnnotationController.ShowPromptMarkers(response.points);
+            DevicePlaceholderBoardManager.PlaceForObject(response.object_id, response.spatial, response.points, uiCamera);
             HidePanel();
         }
 
@@ -623,6 +624,7 @@ namespace SmartRoom.UI
 
             if (RoomObjectSession.HasCurrentObject && RoomObjectSession.CurrentObjectId == objectId)
                 RoomObjectSession.StartNewObject();
+            DevicePlaceholderBoardManager.RemoveForObject(objectId);
             StartCoroutine(RefreshObjectsAsync());
         }
 

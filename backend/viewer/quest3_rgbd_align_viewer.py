@@ -6,6 +6,7 @@ import http.server
 import json
 import math
 import io
+import queue
 import re
 import shutil
 import subprocess
@@ -25,6 +26,24 @@ import tkinter as tk
 from tkinter import scrolledtext
 from tkinter import ttk
 
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
+if str(BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(BACKEND_ROOT))
+
+from discover_client.pairing import (
+    build_pairing_prompt,
+    normalize_visual_profile,
+    parse_json_object,
+    score_candidates,
+)
+from discover_client.config import (
+    SCHEMAS as DISCOVER_SOURCE_SCHEMAS,
+    load_config as load_discover_config,
+    save_config as save_discover_config,
+    save_config_text as save_discover_config_text,
+)
+from discover_client.runtime import DiscoverRuntime
+from discover_client.source import SourceConfig
 from cursor_prompt_projector import CursorPromptConfig, build_cursor_prompt
 from rgbd_device_mask_refine import (
     RgbdMaskRefineConfig,
@@ -127,6 +146,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--any2full-encoder", default="vitl", choices=("vits", "vitb", "vitl"))
     parser.add_argument("--any2full-timeout", type=float, default=300.0, help="Any2Full subprocess timeout in seconds.")
     parser.add_argument(
+        "--any2full-startup-timeout",
+        type=float,
+        default=120.0,
+        help="Maximum seconds to wait for the background Any2Full worker to become ready.",
+    )
+    parser.add_argument(
         "--any2full-cache-dir",
         type=Path,
         default=Path("viewer_any2full_cache"),
@@ -182,6 +207,23 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("viewer_room_store"),
         help="Room/device/object capture store used by Quest point prompts.",
+    )
+    parser.add_argument(
+        "--disable-discovery",
+        action="store_true",
+        help="Do not start the integrated Discover runtime.",
+    )
+    parser.add_argument(
+        "--discover-config",
+        type=Path,
+        default=BACKEND_ROOT / "discover_client" / "config.toml",
+        help="Discover source configuration loaded by the integrated runtime.",
+    )
+    parser.add_argument(
+        "--pairing-max-candidates",
+        type=int,
+        default=50,
+        help="Maximum network devices evaluated in one semantic pairing request.",
     )
     parser.add_argument("--vlm-timeout-seconds", type=float, default=120.0)
     parser.add_argument("--point-debounce-ms", type=int, default=250)
@@ -626,11 +668,15 @@ class Any2FullService:
         self.process: subprocess.Popen[str] | None = None
         self.lock = threading.Lock()
         self.ready = False
+        self.starting = False
         self.device = "unknown"
+        self.start_error = ""
 
     def start(self) -> bool:
         if self.args.disable_any2full:
             return False
+        self.starting = True
+        self.start_error = ""
         any2full_root = self.args.any2full_root.resolve()
         script = any2full_root / "any2full_infer.py"
         worker_script = Path(__file__).resolve().parent / "any2full_worker.py"
@@ -638,15 +684,19 @@ class Any2FullService:
         python_exe = resolve_any2full_python(any2full_root, self.args.any2full_python).resolve()
         if not script.exists():
             print(f"[any2full] disabled: script not found: {script}", flush=True)
+            self.starting = False
             return False
         if not worker_script.exists():
             print(f"[any2full] disabled: worker not found: {worker_script}", flush=True)
+            self.starting = False
             return False
         if not checkpoint.exists():
             print(f"[any2full] disabled: checkpoint not found: {checkpoint}", flush=True)
+            self.starting = False
             return False
         if not python_exe.exists():
             print(f"[any2full] disabled: python not found: {python_exe}", flush=True)
+            self.starting = False
             return False
 
         cmd = [
@@ -673,22 +723,47 @@ class Any2FullService:
             threading.Thread(target=self._drain_stderr, daemon=True).start()
 
         assert self.process.stdout is not None
-        ready_line = self.process.stdout.readline()
+        ready_lines: queue.Queue[str] = queue.Queue(maxsize=1)
+
+        def read_ready_line() -> None:
+            assert self.process is not None and self.process.stdout is not None
+            ready_lines.put(self.process.stdout.readline())
+
+        threading.Thread(target=read_ready_line, name="Any2FullReady", daemon=True).start()
+        try:
+            ready_line = ready_lines.get(
+                timeout=max(1.0, float(self.args.any2full_startup_timeout))
+            )
+        except queue.Empty:
+            self.start_error = (
+                f"worker startup timed out after {self.args.any2full_startup_timeout:.0f}s"
+            )
+            print(f"[any2full] {self.start_error}", flush=True)
+            self.stop()
+            self.starting = False
+            return False
         if not ready_line:
             print("[any2full] worker exited before ready", flush=True)
+            self.start_error = "worker exited before ready"
             self.stop()
+            self.starting = False
             return False
         try:
             ready = json.loads(ready_line)
         except json.JSONDecodeError:
             print(f"[any2full] invalid worker ready line: {ready_line!r}", flush=True)
+            self.start_error = "invalid worker ready response"
             self.stop()
+            self.starting = False
             return False
         if not ready.get("ready"):
             print(f"[any2full] worker not ready: {ready}", flush=True)
+            self.start_error = str(ready.get("error") or "worker not ready")
             self.stop()
+            self.starting = False
             return False
         self.ready = True
+        self.starting = False
         self.device = str(ready.get("device", "unknown"))
         print(f"[any2full] worker ready on {self.device}", flush=True)
         return True
@@ -726,6 +801,7 @@ class Any2FullService:
         return True
 
     def stop(self) -> None:
+        self.starting = False
         if self.process is None:
             return
         try:
@@ -806,7 +882,10 @@ def run_any2full_completion(
         )
     np.save(sparse_path, any2full_input_depth.astype(np.float32))
 
-    if service is not None and service.ready:
+    if service is not None:
+        if not service.ready:
+            print("[any2full] worker is still loading; skipping completion for this frame", flush=True)
+            return frame
         if not service.infer(rgb_path, sparse_path, dense_path):
             return frame
     else:
@@ -1997,6 +2076,163 @@ def _object_spatial_points(store: dict, object_id: str) -> list[dict]:
     return deduped
 
 
+def _empty_object_spatial_summary(reason: str) -> dict:
+    return {
+        "valid": False,
+        "reason": reason,
+        "center_xyz_m": [],
+        "min_xyz_m": [],
+        "max_xyz_m": [],
+        "extent_xyz_m": [],
+        "radius_m": 0.0,
+        "point_count": 0,
+        "image_count": 0,
+        "source": "rgbd_mask_world_points",
+    }
+
+
+def _rgb_camera_points_to_world(points_rgb: np.ndarray, rgb_meta: dict) -> np.ndarray:
+    rgb_pos = np.array(
+        [
+            float(rgb_meta["pose_position_x"]),
+            float(rgb_meta["pose_position_y"]),
+            float(rgb_meta["pose_position_z"]),
+        ],
+        dtype=np.float32,
+    )
+    rgb_quat = np.array(
+        [
+            float(rgb_meta["pose_rotation_x"]),
+            float(rgb_meta["pose_rotation_y"]),
+            float(rgb_meta["pose_rotation_z"]),
+            float(rgb_meta["pose_rotation_w"]),
+        ],
+        dtype=np.float32,
+    )
+    rgb_rot = quaternion_to_matrix(rgb_quat)
+    return (points_rgb @ rgb_rot.T) + rgb_pos[None, :]
+
+
+def _masked_rgb_depth_world_points(
+    mask: np.ndarray,
+    depth: np.ndarray,
+    meta: dict,
+    args: argparse.Namespace,
+    max_points: int = 12000,
+) -> np.ndarray:
+    if mask.shape != depth.shape:
+        mask = cv2.resize(
+            mask.astype(np.uint8),
+            (depth.shape[1], depth.shape[0]),
+            interpolation=cv2.INTER_NEAREST,
+        ).astype(bool)
+
+    valid = (
+        mask.astype(bool)
+        & np.isfinite(depth)
+        & (depth >= float(args.min_depth))
+        & (depth <= float(args.max_depth))
+    )
+    ys, xs = np.where(valid)
+    if xs.size == 0:
+        return np.empty((0, 3), dtype=np.float32)
+
+    if xs.size > max_points:
+        indices = np.linspace(0, xs.size - 1, num=max_points, dtype=np.int64)
+        xs = xs[indices]
+        ys = ys[indices]
+
+    rgb_meta = meta["rgb"]
+    fx = float(rgb_meta["focal_length_x"])
+    fy = float(rgb_meta["focal_length_y"])
+    cx = float(rgb_meta["principal_point_x"])
+    cy = float(rgb_meta["principal_point_y"])
+    height = int(rgb_meta["resolution_h"])
+
+    z = depth[ys, xs].astype(np.float32)
+    sensor_y = (height - 1) - ys.astype(np.float32)
+    points_rgb = np.stack(
+        [
+            (xs.astype(np.float32) - cx) * z / fx,
+            (sensor_y - cy) * z / fy,
+            z,
+        ],
+        axis=1,
+    )
+    points_world = _rgb_camera_points_to_world(points_rgb, rgb_meta).astype(np.float32)
+    finite = np.isfinite(points_world).all(axis=1)
+    return points_world[finite]
+
+
+def _compute_object_spatial_summary(
+    args: argparse.Namespace,
+    device_dir: Path,
+    store: dict,
+    object_id: str,
+) -> dict:
+    point_sets: list[np.ndarray] = []
+    image_count = 0
+    for image in _object_images(store, object_id):
+        mask_path = _mask_path_for_image(device_dir, image)
+        if mask_path is None:
+            continue
+        mask_u8 = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+        if mask_u8 is None:
+            continue
+        depth = _load_room_image_depth(device_dir, image, source="any2full")
+        if depth is None:
+            continue
+        meta_path = _resolve_store_path(device_dir, image.get("meta_json"))
+        if not meta_path.exists():
+            continue
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            points = _masked_rgb_depth_world_points(mask_u8 > 0, depth, meta, args)
+        except Exception as exc:
+            print(f"[room-object] spatial summary skipped {image.get('image_id')}: {exc}", flush=True)
+            continue
+        if points.size == 0:
+            continue
+        point_sets.append(points)
+        image_count += 1
+
+    if not point_sets:
+        return _empty_object_spatial_summary("no_mask_depth_points")
+
+    points_all = np.concatenate(point_sets, axis=0)
+    if points_all.shape[0] < 16:
+        return _empty_object_spatial_summary("too_few_mask_depth_points")
+
+    median = np.median(points_all, axis=0)
+    distances = np.linalg.norm(points_all - median[None, :], axis=1)
+    if distances.size >= 32:
+        cutoff = float(np.percentile(distances, 96.0))
+        points_trimmed = points_all[distances <= max(cutoff, 1e-4)]
+    else:
+        points_trimmed = points_all
+    if points_trimmed.shape[0] < 8:
+        points_trimmed = points_all
+
+    min_xyz = np.percentile(points_trimmed, 2.0, axis=0)
+    max_xyz = np.percentile(points_trimmed, 98.0, axis=0)
+    center = (min_xyz + max_xyz) * 0.5
+    radius = float(np.percentile(np.linalg.norm(points_trimmed - center[None, :], axis=1), 95.0))
+    extent = max_xyz - min_xyz
+    return {
+        "valid": True,
+        "reason": "ok",
+        "center_xyz_m": [float(v) for v in center],
+        "min_xyz_m": [float(v) for v in min_xyz],
+        "max_xyz_m": [float(v) for v in max_xyz],
+        "extent_xyz_m": [float(v) for v in extent],
+        "radius_m": radius,
+        "point_count": int(points_trimmed.shape[0]),
+        "raw_point_count": int(points_all.shape[0]),
+        "image_count": image_count,
+        "source": "rgbd_mask_world_points",
+    }
+
+
 def _format_local_timestamp_s(timestamp_ms: int | None = None) -> str:
     seconds = (int(timestamp_ms) if timestamp_ms is not None else _now_ms()) / 1000.0
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(seconds))
@@ -2161,7 +2397,13 @@ def _restore_object_edit_backup(device_dir: Path, edit_session_id: str) -> dict:
     return backup_store
 
 
-def _complete_object(device_dir: Path, store: dict, object_id: str, edit_session_id: str = "") -> dict:
+def _complete_object(
+    args: argparse.Namespace,
+    device_dir: Path,
+    store: dict,
+    object_id: str,
+    edit_session_id: str = "",
+) -> dict:
     images = _object_images(store, object_id)
     points = _object_points(store, object_id)
     if not images:
@@ -2185,6 +2427,7 @@ def _complete_object(device_dir: Path, store: dict, object_id: str, edit_session
     record["positive_point_count"] = sum(1 for point in points if int(point.get("label", 1)) > 0)
     record["negative_point_count"] = len(points) - int(record["positive_point_count"])
     record["thumbnail_version"] = now_ms
+    record["spatial"] = _compute_object_spatial_summary(args, device_dir, store, object_id)
     _save_point_store(device_dir, store)
     _discard_object_edit_backup(device_dir, edit_session_id)
     return record
@@ -2211,10 +2454,63 @@ def _completed_object_records(store: dict) -> list[dict]:
                 "positive_point_count": sum(1 for point in points if int(point.get("label", 1)) > 0),
                 "negative_point_count": sum(1 for point in points if int(point.get("label", 1)) <= 0),
                 "thumbnail_version": int(record.get("thumbnail_version") or record.get("updated_at_ms") or 0),
+                "pairing_status": str(record.get("pairing_status") or "not_started"),
+                "network_binding": record.get("network_binding"),
             }
         )
     records.sort(key=lambda record: int(record.get("completed_at_ms") or 0), reverse=True)
     return records
+
+
+def _pairing_record_payload(record: dict) -> dict:
+    return {
+        "pairing_status": str(record.get("pairing_status") or "not_started"),
+        "pairing_error": str(record.get("pairing_error") or ""),
+        "visual_profile": record.get("pairing_visual_profile") or _object_visual_profile(record),
+        "candidates": record.get("pairing_candidates") or [],
+        "binding": record.get("network_binding"),
+        "started_at_ms": int(record.get("pairing_started_at_ms") or 0),
+        "completed_at_ms": int(record.get("pairing_completed_at_ms") or 0),
+    }
+
+
+def _find_binding_conflict(
+    args: argparse.Namespace,
+    room_id: str,
+    canonical_device_id: str,
+    current_device_dir: Path,
+    current_object_id: str,
+) -> dict | None:
+    room_dir = _room_store_root(args) / _safe_path_component(room_id, "room_default")
+    if not room_dir.exists():
+        return None
+    for device_dir in room_dir.iterdir():
+        if not device_dir.is_dir():
+            continue
+        points_path = device_dir / "points.json"
+        if not points_path.exists():
+            continue
+        try:
+            store = json.loads(points_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        for record in _object_records(store):
+            object_id = str(record.get("object_id") or "")
+            if device_dir.resolve() == current_device_dir.resolve() and object_id == current_object_id:
+                continue
+            binding = record.get("network_binding")
+            if not isinstance(binding, dict):
+                continue
+            if str(binding.get("canonical_device_id") or "") != canonical_device_id:
+                continue
+            return {
+                "room_id": str(store.get("room_id") or room_id),
+                "quest_device_id": str(store.get("device_id") or device_dir.name),
+                "object_id": object_id,
+                "object_name": str(record.get("name") or object_id),
+                "binding": binding,
+            }
+    return None
 
 
 def _load_rgb_for_image(viewer: "RgbdViewer", device_dir: Path, image_record: dict) -> np.ndarray:
@@ -2315,18 +2611,23 @@ def _object_detail_images(viewer: "RgbdViewer", device_dir: Path, store: dict, o
 
 def _vlm_object_prompt() -> str:
     return (
-        "你正在分析一个智能房间系统中被用户完成标注的设备。"
-        "下面的每张图片都是从不同视角截取的同一个设备，图像已经用分割 mask 抠出设备主体，背景为白色。"
-        "请综合所有图片判断这个设备的信息。"
-        "如果你所连接的模型或服务支持联网/网络搜索，可以使用搜索来辅助识别；如果不支持，请只基于图像内容推断，并明确不确定性。\n\n"
-        "请用中文输出，结构如下：\n"
-        "1. 设备类型/名称：给出最可能的名称，必要时列出候选。\n"
-        "2. 可见特征：形状、颜色、接口、按钮、屏幕、线缆、安装方式、品牌/文字/型号等。\n"
-        "3. 可能用途：说明这个设备在房间中的功能。\n"
-        "4. 位置和朝向线索：基于视角图片描述可能的摆放/安装状态。\n"
-        "5. 不确定点：列出图像无法确认、需要补拍或需要人工确认的信息。\n"
-        "6. 建议补充视角：如果要提高识别准确率，说明还应该从哪些角度拍。\n\n"
-        "不要编造不存在的品牌或型号。能确定、可能、不能确定三类要区分清楚。"
+        "Analyze all supplied masked images as different views of the same physical device. "
+        "Use visible appearance, text, labels, ports, screens, installation and likely function. "
+        "Network search may be used only when the configured model supports it. "
+        "Do not invent a brand or model. Distinguish confirmed visible evidence from inference.\n\n"
+        "Return exactly one JSON object with this schema:\n"
+        "{\n"
+        '  "summary_zh": "concise Chinese description",\n'
+        '  "device_type": "stable snake_case type such as temperature_humidity_sensor",\n'
+        '  "vendor_candidates": ["candidate vendor"],\n'
+        '  "model_candidates": ["candidate model"],\n'
+        '  "visible_text": ["text actually visible in images"],\n'
+        '  "capabilities": ["temperature", "humidity", "power", "..."],\n'
+        '  "physical_features": ["shape, color, ports, screen, mounting"],\n'
+        '  "uncertainties": ["facts that cannot be confirmed"],\n'
+        '  "suggested_views": ["additional views that would improve identification"]\n'
+        "}\n"
+        "Use empty arrays for unavailable evidence. Do not wrap the JSON in Markdown."
     )
 
 
@@ -2373,10 +2674,12 @@ def _run_vlm_object_analysis(viewer: "RgbdViewer", cursor: dict, object_id: str)
             record["vlm_status"] = "done"
             record["vlm_model"] = str(config.get("model") or "")
             record["vlm_description"] = description
+            record["vlm_profile"] = normalize_visual_profile(parse_json_object(description), description)
             record["vlm_prompt"] = _vlm_object_prompt()
             record["vlm_completed_at_ms"] = _now_ms()
             record["vlm_error"] = ""
             _save_point_store(device_dir, store)
+            _schedule_object_pairing_analysis(viewer, cursor, object_id)
     except Exception as exc:
         ctx, device_dir, store = _load_point_store(viewer.args, cursor)
         _ = ctx
@@ -2392,16 +2695,137 @@ def _run_vlm_object_analysis(viewer: "RgbdViewer", cursor: dict, object_id: str)
             viewer.root.after(0, viewer.refresh_device_tree)
 
 
-def _schedule_vlm_object_analysis(viewer: "RgbdViewer", cursor: dict, object_id: str) -> None:
+def _object_visual_profile(record: dict) -> dict:
+    stored = record.get("vlm_profile")
+    if isinstance(stored, dict):
+        return normalize_visual_profile(stored, str(record.get("vlm_description") or ""))
+    description = str(record.get("vlm_description") or "")
+    return normalize_visual_profile(parse_json_object(description), description)
+
+
+def _run_object_pairing_analysis(viewer: "RgbdViewer", cursor: dict, object_id: str) -> None:
+    runtime = getattr(viewer, "discover_runtime", None)
+    if runtime is None:
+        return
+
+    try:
+        with viewer._pairing_lock:
+            ctx, device_dir, store = _load_point_store(viewer.args, cursor)
+            _ = ctx
+            record = _find_object_record(store, object_id)
+            if record is None:
+                return
+            record["pairing_status"] = "processing"
+            record["pairing_started_at_ms"] = _now_ms()
+            record["pairing_error"] = ""
+            _save_point_store(device_dir, store)
+
+        visual_profile = _object_visual_profile(record)
+        profiles = runtime.profiles()
+        profiles.sort(
+            key=lambda item: (
+                bool(item.get("online", False)),
+                float(item.get("last_seen") or 0.0),
+            ),
+            reverse=True,
+        )
+        profiles = profiles[: max(1, int(getattr(viewer.args, "pairing_max_candidates", 50)))]
+
+        llm_payload = None
+        llm_response = ""
+        config = _load_vlm_config(viewer.args)
+        if profiles and str(config.get("base_url") or "").strip() and str(config.get("model") or "").strip():
+            prompt = build_pairing_prompt(visual_profile, profiles)
+            llm_response = _vlm_chat_completion(
+                config,
+                [{"role": "user", "content": prompt}],
+                timeout=float(getattr(viewer.args, "vlm_timeout_seconds", 120.0)),
+                max_tokens=max(1800, min(8000, 900 + len(profiles) * 350)),
+            )
+            llm_payload = parse_json_object(llm_response)
+
+        candidates = score_candidates(visual_profile, profiles, llm_payload)
+        with viewer._pairing_lock:
+            _ctx, device_dir, store = _load_point_store(viewer.args, cursor)
+            record = _find_object_record(store, object_id)
+            if record is not None:
+                record["pairing_status"] = "done"
+                record["pairing_visual_profile"] = visual_profile
+                record["pairing_candidates"] = candidates
+                record["pairing_llm_model"] = str(config.get("model") or "") if llm_payload is not None else ""
+                record["pairing_llm_response"] = llm_response
+                record["pairing_completed_at_ms"] = _now_ms()
+                record["pairing_error"] = ""
+                _save_point_store(device_dir, store)
+    except Exception as exc:
+        try:
+            with viewer._pairing_lock:
+                _ctx, device_dir, store = _load_point_store(viewer.args, cursor)
+                record = _find_object_record(store, object_id)
+                if record is not None:
+                    record["pairing_status"] = "error"
+                    record["pairing_error"] = str(exc)
+                    record["pairing_completed_at_ms"] = _now_ms()
+                    _save_point_store(device_dir, store)
+        except Exception:
+            pass
+        print(f"[pairing] analysis failed for {object_id}: {exc}", flush=True)
+    finally:
+        if hasattr(viewer, "root"):
+            viewer.root.after(0, viewer.refresh_device_tree)
+
+
+def _schedule_object_pairing_analysis(viewer: "RgbdViewer", cursor: dict, object_id: str) -> None:
+    worker = threading.Thread(
+        target=_run_object_pairing_analysis,
+        args=(viewer, dict(cursor), object_id),
+        daemon=True,
+    )
+    worker.start()
+
+
+def _schedule_vlm_object_analysis(viewer: "RgbdViewer", cursor: dict, object_id: str) -> bool:
     config = _load_vlm_config(viewer.args)
     if not str(config.get("base_url") or "").strip() or not str(config.get("model") or "").strip():
-        return
+        return False
     worker = threading.Thread(
         target=_run_vlm_object_analysis,
         args=(viewer, dict(cursor), object_id),
         daemon=True,
     )
     worker.start()
+    return True
+
+
+def _vlm_processing_stale(args: argparse.Namespace, record: dict) -> bool:
+    if str(record.get("vlm_status") or "") != "processing":
+        return False
+    started_at = int(record.get("vlm_started_at_ms") or 0)
+    if started_at <= 0:
+        return True
+    timeout_ms = int(max(60_000, float(getattr(args, "vlm_timeout_seconds", 120.0)) * 1000.0 * 1.5))
+    return _now_ms() - started_at > timeout_ms
+
+
+def _mark_stale_vlm_records(args: argparse.Namespace, device_dir: Path, store: dict) -> bool:
+    changed = False
+    for record in _object_records(store):
+        if _vlm_processing_stale(args, record):
+            record["vlm_status"] = "error"
+            record["vlm_error"] = "Previous VLM processing timed out or was interrupted. Use Retry VLM."
+            record["vlm_completed_at_ms"] = _now_ms()
+            changed = True
+        if str(record.get("pairing_status") or "") == "processing":
+            started_at = int(record.get("pairing_started_at_ms") or 0)
+            timeout_ms = int(max(90_000, float(getattr(args, "vlm_timeout_seconds", 120.0)) * 2000.0))
+            if started_at <= 0 or _now_ms() - started_at > timeout_ms:
+                record["pairing_status"] = "error"
+                record["pairing_error"] = "Previous pairing analysis timed out or was interrupted. Refresh Match to retry."
+                record["pairing_completed_at_ms"] = _now_ms()
+                changed = True
+    if changed:
+        _save_point_store(device_dir, store)
+    return changed
 
 
 def _preview_query_to_cursor(query: dict[str, list[str]]) -> dict:
@@ -2642,6 +3066,15 @@ class _PayloadHandler(http.server.BaseHTTPRequestHandler):
         if parsed.path == "/api/room/object/points":
             self._handle_room_object_points(parsed)
             return
+        if parsed.path == "/api/room/object/pairing/candidates":
+            self._handle_room_object_pairing_candidates(parsed)
+            return
+        if parsed.path == "/api/discover/status":
+            self._handle_discover_status()
+            return
+        if parsed.path == "/api/discover/devices":
+            self._handle_discover_devices()
+            return
         self.send_error(404)
 
     def do_POST(self) -> None:
@@ -2663,6 +3096,18 @@ class _PayloadHandler(http.server.BaseHTTPRequestHandler):
 
         if self.path == "/api/room/object/rename":
             self._handle_room_object_rename()
+            return
+
+        if self.path == "/api/room/object/pairing/refresh":
+            self._handle_room_object_pairing_refresh()
+            return
+
+        if self.path == "/api/room/object/pairing/bind":
+            self._handle_room_object_pairing_bind()
+            return
+
+        if self.path == "/api/room/object/pairing/unbind":
+            self._handle_room_object_pairing_unbind()
             return
 
         if self.path == "/api/room/point/delete":
@@ -3136,6 +3581,10 @@ class _PayloadHandler(http.server.BaseHTTPRequestHandler):
             if record is None or str(record.get("status") or "") != "completed":
                 self._send_json(404, {"ok": False, "reason": "completed_object_not_found", "points": []})
                 return
+            spatial = record.get("spatial")
+            if not isinstance(spatial, dict) or not spatial.get("valid", False):
+                record["spatial"] = _compute_object_spatial_summary(viewer.args, device_dir, store, object_id)
+                _save_point_store(device_dir, store)
             edit_session_id, points = _begin_object_edit(device_dir, store, object_id)
         except Exception as exc:
             print(f"[room-object] begin_edit failed: {exc}", flush=True)
@@ -3151,6 +3600,7 @@ class _PayloadHandler(http.server.BaseHTTPRequestHandler):
                 "object_id": object_id,
                 "edit_session_id": edit_session_id,
                 "name": str(record.get("name") or object_id),
+                "spatial": record.get("spatial") or _empty_object_spatial_summary("missing"),
                 "points": points,
             },
         )
@@ -3174,8 +3624,9 @@ class _PayloadHandler(http.server.BaseHTTPRequestHandler):
 
         try:
             ctx, device_dir, store = _load_point_store(viewer.args, payload)
-            record = _complete_object(device_dir, store, object_id, edit_session_id)
-            _schedule_vlm_object_analysis(viewer, payload, object_id)
+            record = _complete_object(viewer.args, device_dir, store, object_id, edit_session_id)
+            if not _schedule_vlm_object_analysis(viewer, payload, object_id):
+                _schedule_object_pairing_analysis(viewer, payload, object_id)
         except ValueError as exc:
             self._send_json(400, {"ok": False, "reason": str(exc)})
             return
@@ -3192,6 +3643,7 @@ class _PayloadHandler(http.server.BaseHTTPRequestHandler):
                 "device_id": ctx["device_id"],
                 "object_id": object_id,
                 "object": record,
+                "spatial": record.get("spatial") or _empty_object_spatial_summary("missing"),
                 "points": _object_spatial_points(store, object_id),
             },
         )
@@ -3303,6 +3755,176 @@ class _PayloadHandler(http.server.BaseHTTPRequestHandler):
         self._send_json(200, {"ok": True, "object_id": object_id, "object": record})
         viewer.root.after(0, viewer.refresh_device_tree)
 
+    def _handle_discover_status(self) -> None:
+        viewer = self.viewer_ref
+        runtime = getattr(viewer, "discover_runtime", None) if viewer is not None else None
+        if runtime is None:
+            self._send_json(503, {"ok": False, "reason": "discovery_not_running"})
+            return
+        self._send_json(200, {"ok": True, **runtime.status()})
+
+    def _handle_discover_devices(self) -> None:
+        viewer = self.viewer_ref
+        runtime = getattr(viewer, "discover_runtime", None) if viewer is not None else None
+        if runtime is None:
+            self._send_json(503, {"ok": False, "reason": "discovery_not_running", "devices": []})
+            return
+        self._send_json(200, {"ok": True, "devices": runtime.profiles()})
+
+    def _handle_room_object_pairing_candidates(self, parsed: urllib.parse.ParseResult) -> None:
+        viewer = self.viewer_ref
+        if viewer is None:
+            self._send_json(503, {"ok": False, "reason": "viewer_not_ready", "candidates": []})
+            return
+        query = urllib.parse.parse_qs(parsed.query)
+        cursor = _preview_query_to_cursor(query)
+        object_id = _safe_path_component((query.get("object_id") or [""])[0], "")
+        if not object_id:
+            self._send_json(400, {"ok": False, "reason": "missing_object_id", "candidates": []})
+            return
+        try:
+            _ctx, _device_dir, store = _load_point_store(viewer.args, cursor)
+            record = _find_object_record(store, object_id)
+            if record is None:
+                self._send_json(404, {"ok": False, "reason": "object_not_found", "candidates": []})
+                return
+            payload = _pairing_record_payload(record)
+        except Exception as exc:
+            self._send_json(500, {"ok": False, "reason": str(exc), "candidates": []})
+            return
+        self._send_json(200, {"ok": True, "object_id": object_id, **payload})
+
+    def _handle_room_object_pairing_refresh(self) -> None:
+        viewer = self.viewer_ref
+        if viewer is None:
+            self._send_json(503, {"ok": False, "reason": "viewer_not_ready"})
+            return
+        if viewer.discover_runtime is None:
+            self._send_json(503, {"ok": False, "reason": "discovery_not_running"})
+            return
+        payload, error = self._read_json_payload()
+        if error is not None:
+            self._send_json(400, {"ok": False, "reason": error})
+            return
+        object_id = _safe_path_component(payload.get("object_id") or payload.get("object_session_id"), "")
+        if not object_id:
+            self._send_json(400, {"ok": False, "reason": "missing_object_id"})
+            return
+        try:
+            _ctx, device_dir, store = _load_point_store(viewer.args, payload)
+            record = _find_object_record(store, object_id)
+            if record is None:
+                self._send_json(404, {"ok": False, "reason": "object_not_found"})
+                return
+            record["pairing_status"] = "processing"
+            record["pairing_started_at_ms"] = _now_ms()
+            record["pairing_error"] = ""
+            _save_point_store(device_dir, store)
+            _schedule_object_pairing_analysis(viewer, payload, object_id)
+        except Exception as exc:
+            self._send_json(500, {"ok": False, "reason": str(exc)})
+            return
+        self._send_json(202, {"ok": True, "object_id": object_id, "pairing_status": "processing"})
+
+    def _handle_room_object_pairing_bind(self) -> None:
+        viewer = self.viewer_ref
+        if viewer is None:
+            self._send_json(503, {"ok": False, "reason": "viewer_not_ready"})
+            return
+        payload, error = self._read_json_payload()
+        if error is not None:
+            self._send_json(400, {"ok": False, "reason": error})
+            return
+        object_id = _safe_path_component(payload.get("object_id") or payload.get("object_session_id"), "")
+        canonical_id = str(payload.get("canonical_device_id") or "").strip()
+        if not object_id or not canonical_id:
+            self._send_json(400, {"ok": False, "reason": "missing_object_or_canonical_device_id"})
+            return
+        try:
+            ctx, device_dir, store = _load_point_store(viewer.args, payload)
+            record = _find_object_record(store, object_id)
+            if record is None:
+                self._send_json(404, {"ok": False, "reason": "object_not_found"})
+                return
+            conflict = _find_binding_conflict(
+                viewer.args,
+                ctx["room_id"],
+                canonical_id,
+                device_dir,
+                object_id,
+            )
+            if conflict is not None and not bool(payload.get("force", False)):
+                self._send_json(409, {"ok": False, "reason": "device_already_bound", "conflict": conflict})
+                return
+            candidates = record.get("pairing_candidates") or []
+            candidate = next(
+                (
+                    item
+                    for item in candidates
+                    if str(item.get("canonical_device_id") or "") == canonical_id
+                ),
+                None,
+            )
+            runtime_profiles = viewer.discover_runtime.profiles() if viewer.discover_runtime is not None else []
+            profile = next(
+                (
+                    item
+                    for item in runtime_profiles
+                    if str(item.get("canonical_device_id") or "") == canonical_id
+                ),
+                None,
+            )
+            if profile is None and isinstance(candidate, dict):
+                profile = candidate.get("profile")
+            if not isinstance(profile, dict):
+                self._send_json(404, {"ok": False, "reason": "network_device_not_found"})
+                return
+            binding = {
+                "canonical_device_id": canonical_id,
+                "display_name": str(profile.get("display_name") or canonical_id),
+                "method": "semantic_match_manual_confirmation",
+                "score": int((candidate or {}).get("score") or 0),
+                "evidence_coverage_percent": int((candidate or {}).get("evidence_coverage_percent") or 0),
+                "bound_at_ms": _now_ms(),
+                "profile_snapshot": profile,
+            }
+            record["network_binding"] = binding
+            record["updated_at_ms"] = _now_ms()
+            _save_point_store(device_dir, store)
+        except Exception as exc:
+            self._send_json(500, {"ok": False, "reason": str(exc)})
+            return
+        self._send_json(200, {"ok": True, "object_id": object_id, "binding": binding})
+        viewer.root.after(0, viewer.refresh_device_tree)
+
+    def _handle_room_object_pairing_unbind(self) -> None:
+        viewer = self.viewer_ref
+        if viewer is None:
+            self._send_json(503, {"ok": False, "reason": "viewer_not_ready"})
+            return
+        payload, error = self._read_json_payload()
+        if error is not None:
+            self._send_json(400, {"ok": False, "reason": error})
+            return
+        object_id = _safe_path_component(payload.get("object_id") or payload.get("object_session_id"), "")
+        if not object_id:
+            self._send_json(400, {"ok": False, "reason": "missing_object_id"})
+            return
+        try:
+            _ctx, device_dir, store = _load_point_store(viewer.args, payload)
+            record = _find_object_record(store, object_id)
+            if record is None:
+                self._send_json(404, {"ok": False, "reason": "object_not_found"})
+                return
+            record.pop("network_binding", None)
+            record["updated_at_ms"] = _now_ms()
+            _save_point_store(device_dir, store)
+        except Exception as exc:
+            self._send_json(500, {"ok": False, "reason": str(exc)})
+            return
+        self._send_json(200, {"ok": True, "object_id": object_id})
+        viewer.root.after(0, viewer.refresh_device_tree)
+
     def _send_json(self, status: int, payload: dict) -> None:
         body = json.dumps(payload).encode("utf-8")
         self.send_response(status)
@@ -3343,7 +3965,22 @@ class RgbdViewer:
         self._current_frame_name = "network"
         self.any2full_service: Any2FullService | None = None
         self.device_segmenter: Sam2DeviceSegmenter | None = None
+        self._any2full_start_thread: threading.Thread | None = None
+        self._segmenter_start_thread: threading.Thread | None = None
+        self._model_startup_lock = threading.Lock()
+        self._closing = False
+        self.discover_runtime: DiscoverRuntime | None = None
+        self._pairing_lock = threading.RLock()
         self._device_tree_item_context: dict[str, dict] = {}
+        self._network_tree_item_context: dict[str, dict] = {}
+        self._network_operation_context: dict[str, dict] = {}
+        self._network_profile_item_context: dict[str, dict] = {}
+        self._discover_configs: list[SourceConfig] = []
+        self._network_refresh_after_id: str | None = None
+        self._network_profiles_pending = threading.Event()
+        self._discovery_restart_completed = threading.Event()
+        self._last_network_profile_revision = -1
+        self._network_profiles_snapshot: list[dict] = []
         self._vlm_last_test_ok = False
         self._vlm_last_test_signature = ""
 
@@ -3352,12 +3989,13 @@ class RgbdViewer:
         self.root.geometry(f"{max(args.view_size, args.cloud_width) + 80}x{args.cloud_height + 150}")
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self._build_ui()
-        if self.args.server and not self.args.disable_any2full:
-            self.any2full_service = Any2FullService(self.args)
-            if not self.any2full_service.start():
-                self.any2full_service = None
+        if not self.args.disable_discovery:
+            self._start_discover_runtime()
+            self.root.after(250, self.refresh_network_devices)
         if self.args.server and not self.args.disable_device_segmentation:
-            self.device_segmenter = create_device_segmenter(self.args)
+            self._start_device_segmenter_background()
+        if self.args.server and not self.args.disable_any2full:
+            self._start_any2full_background()
         if self.frames:
             self.load_current_frame()
         else:
@@ -3421,16 +4059,31 @@ class RgbdViewer:
         self.origin_y_entry.bind("<Return>", self.on_origin_changed)
 
         notebook = ttk.Notebook(self.root)
+        self.main_notebook = notebook
         notebook.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
         rgb_tab = ttk.Frame(notebook, padding=8)
         cloud_tab = ttk.Frame(notebook, padding=8)
         devices_tab = ttk.Frame(notebook, padding=8)
+        network_tab = ttk.Frame(notebook, padding=8)
+        network_data_tab = ttk.Frame(notebook, padding=8)
+        network_operations_tab = ttk.Frame(notebook, padding=8)
+        network_profiles_tab = ttk.Frame(notebook, padding=8)
+        discovery_tab = ttk.Frame(notebook, padding=8)
         vlm_tab = ttk.Frame(notebook, padding=8)
         notebook.add(rgb_tab, text="RGB depth")
         notebook.add(cloud_tab, text="Point cloud")
         notebook.add(devices_tab, text="Room Devices")
+        notebook.add(network_tab, text="Network Devices")
+        notebook.add(network_data_tab, text="Data")
+        notebook.add(network_operations_tab, text="Operations")
+        notebook.add(network_profiles_tab, text="Device Profiles")
+        notebook.add(discovery_tab, text="Discovery Settings")
         notebook.add(vlm_tab, text="VLM Settings")
+        self._network_data_tab = network_data_tab
+        self._network_operations_tab = network_operations_tab
+        self._network_profiles_tab = network_profiles_tab
+        notebook.bind("<<NotebookTabChanged>>", self._on_main_tab_changed)
 
         rgb_main = ttk.Frame(rgb_tab)
         rgb_main.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
@@ -3485,22 +4138,29 @@ class RgbdViewer:
         ttk.Label(cloud_tab, textvariable=self.cloud_var).pack(side=tk.TOP, fill=tk.X, pady=(8, 0))
 
         self._build_device_tree_tab(devices_tab)
+        self._build_network_devices_tab(network_tab)
+        self._build_network_data_tab(network_data_tab)
+        self._build_network_operations_tab(network_operations_tab)
+        self._build_network_profiles_tab(network_profiles_tab)
+        self._build_discovery_settings_tab(discovery_tab)
         self._build_vlm_settings_tab(vlm_tab)
 
     def _build_device_tree_tab(self, parent: ttk.Frame) -> None:
         toolbar = ttk.Frame(parent)
         toolbar.pack(side=tk.TOP, fill=tk.X, pady=(0, 8))
         ttk.Button(toolbar, text="Refresh", command=self.refresh_device_tree).pack(side=tk.LEFT)
+        ttk.Button(toolbar, text="Retry VLM", command=self.retry_selected_vlm).pack(side=tk.LEFT, padx=(8, 0))
         self.device_tree_status_var = tk.StringVar(value="")
         ttk.Label(toolbar, textvariable=self.device_tree_status_var).pack(side=tk.LEFT, padx=12)
 
-        columns = ("name", "completed", "images", "vlm")
+        columns = ("name", "completed", "images", "vlm", "network")
         self.device_tree = ttk.Treeview(parent, columns=columns, show="tree headings", height=18)
         self.device_tree.heading("#0", text="Room / Quest / Device")
         self.device_tree.heading("name", text="Name")
         self.device_tree.heading("completed", text="Completed")
         self.device_tree.heading("images", text="Images")
         self.device_tree.heading("vlm", text="VLM")
+        self.device_tree.heading("network", text="Network Pairing")
         ttk.Style().configure("Device.Treeview", rowheight=56)
         self.device_tree.configure(style="Device.Treeview")
         self.device_tree.column("#0", width=320, anchor=tk.W)
@@ -3508,6 +4168,7 @@ class RgbdViewer:
         self.device_tree.column("completed", width=160, anchor=tk.W)
         self.device_tree.column("images", width=80, anchor=tk.CENTER)
         self.device_tree.column("vlm", width=120, anchor=tk.W)
+        self.device_tree.column("network", width=220, anchor=tk.W)
         tree_scroll = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=self.device_tree.yview)
         self.device_tree.configure(yscrollcommand=tree_scroll.set)
         self.device_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -3547,6 +4208,921 @@ class RgbdViewer:
         prompt_text.insert(tk.END, _vlm_object_prompt())
         prompt_text.configure(state=tk.DISABLED)
 
+    def _build_network_devices_tab(self, parent: ttk.Frame) -> None:
+        toolbar = ttk.Frame(parent)
+        toolbar.pack(side=tk.TOP, fill=tk.X, pady=(0, 8))
+        ttk.Button(toolbar, text="Refresh", command=lambda: self.refresh_network_devices(force=True)).pack(side=tk.LEFT)
+        ttk.Button(toolbar, text="Copy Rows", command=self.copy_selected_network_rows).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(toolbar, text="Copy JSON", command=self.copy_selected_network_json).pack(side=tk.LEFT, padx=(8, 0))
+        self.network_device_status_var = tk.StringVar(value="Discovery runtime is starting")
+        ttk.Label(toolbar, textvariable=self.network_device_status_var).pack(side=tk.LEFT, padx=12)
+
+        columns = (
+            "entity",
+            "channels",
+            "topics",
+            "type",
+            "data",
+            "operations",
+            "address",
+            "evidence",
+            "status",
+        )
+        table = ttk.Frame(parent)
+        table.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        self.network_device_tree = ttk.Treeview(
+            table,
+            columns=columns,
+            show="tree headings",
+            height=18,
+            selectmode="extended",
+        )
+        self.network_device_tree.heading("#0", text="Discovered Device")
+        self.network_device_tree.heading("entity", text="Physical Entity Prefix")
+        self.network_device_tree.heading("channels", text="Channels")
+        self.network_device_tree.heading("topics", text="Topics")
+        self.network_device_tree.heading("type", text="Type")
+        self.network_device_tree.heading("data", text="Data")
+        self.network_device_tree.heading("operations", text="Operations")
+        self.network_device_tree.heading("address", text="IP / MAC")
+        self.network_device_tree.heading("evidence", text="Evidence")
+        self.network_device_tree.heading("status", text="Status")
+        self.network_device_tree.column("#0", width=290, anchor=tk.W)
+        self.network_device_tree.column("entity", width=340, anchor=tk.W)
+        self.network_device_tree.column("channels", width=180, anchor=tk.W)
+        self.network_device_tree.column("topics", width=70, anchor=tk.CENTER)
+        self.network_device_tree.column("type", width=170, anchor=tk.W)
+        self.network_device_tree.column("data", width=70, anchor=tk.CENTER)
+        self.network_device_tree.column("operations", width=90, anchor=tk.CENTER)
+        self.network_device_tree.column("address", width=230, anchor=tk.W)
+        self.network_device_tree.column("evidence", width=90, anchor=tk.CENTER)
+        self.network_device_tree.column("status", width=90, anchor=tk.CENTER)
+        y_scroll = ttk.Scrollbar(table, orient=tk.VERTICAL, command=self.network_device_tree.yview)
+        x_scroll = ttk.Scrollbar(table, orient=tk.HORIZONTAL, command=self.network_device_tree.xview)
+        self.network_device_tree.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+        self.network_device_tree.grid(row=0, column=0, sticky=tk.NSEW)
+        y_scroll.grid(row=0, column=1, sticky=tk.NS)
+        x_scroll.grid(row=1, column=0, sticky=tk.EW)
+        table.rowconfigure(0, weight=1)
+        table.columnconfigure(0, weight=1)
+        self.network_device_tree.bind("<Double-1>", self.on_network_device_double_click)
+        self.network_device_tree.bind("<Control-c>", self.copy_selected_network_rows)
+
+    def _build_network_data_tab(self, parent: ttk.Frame) -> None:
+        columns = ("device", "sensor", "value", "unit", "updated", "runtime")
+        self.network_data_tree = ttk.Treeview(parent, columns=columns, show="headings", selectmode="extended")
+        headings = {
+            "device": "Device",
+            "sensor": "Property / Sensor",
+            "value": "Latest Value",
+            "unit": "Unit",
+            "updated": "Updated",
+            "runtime": "Source Member",
+        }
+        for column in columns:
+            self.network_data_tree.heading(column, text=headings[column])
+        self.network_data_tree.column("device", width=280, anchor=tk.W)
+        self.network_data_tree.column("sensor", width=320, anchor=tk.W)
+        self.network_data_tree.column("value", width=180, anchor=tk.W)
+        self.network_data_tree.column("unit", width=90, anchor=tk.W)
+        self.network_data_tree.column("updated", width=160, anchor=tk.W)
+        self.network_data_tree.column("runtime", width=150, anchor=tk.W)
+        scroll = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=self.network_data_tree.yview)
+        self.network_data_tree.configure(yscrollcommand=scroll.set)
+        self.network_data_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+    def _build_network_operations_tab(self, parent: ttk.Frame) -> None:
+        toolbar = ttk.Frame(parent)
+        toolbar.pack(side=tk.TOP, fill=tk.X, pady=(0, 8))
+        ttk.Label(toolbar, text="Payload").pack(side=tk.LEFT)
+        self.network_operation_payload_var = tk.StringVar(value="")
+        ttk.Entry(toolbar, textvariable=self.network_operation_payload_var, width=48).pack(side=tk.LEFT, padx=(6, 8))
+        ttk.Button(toolbar, text="Publish Selected", command=self.publish_selected_network_operation).pack(side=tk.LEFT)
+        self.network_operation_status_var = tk.StringVar(value="")
+        ttk.Label(toolbar, textvariable=self.network_operation_status_var).pack(side=tk.LEFT, padx=12)
+
+        columns = ("device", "topic", "action", "property", "values", "confidence", "seen")
+        self.network_operation_tree = ttk.Treeview(parent, columns=columns, show="headings", selectmode="browse")
+        headings = {
+            "device": "Device",
+            "topic": "Command Topic",
+            "action": "Action",
+            "property": "Property",
+            "values": "Observed Values",
+            "confidence": "Confidence",
+            "seen": "Last Seen",
+        }
+        for column in columns:
+            self.network_operation_tree.heading(column, text=headings[column])
+        self.network_operation_tree.column("device", width=260, anchor=tk.W)
+        self.network_operation_tree.column("topic", width=380, anchor=tk.W)
+        self.network_operation_tree.column("action", width=100, anchor=tk.W)
+        self.network_operation_tree.column("property", width=130, anchor=tk.W)
+        self.network_operation_tree.column("values", width=150, anchor=tk.W)
+        self.network_operation_tree.column("confidence", width=90, anchor=tk.CENTER)
+        self.network_operation_tree.column("seen", width=160, anchor=tk.W)
+        scroll = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=self.network_operation_tree.yview)
+        self.network_operation_tree.configure(yscrollcommand=scroll.set)
+        self.network_operation_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.network_operation_tree.bind("<<TreeviewSelect>>", self.on_network_operation_selected)
+
+    def _build_network_profiles_tab(self, parent: ttk.Frame) -> None:
+        columns = ("kind", "summary", "details")
+        self.network_profile_tree = ttk.Treeview(parent, columns=columns, show="tree headings", selectmode="browse")
+        self.network_profile_tree.heading("#0", text="Device / Detail")
+        self.network_profile_tree.heading("kind", text="Kind")
+        self.network_profile_tree.heading("summary", text="Summary")
+        self.network_profile_tree.heading("details", text="Identity / Value")
+        self.network_profile_tree.column("#0", width=320, anchor=tk.W)
+        self.network_profile_tree.column("kind", width=120, anchor=tk.W)
+        self.network_profile_tree.column("summary", width=360, anchor=tk.W)
+        self.network_profile_tree.column("details", width=520, anchor=tk.W)
+        scroll = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=self.network_profile_tree.yview)
+        self.network_profile_tree.configure(yscrollcommand=scroll.set)
+        self.network_profile_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.network_profile_tree.bind("<Double-1>", self.on_network_profile_double_click)
+
+    def _build_discovery_settings_tab(self, parent: ttk.Frame) -> None:
+        summary = ttk.LabelFrame(parent, text="Integrated Discover Runtime", padding=10)
+        summary.pack(side=tk.TOP, fill=tk.X)
+        self.discovery_runtime_var = tk.StringVar(value="Starting")
+        self.discovery_config_var = tk.StringVar(value=str(self.args.discover_config))
+        self.discovery_registry_var = tk.StringVar(value=str(_room_store_root(self.args) / "discover_registry.json"))
+        ttk.Label(summary, textvariable=self.discovery_runtime_var, justify=tk.LEFT).pack(side=tk.TOP, fill=tk.X)
+        ttk.Label(summary, text="Config:").pack(side=tk.TOP, anchor=tk.W, pady=(8, 0))
+        ttk.Label(summary, textvariable=self.discovery_config_var).pack(side=tk.TOP, anchor=tk.W)
+        ttk.Label(summary, text="Persistent registry:").pack(side=tk.TOP, anchor=tk.W, pady=(8, 0))
+        ttk.Label(summary, textvariable=self.discovery_registry_var).pack(side=tk.TOP, anchor=tk.W)
+
+        manager_group = ttk.LabelFrame(parent, text="Discovery Sources", padding=8)
+        manager_group.pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=(10, 0))
+        manager_actions = ttk.Frame(manager_group)
+        manager_actions.pack(side=tk.TOP, fill=tk.X, pady=(0, 6))
+        ttk.Button(manager_actions, text="Add", command=self.add_discovery_source).pack(side=tk.LEFT)
+        ttk.Button(manager_actions, text="Edit", command=self.edit_discovery_source).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(manager_actions, text="Enable / Disable", command=self.toggle_discovery_source).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(manager_actions, text="Delete", command=self.delete_discovery_source).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(manager_actions, text="Restart", command=self.restart_discovery_runtime).pack(side=tk.LEFT, padx=(12, 0))
+        self.discovery_source_config_status_var = tk.StringVar(value="")
+        ttk.Label(manager_actions, textvariable=self.discovery_source_config_status_var).pack(side=tk.LEFT, padx=12)
+
+        self.discovery_config_tree = ttk.Treeview(
+            manager_group,
+            columns=("type", "enabled", "settings"),
+            show="tree headings",
+            height=6,
+            selectmode="browse",
+        )
+        self.discovery_config_tree.heading("#0", text="Source ID")
+        self.discovery_config_tree.heading("type", text="Type")
+        self.discovery_config_tree.heading("enabled", text="Enabled")
+        self.discovery_config_tree.heading("settings", text="Settings")
+        self.discovery_config_tree.column("#0", width=180, anchor=tk.W)
+        self.discovery_config_tree.column("type", width=100, anchor=tk.W)
+        self.discovery_config_tree.column("enabled", width=80, anchor=tk.CENTER)
+        self.discovery_config_tree.column("settings", width=720, anchor=tk.W)
+        self.discovery_config_tree.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        self.discovery_config_tree.bind("<Double-1>", lambda _event: self.edit_discovery_source())
+        self.reload_discovery_source_manager()
+
+        config_group = ttk.LabelFrame(parent, text="Advanced TOML", padding=8)
+        config_group.pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=(10, 0))
+        config_actions = ttk.Frame(config_group)
+        config_actions.pack(side=tk.TOP, fill=tk.X, pady=(0, 6))
+        ttk.Button(config_actions, text="Reload", command=self.reload_discovery_config_editor).pack(side=tk.LEFT)
+        ttk.Button(config_actions, text="Save and Restart", command=self.save_and_restart_discovery).pack(side=tk.LEFT, padx=(8, 0))
+        self.discovery_config_status_var = tk.StringVar(value="")
+        ttk.Label(config_actions, textvariable=self.discovery_config_status_var).pack(side=tk.LEFT, padx=12)
+        self.discovery_config_editor = scrolledtext.ScrolledText(config_group, height=10, wrap=tk.NONE)
+        self.discovery_config_editor.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        self.reload_discovery_config_editor()
+
+        source_group = ttk.LabelFrame(parent, text="Runtime Status", padding=8)
+        source_group.pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=(10, 0))
+        self.discovery_source_tree = ttk.Treeview(
+            source_group,
+            columns=("source", "type", "state", "message", "updated"),
+            show="headings",
+            height=12,
+        )
+        self.discovery_source_tree.heading("source", text="Source ID")
+        self.discovery_source_tree.heading("type", text="Type")
+        self.discovery_source_tree.heading("state", text="State")
+        self.discovery_source_tree.heading("message", text="Message")
+        self.discovery_source_tree.heading("updated", text="Updated")
+        self.discovery_source_tree.column("source", width=150, anchor=tk.W)
+        self.discovery_source_tree.column("type", width=120, anchor=tk.W)
+        self.discovery_source_tree.column("state", width=120, anchor=tk.W)
+        self.discovery_source_tree.column("message", width=600, anchor=tk.W)
+        self.discovery_source_tree.column("updated", width=160, anchor=tk.W)
+        self.discovery_source_tree.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+    def _start_discover_runtime(self) -> None:
+        registry_path = _room_store_root(self.args) / "discover_registry.json"
+        runtime = DiscoverRuntime(
+            config_path=self.args.discover_config,
+            registry_path=registry_path,
+            on_update=self._on_discover_profiles_updated,
+        )
+        self.discover_runtime = runtime
+        runtime.start_background()
+
+    def _start_any2full_background(self) -> None:
+        if self._any2full_start_thread is not None and self._any2full_start_thread.is_alive():
+            return
+        service = Any2FullService(self.args)
+        self.any2full_service = service
+
+        def worker() -> None:
+            with self._model_startup_lock:
+                if self._closing:
+                    return
+                try:
+                    ready = service.start()
+                except Exception as exc:
+                    service.start_error = str(exc)
+                    service.stop()
+                    print(f"[any2full] startup failed: {exc}", flush=True)
+                    ready = False
+            if not ready and self.any2full_service is service:
+                self.any2full_service = None
+
+        self._any2full_start_thread = threading.Thread(
+            target=worker,
+            name="Any2FullStartup",
+            daemon=True,
+        )
+        self._any2full_start_thread.start()
+
+    def _start_device_segmenter_background(self) -> None:
+        if self._segmenter_start_thread is not None and self._segmenter_start_thread.is_alive():
+            return
+
+        def worker() -> None:
+            with self._model_startup_lock:
+                if self._closing:
+                    return
+                segmenter = create_device_segmenter(self.args)
+            if not self._closing:
+                self.device_segmenter = segmenter
+
+        self._segmenter_start_thread = threading.Thread(
+            target=worker,
+            name="Sam2Startup",
+            daemon=True,
+        )
+        self._segmenter_start_thread.start()
+
+    def reload_discovery_source_manager(self) -> None:
+        try:
+            self._discover_configs = load_discover_config(self.args.discover_config)
+            message = f"Loaded {len(self._discover_configs)} source(s)"
+        except FileNotFoundError:
+            self._discover_configs = []
+            message = "No source configuration file"
+        except Exception as exc:
+            self._discover_configs = []
+            message = "Load failed: " + str(exc)
+        self._render_discovery_source_manager()
+        if hasattr(self, "discovery_source_config_status_var"):
+            self.discovery_source_config_status_var.set(message)
+
+    def _render_discovery_source_manager(self) -> None:
+        if not hasattr(self, "discovery_config_tree"):
+            return
+        self.discovery_config_tree.delete(*self.discovery_config_tree.get_children())
+        for config in self._discover_configs:
+            settings = []
+            for key, value in sorted(config.settings.items()):
+                if key in {"password", "token"} and value:
+                    rendered = "********"
+                elif isinstance(value, list):
+                    rendered = ", ".join(str(item) for item in value)
+                else:
+                    rendered = str(value or "")
+                if rendered:
+                    settings.append(f"{key}={rendered}")
+            self.discovery_config_tree.insert(
+                "",
+                tk.END,
+                iid=config.source_id,
+                text=config.source_id,
+                values=(config.source_type, "yes" if config.enabled else "no", "; ".join(settings)),
+            )
+
+    def add_discovery_source(self) -> None:
+        self._open_discovery_source_dialog(None)
+
+    def edit_discovery_source(self) -> None:
+        selected = self.discovery_config_tree.selection() if hasattr(self, "discovery_config_tree") else ()
+        if not selected:
+            self.discovery_source_config_status_var.set("Select a source first")
+            return
+        config = next((item for item in self._discover_configs if item.source_id == selected[0]), None)
+        if config is not None:
+            self._open_discovery_source_dialog(config)
+
+    def toggle_discovery_source(self) -> None:
+        selected = self.discovery_config_tree.selection() if hasattr(self, "discovery_config_tree") else ()
+        if not selected:
+            return
+        for index, config in enumerate(self._discover_configs):
+            if config.source_id == selected[0]:
+                self._discover_configs[index] = SourceConfig(
+                    source_id=config.source_id,
+                    source_type=config.source_type,
+                    enabled=not config.enabled,
+                    settings=dict(config.settings),
+                )
+                break
+        self._save_discovery_sources_and_restart()
+
+    def delete_discovery_source(self) -> None:
+        selected = self.discovery_config_tree.selection() if hasattr(self, "discovery_config_tree") else ()
+        if not selected:
+            return
+        self._discover_configs = [config for config in self._discover_configs if config.source_id != selected[0]]
+        self._save_discovery_sources_and_restart()
+
+    def _open_discovery_source_dialog(self, existing: SourceConfig | None) -> None:
+        window = tk.Toplevel(self.root)
+        window.title("Edit Discovery Source" if existing is not None else "Add Discovery Source")
+        window.geometry("560x620")
+        window.transient(self.root)
+        window.grab_set()
+
+        source_id_var = tk.StringVar(value=existing.source_id if existing is not None else "")
+        source_type_var = tk.StringVar(
+            value=existing.source_type if existing is not None else next(iter(DISCOVER_SOURCE_SCHEMAS))
+        )
+        enabled_var = tk.BooleanVar(value=existing.enabled if existing is not None else True)
+
+        header = ttk.Frame(window, padding=10)
+        header.pack(side=tk.TOP, fill=tk.X)
+        ttk.Label(header, text="Source ID").grid(row=0, column=0, sticky=tk.W, pady=4)
+        source_id_entry = ttk.Entry(header, textvariable=source_id_var)
+        source_id_entry.grid(row=0, column=1, sticky=tk.EW, padx=(8, 0), pady=4)
+        ttk.Label(header, text="Type").grid(row=1, column=0, sticky=tk.W, pady=4)
+        type_combo = ttk.Combobox(
+            header,
+            textvariable=source_type_var,
+            values=tuple(DISCOVER_SOURCE_SCHEMAS),
+            state="disabled" if existing is not None else "readonly",
+        )
+        type_combo.grid(row=1, column=1, sticky=tk.EW, padx=(8, 0), pady=4)
+        ttk.Checkbutton(header, text="Enabled", variable=enabled_var).grid(row=2, column=1, sticky=tk.W, padx=(8, 0), pady=4)
+        header.columnconfigure(1, weight=1)
+
+        settings_group = ttk.LabelFrame(window, text="Settings", padding=10)
+        settings_group.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10)
+        widgets: dict[str, tuple[tk.Widget, object]] = {}
+
+        def rebuild_settings() -> None:
+            for child in settings_group.winfo_children():
+                child.destroy()
+            widgets.clear()
+            schema = DISCOVER_SOURCE_SCHEMAS[source_type_var.get()]
+            current = existing.settings if existing is not None and existing.source_type == source_type_var.get() else {}
+            for row, (key, default) in enumerate(schema.defaults.items()):
+                ttk.Label(settings_group, text=key.replace("_", " ").title()).grid(
+                    row=row, column=0, sticky=tk.NW, padx=(0, 8), pady=4
+                )
+                value = current.get(key, default)
+                if isinstance(default, list):
+                    widget = tk.Text(settings_group, height=3, width=42)
+                    widget.insert("1.0", "\n".join(str(item) for item in value or []))
+                    widget.grid(row=row, column=1, sticky=tk.EW, pady=4)
+                    widgets[key] = (widget, list)
+                elif isinstance(default, bool):
+                    variable = tk.BooleanVar(value=bool(value))
+                    widget = ttk.Checkbutton(settings_group, variable=variable)
+                    widget.grid(row=row, column=1, sticky=tk.W, pady=4)
+                    widgets[key] = (widget, variable)
+                elif isinstance(default, int):
+                    variable = tk.IntVar(value=int(value))
+                    widget = ttk.Spinbox(settings_group, from_=1, to=65535, textvariable=variable)
+                    widget.grid(row=row, column=1, sticky=tk.EW, pady=4)
+                    widgets[key] = (widget, variable)
+                else:
+                    variable = tk.StringVar(value="" if value is None else str(value))
+                    widget = ttk.Entry(
+                        settings_group,
+                        textvariable=variable,
+                        show="*" if key in {"password", "token"} else "",
+                    )
+                    widget.grid(row=row, column=1, sticky=tk.EW, pady=4)
+                    widgets[key] = (widget, variable)
+            settings_group.columnconfigure(1, weight=1)
+
+        type_combo.bind("<<ComboboxSelected>>", lambda _event: rebuild_settings())
+        rebuild_settings()
+        status_var = tk.StringVar(value="")
+        ttk.Label(window, textvariable=status_var).pack(side=tk.TOP, fill=tk.X, padx=10, pady=(6, 0))
+
+        def save() -> None:
+            source_id = source_id_var.get().strip()
+            source_type = source_type_var.get().strip()
+            if not source_id:
+                status_var.set("Source ID is required")
+                return
+            if existing is None and any(config.source_id == source_id for config in self._discover_configs):
+                status_var.set("Source ID already exists")
+                return
+            settings: dict[str, object] = {}
+            for key, (widget, kind) in widgets.items():
+                if kind is list:
+                    text = widget.get("1.0", tk.END).strip()  # type: ignore[attr-defined]
+                    settings[key] = [line.strip() for line in text.splitlines() if line.strip()]
+                else:
+                    settings[key] = kind.get()  # type: ignore[union-attr]
+            schema = DISCOVER_SOURCE_SCHEMAS[source_type]
+            try:
+                validated = schema.validate(settings)
+                for required in schema.required:
+                    if validated.get(required) in (None, ""):
+                        raise ValueError(f"{required} is required")
+            except Exception as exc:
+                status_var.set(str(exc))
+                return
+            new_config = SourceConfig(source_id, source_type, enabled_var.get(), validated)
+            if existing is None:
+                self._discover_configs.append(new_config)
+            else:
+                self._discover_configs = [
+                    new_config if item.source_id == existing.source_id else item
+                    for item in self._discover_configs
+                ]
+            window.destroy()
+            self._save_discovery_sources_and_restart()
+
+        actions = ttk.Frame(window, padding=10)
+        actions.pack(side=tk.BOTTOM, fill=tk.X)
+        ttk.Button(actions, text="Cancel", command=window.destroy).pack(side=tk.RIGHT)
+        ttk.Button(actions, text="Save", command=save).pack(side=tk.RIGHT, padx=(0, 8))
+
+    def _save_discovery_sources_and_restart(self) -> None:
+        try:
+            save_discover_config(self._discover_configs, self.args.discover_config)
+            self._render_discovery_source_manager()
+            self.reload_discovery_config_editor()
+        except Exception as exc:
+            self.discovery_source_config_status_var.set("Save failed: " + str(exc))
+            return
+        self.restart_discovery_runtime()
+
+    def restart_discovery_runtime(self) -> None:
+        self.discovery_source_config_status_var.set("Restarting...")
+
+        def restart() -> None:
+            previous = self.discover_runtime
+            if previous is not None:
+                previous.stop()
+            self._start_discover_runtime()
+            self._network_profiles_pending.set()
+            self._discovery_restart_completed.set()
+
+        threading.Thread(target=restart, name="DiscoverRestart", daemon=True).start()
+
+    def reload_discovery_config_editor(self) -> None:
+        if not hasattr(self, "discovery_config_editor"):
+            return
+        try:
+            content = self.args.discover_config.read_text(encoding="utf-8")
+            message = "Configuration loaded"
+        except FileNotFoundError:
+            content = ""
+            message = "Configuration file does not exist yet"
+        except Exception as exc:
+            content = ""
+            message = "Load failed: " + str(exc)
+        self.discovery_config_editor.delete("1.0", tk.END)
+        self.discovery_config_editor.insert(tk.END, content)
+        self.discovery_config_status_var.set(message)
+
+    def save_and_restart_discovery(self) -> None:
+        if not hasattr(self, "discovery_config_editor"):
+            return
+        content = self.discovery_config_editor.get("1.0", tk.END).rstrip() + "\n"
+        self.discovery_config_status_var.set("Validating...")
+        try:
+            import tomllib
+
+            tomllib.loads(content)
+        except ImportError:
+            import tomli
+
+            try:
+                tomli.loads(content)
+            except Exception as exc:
+                self.discovery_config_status_var.set("Invalid TOML: " + str(exc))
+                return
+        except Exception as exc:
+            self.discovery_config_status_var.set("Invalid TOML: " + str(exc))
+            return
+
+        try:
+            save_discover_config_text(content, self.args.discover_config)
+        except Exception as exc:
+            self.discovery_config_status_var.set("Save failed: " + str(exc))
+            return
+
+        self.reload_discovery_source_manager()
+        self.discovery_config_status_var.set("Saved")
+        self.restart_discovery_runtime()
+
+    def _on_discover_profiles_updated(self, _profiles: list[dict]) -> None:
+        self._network_profiles_pending.set()
+
+    def refresh_network_devices(self, *, force: bool = False) -> None:
+        if not hasattr(self, "network_device_tree"):
+            return
+        if self._discovery_restart_completed.is_set():
+            self._discovery_restart_completed.clear()
+            self.discovery_source_config_status_var.set("Saved and restarted")
+        if self._network_refresh_after_id is not None:
+            try:
+                self.root.after_cancel(self._network_refresh_after_id)
+            except Exception:
+                pass
+            self._network_refresh_after_id = None
+
+        runtime = self.discover_runtime
+        status = runtime.status() if runtime is not None else {
+            "running": False,
+            "device_count": 0,
+            "sources": {},
+            "last_error": "Discovery disabled",
+            "profile_revision": 0,
+        }
+        revision = int(status.get("profile_revision") or 0)
+        should_render = (
+            force
+            or self._network_profiles_pending.is_set()
+            or revision != self._last_network_profile_revision
+        )
+        if should_render:
+            profiles = runtime.profiles() if runtime is not None else []
+            self._network_profiles_snapshot = profiles
+            self.network_device_tree.delete(*self.network_device_tree.get_children())
+            self._network_tree_item_context.clear()
+            for profile in profiles:
+                connections = profile.get("connections") or {}
+                addresses = [*(connections.get("ip") or []), *(connections.get("mac") or [])]
+                identifiers = profile.get("identifiers") or {}
+                entities = identifiers.get("mqtt_entity_prefix") or identifiers.get("mqtt_topic_prefix") or []
+                channels = identifiers.get("mqtt_channel") or []
+                identity = profile.get("identity") or {}
+                classification = profile.get("classification") or {}
+                classification_confidence = float(classification.get("confidence") or 0.0)
+                item = self.network_device_tree.insert(
+                    "",
+                    tk.END,
+                    text=str(profile.get("display_name") or "Unknown network device"),
+                    values=(
+                        ", ".join(str(value) for value in entities),
+                        ", ".join(str(value) for value in channels) or "-",
+                        int(identity.get("observed_topic_count") or len(identifiers.get("mqtt_topic_prefix") or [])),
+                        f"{profile.get('device_type') or ''} ({classification_confidence:.0%})",
+                        len(profile.get("data") or {}),
+                        len(profile.get("operations") or []),
+                        ", ".join(str(value) for value in addresses),
+                        int(profile.get("evidence_count") or 0),
+                        "online" if profile.get("online", False) else "stored",
+                    ),
+                )
+                self._network_tree_item_context[item] = profile
+            self._refresh_visible_network_secondary_view()
+            self._last_network_profile_revision = revision
+            self._network_profiles_pending.clear()
+
+        running = "running" if status.get("running") else "stopped"
+        last_error = str(status.get("last_error") or "")
+        status_text = (
+            f"{int(status.get('device_count') or 0)} network device(s) | runtime {running} | "
+            f"{int(status.get('events_ingested') or 0)} events / "
+            f"{int(status.get('profile_refresh_count') or 0)} batches"
+        )
+        if last_error:
+            status_text += " | " + last_error
+        self.network_device_status_var.set(status_text)
+        self.discovery_runtime_var.set(status_text)
+
+        if hasattr(self, "discovery_source_tree"):
+            self.discovery_source_tree.delete(*self.discovery_source_tree.get_children())
+            for source_id, source in sorted((status.get("sources") or {}).items()):
+                updated = float(source.get("updated_at") or 0.0)
+                updated_text = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(updated)) if updated else ""
+                self.discovery_source_tree.insert(
+                    "",
+                    tk.END,
+                    values=(
+                        source_id,
+                        str(source.get("source_type") or source_id),
+                        str(source.get("state") or ""),
+                        str(source.get("message") or ""),
+                        updated_text,
+                    ),
+                )
+        self._network_refresh_after_id = self.root.after(2000, self.refresh_network_devices)
+
+    def _on_main_tab_changed(self, _event: tk.Event) -> None:
+        self._refresh_visible_network_secondary_view()
+
+    def _refresh_visible_network_secondary_view(self) -> None:
+        if not hasattr(self, "main_notebook"):
+            return
+        selected = self.main_notebook.select()
+        if selected == str(self._network_data_tab):
+            self.network_data_tree.delete(*self.network_data_tree.get_children())
+            for profile in self._network_profiles_snapshot:
+                self._append_network_data_rows(profile)
+        elif selected == str(self._network_operations_tab):
+            self.network_operation_tree.delete(*self.network_operation_tree.get_children())
+            self._network_operation_context.clear()
+            for profile in self._network_profiles_snapshot:
+                self._append_network_operation_rows(profile)
+        elif selected == str(self._network_profiles_tab):
+            self.network_profile_tree.delete(*self.network_profile_tree.get_children())
+            self._network_profile_item_context.clear()
+            for profile in self._network_profiles_snapshot:
+                self._append_network_profile_rows(profile)
+
+    def copy_selected_network_rows(self, _event: tk.Event | None = None) -> str:
+        selected = self.network_device_tree.selection()
+        if not selected:
+            return "break"
+        headers = ["Device"] + [
+            self.network_device_tree.heading(column, "text")
+            for column in self.network_device_tree["columns"]
+        ]
+        rows = ["\t".join(str(value) for value in headers)]
+        for item_id in selected:
+            item = self.network_device_tree.item(item_id)
+            rows.append("\t".join([str(item.get("text") or ""), *(str(value) for value in item.get("values") or [])]))
+        self.root.clipboard_clear()
+        self.root.clipboard_append("\n".join(rows))
+        self.network_device_status_var.set(f"Copied {len(selected)} row(s)")
+        return "break"
+
+    def copy_selected_network_json(self) -> None:
+        profiles = [
+            self._network_tree_item_context[item_id]
+            for item_id in self.network_device_tree.selection()
+            if item_id in self._network_tree_item_context
+        ]
+        if not profiles:
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(json.dumps(profiles, indent=2, ensure_ascii=False))
+        self.network_device_status_var.set(f"Copied {len(profiles)} profile(s) as JSON")
+
+    def _append_network_data_rows(self, profile: dict) -> None:
+        if not hasattr(self, "network_data_tree"):
+            return
+        name = str(profile.get("display_name") or "")
+        for sensor, reading in sorted((profile.get("data") or {}).items()):
+            timestamp = float(reading.get("timestamp") or 0.0)
+            updated = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp)) if timestamp else ""
+            value = reading.get("value")
+            if isinstance(value, (dict, list)):
+                value = json.dumps(value, ensure_ascii=False)
+            self.network_data_tree.insert(
+                "",
+                tk.END,
+                values=(
+                    name,
+                    sensor,
+                    value,
+                    str(reading.get("unit") or ""),
+                    updated,
+                    str(reading.get("runtime_device_id") or ""),
+                ),
+            )
+
+    def _append_network_operation_rows(self, profile: dict) -> None:
+        if not hasattr(self, "network_operation_tree"):
+            return
+        name = str(profile.get("display_name") or "")
+        for operation in profile.get("operations") or []:
+            timestamp = float(operation.get("last_seen") or 0.0)
+            seen = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp)) if timestamp else ""
+            item = self.network_operation_tree.insert(
+                "",
+                tk.END,
+                values=(
+                    name,
+                    str(operation.get("topic") or ""),
+                    str(operation.get("action") or ""),
+                    str(operation.get("sensor_key") or ""),
+                    ", ".join(str(value) for value in operation.get("accepted_values") or []),
+                    f"{float(operation.get('confidence') or 0.0):.2f}",
+                    seen,
+                ),
+            )
+            self._network_operation_context[item] = operation
+
+    def _append_network_profile_rows(self, profile: dict) -> None:
+        if not hasattr(self, "network_profile_tree"):
+            return
+        identity = profile.get("identity") or {}
+        classification = profile.get("classification") or {}
+        parent = self.network_profile_tree.insert(
+            "",
+            tk.END,
+            text=str(profile.get("display_name") or "Unknown device"),
+            values=(
+                (
+                    f"{profile.get('device_type') or ''} "
+                    f"({float(classification.get('confidence') or 0.0):.0%})"
+                ),
+                str(profile.get("summary") or ""),
+                f"{identity.get('channel_count', 0)} channels, {identity.get('observed_topic_count', 0)} topics",
+            ),
+            open=False,
+        )
+        self._network_profile_item_context[parent] = profile
+        identifiers = profile.get("identifiers") or {}
+        self.network_profile_tree.insert(
+            parent,
+            tk.END,
+            text="MQTT entity",
+            values=(
+                "Identity",
+                ", ".join(str(value) for value in identifiers.get("mqtt_entity_prefix") or []),
+                ", ".join(str(value) for value in identifiers.get("mqtt_channel") or []) or "no separate channels",
+            ),
+        )
+        for reason in identity.get("reasons") or []:
+            self.network_profile_tree.insert(parent, tk.END, text="Dedup decision", values=("Evidence", "", str(reason)))
+        separation_policy = str(identity.get("separation_policy") or "")
+        if separation_policy:
+            self.network_profile_tree.insert(
+                parent,
+                tk.END,
+                text="Why separate",
+                values=("Policy", "", separation_policy),
+            )
+        for sensor, reading in sorted((profile.get("data") or {}).items()):
+            self.network_profile_tree.insert(
+                parent,
+                tk.END,
+                text=sensor,
+                values=("Data", f"{reading.get('value')} {reading.get('unit') or ''}".strip(), ""),
+            )
+        for operation in profile.get("operations") or []:
+            child = self.network_profile_tree.insert(
+                parent,
+                tk.END,
+                text=str(operation.get("action") or "command"),
+                values=(
+                    "Operation",
+                    str(operation.get("sensor_key") or ""),
+                    str(operation.get("topic") or ""),
+                ),
+            )
+            self._network_profile_item_context[child] = {"profile": profile, "operation": operation}
+
+    def on_network_operation_selected(self, _event: tk.Event) -> None:
+        selected = self.network_operation_tree.selection()
+        if not selected:
+            return
+        operation = self._network_operation_context.get(selected[0])
+        if operation is None:
+            return
+        values = operation.get("accepted_values") or []
+        if values:
+            self.network_operation_payload_var.set(str(values[0]))
+        elif not self.network_operation_payload_var.get():
+            self.network_operation_payload_var.set("{}")
+
+    def publish_selected_network_operation(self) -> None:
+        selected = self.network_operation_tree.selection()
+        if not selected:
+            self.network_operation_status_var.set("Select an operation first")
+            return
+        operation = self._network_operation_context.get(selected[0])
+        if operation is None:
+            return
+        raw = self.network_operation_payload_var.get().strip()
+        try:
+            payload = json.loads(raw) if raw and raw[0] in "[{\"" else raw
+        except json.JSONDecodeError as exc:
+            self.network_operation_status_var.set("Invalid JSON: " + str(exc))
+            return
+        runtime = self.discover_runtime
+        ok = runtime is not None and runtime.publish_mqtt(str(operation.get("topic") or ""), payload)
+        self.network_operation_status_var.set("Published" if ok else "Publish failed: MQTT source unavailable")
+
+    def on_network_profile_double_click(self, _event: tk.Event) -> None:
+        selected = self.network_profile_tree.selection()
+        if not selected:
+            return
+        context = self._network_profile_item_context.get(selected[0])
+        if isinstance(context, dict) and "operation" in context:
+            operation = context["operation"]
+            self.network_operation_payload_var.set(
+                str((operation.get("accepted_values") or ["{}"])[0])
+            )
+            return
+        if isinstance(context, dict):
+            self._open_network_profile_detail(context)
+
+    def on_network_device_double_click(self, _event: tk.Event) -> None:
+        if not hasattr(self, "network_device_tree"):
+            return
+        selected = self.network_device_tree.selection()
+        if not selected:
+            return
+        profile = self._network_tree_item_context.get(selected[0])
+        if profile is None:
+            return
+        self._open_network_profile_detail(profile)
+
+    def _open_network_profile_detail(self, profile: dict) -> None:
+        window = tk.Toplevel(self.root)
+        window.title(str(profile.get("display_name") or "Network Device"))
+        window.geometry("920x720")
+        tabs = ttk.Notebook(window)
+        tabs.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=8, pady=8)
+
+        summary_tab = ttk.Frame(tabs, padding=10)
+        data_tab = ttk.Frame(tabs, padding=10)
+        operations_tab = ttk.Frame(tabs, padding=10)
+        raw_tab = ttk.Frame(tabs, padding=10)
+        tabs.add(summary_tab, text="Summary")
+        tabs.add(data_tab, text="Data")
+        tabs.add(operations_tab, text="Operations")
+        tabs.add(raw_tab, text="Raw Profile")
+
+        summary = scrolledtext.ScrolledText(summary_tab, wrap=tk.WORD)
+        summary.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        identity = profile.get("identity") or {}
+        identifiers = profile.get("identifiers") or {}
+        lines = [
+            str(profile.get("display_name") or ""),
+            "",
+            str(profile.get("summary") or ""),
+            "",
+            (
+                "Classification: "
+                f"{profile.get('device_type') or '-'} "
+                f"({float((profile.get('classification') or {}).get('confidence') or 0.0):.0%}, "
+                f"{(profile.get('classification') or {}).get('method') or 'unknown'})"
+            ),
+            "",
+            "Physical entity:",
+            *[f"  {value}" for value in identifiers.get("mqtt_entity_prefix") or []],
+            "Channels: " + (", ".join(identifiers.get("mqtt_channel") or []) or "-"),
+            "Observed topic prefixes:",
+            *[f"  {value}" for value in identifiers.get("mqtt_topic_prefix") or []],
+            "",
+            "Deduplication decisions:",
+            *[f"  {value}" for value in identity.get("reasons") or []],
+            "",
+            "Separation policy:",
+            f"  {identity.get('separation_policy') or '-'}",
+        ]
+        summary.insert(tk.END, "\n".join(lines))
+        summary.configure(state=tk.DISABLED)
+
+        data_tree = ttk.Treeview(data_tab, columns=("property", "value", "unit", "updated"), show="headings")
+        for column, title in (
+            ("property", "Property"),
+            ("value", "Value"),
+            ("unit", "Unit"),
+            ("updated", "Updated"),
+        ):
+            data_tree.heading(column, text=title)
+        data_tree.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        for sensor, reading in sorted((profile.get("data") or {}).items()):
+            timestamp = float(reading.get("timestamp") or 0.0)
+            data_tree.insert(
+                "",
+                tk.END,
+                values=(
+                    sensor,
+                    reading.get("value"),
+                    reading.get("unit") or "",
+                    time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp)) if timestamp else "",
+                ),
+            )
+
+        operation_text = scrolledtext.ScrolledText(operations_tab, wrap=tk.WORD)
+        operation_text.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        operation_text.insert(
+            tk.END,
+            json.dumps(profile.get("operations") or [], indent=2, ensure_ascii=False),
+        )
+        operation_text.configure(state=tk.DISABLED)
+
+        raw = scrolledtext.ScrolledText(raw_tab, wrap=tk.NONE)
+        raw.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        raw.insert(tk.END, json.dumps(profile, indent=2, ensure_ascii=False))
+        raw.configure(state=tk.DISABLED)
+
     def _vlm_form_config(self) -> dict:
         return {
             "base_url": self.vlm_base_url_var.get().strip(),
@@ -3574,7 +5150,8 @@ class RgbdViewer:
                 models = _vlm_list_models(config, timeout=float(getattr(self.args, "vlm_timeout_seconds", 120.0)))
                 self.root.after(0, lambda: self._on_vlm_models_loaded(models))
             except Exception as exc:
-                self.root.after(0, lambda: self.vlm_status_var.set("Connect failed: " + str(exc)))
+                reason = str(exc)
+                self.root.after(0, lambda reason=reason: self.vlm_status_var.set("Connect failed: " + reason))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -3598,7 +5175,8 @@ class RgbdViewer:
                 models, response = _vlm_test_connection(config, timeout=float(getattr(self.args, "vlm_timeout_seconds", 120.0)))
                 self.root.after(0, lambda: self._on_vlm_test_ok(models, response, signature))
             except Exception as exc:
-                self.root.after(0, lambda: self._on_vlm_test_failed(str(exc)))
+                reason = str(exc)
+                self.root.after(0, lambda reason=reason: self._on_vlm_test_failed(reason))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -3642,6 +5220,7 @@ class RgbdViewer:
                     continue
                 if not isinstance(store, dict):
                     continue
+                _mark_stale_vlm_records(self.args, device_dir, store)
                 for record in _object_records(store):
                     if str(record.get("status") or "") != "completed":
                         continue
@@ -3700,6 +5279,11 @@ class RgbdViewer:
             record = item["object"]
             completed = _format_local_timestamp_s(int(record.get("completed_at_ms") or _now_ms()))
             vlm_status = str(record.get("vlm_status") or "not run")
+            binding = record.get("network_binding")
+            if isinstance(binding, dict):
+                network_status = str(binding.get("display_name") or binding.get("canonical_device_id") or "paired")
+            else:
+                network_status = str(record.get("pairing_status") or "not started")
             photo = self._make_tree_thumbnail(item)
             insert_kwargs = {
                 "text": item["object_id"],
@@ -3708,6 +5292,7 @@ class RgbdViewer:
                     completed,
                     str(item["image_count"]),
                     vlm_status,
+                    network_status,
                 ),
             }
             if photo is not None:
@@ -3734,6 +5319,40 @@ class RgbdViewer:
             return
         self.open_object_detail_window(context)
 
+    def retry_selected_vlm(self) -> None:
+        item_id = self.device_tree.focus()
+        context = self._device_tree_item_context.get(item_id)
+        if context is None:
+            self.device_tree_status_var.set("Select a completed device object first")
+            return
+        self.retry_vlm_for_context(context)
+
+    def retry_vlm_for_context(self, context: dict, status_var: tk.StringVar | None = None) -> bool:
+        config = _load_vlm_config(self.args)
+        if not str(config.get("base_url") or "").strip() or not str(config.get("model") or "").strip():
+            message = "VLM config incomplete"
+            self.device_tree_status_var.set(message)
+            if status_var is not None:
+                status_var.set(message)
+            return False
+
+        cursor = {
+            "room_id": context["room_id"],
+            "room_name": context["room_name"],
+            "device_id": context["device_id"],
+            "device_name": context["device_name"],
+            "device_model": context.get("device_model", ""),
+            "object_id": context["object_id"],
+            "object_session_id": context["object_id"],
+        }
+        _schedule_vlm_object_analysis(self, cursor, str(context["object_id"]))
+        message = "VLM retry started"
+        self.device_tree_status_var.set(message)
+        if status_var is not None:
+            status_var.set(message)
+        self.root.after(500, self.refresh_device_tree)
+        return True
+
     def open_object_detail_window(self, context: dict) -> None:
         device_dir = Path(context["device_dir"])
         try:
@@ -3745,13 +5364,16 @@ class RgbdViewer:
 
         window = tk.Toplevel(self.root)
         window.title(str(record.get("name") or object_id))
-        window.geometry("980x720")
+        window.geometry("1180x780")
         window.photo_refs = []  # type: ignore[attr-defined]
 
         header = ttk.Frame(window, padding=8)
         header.pack(side=tk.TOP, fill=tk.X)
         title = f"{record.get('name') or object_id} | {context['room_name']} / {context['device_name']}"
         ttk.Label(header, text=title, font=("Segoe UI", 12, "bold")).pack(side=tk.LEFT)
+        detail_status_var = tk.StringVar(value="")
+        ttk.Button(header, text="Retry VLM", command=lambda: self.retry_vlm_for_context(context, detail_status_var)).pack(side=tk.RIGHT)
+        ttk.Button(header, text="Refresh", command=lambda: refresh_detail()).pack(side=tk.RIGHT, padx=(0, 8))
 
         main = ttk.PanedWindow(window, orient=tk.HORIZONTAL)
         main.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
@@ -3785,28 +5407,182 @@ class RgbdViewer:
 
         meta = ttk.LabelFrame(text_outer, text="Saved Device", padding=8)
         meta.pack(side=tk.TOP, fill=tk.X)
-        lines = [
-            f"Object: {object_id}",
-            f"Completed: {_format_local_timestamp_s(int(record.get('completed_at_ms') or _now_ms()))}",
-            f"Images: {len(_object_images(store, object_id))}",
-            f"Points: {len(_object_points(store, object_id))}",
-            f"VLM: {record.get('vlm_status') or 'not run'}",
-        ]
-        if record.get("vlm_model"):
-            lines.append(f"Model: {record.get('vlm_model')}")
-        if record.get("vlm_error"):
-            lines.append(f"Error: {record.get('vlm_error')}")
-        ttk.Label(meta, text="\n".join(lines), justify=tk.LEFT).pack(side=tk.TOP, fill=tk.X)
+        meta_var = tk.StringVar(value="")
+        ttk.Label(meta, textvariable=meta_var, justify=tk.LEFT).pack(side=tk.TOP, fill=tk.X)
+        ttk.Label(meta, textvariable=detail_status_var, foreground="#5a5a5a").pack(side=tk.TOP, fill=tk.X, pady=(6, 0))
+
+        pairing_group = ttk.LabelFrame(text_outer, text="Network Pairing", padding=8)
+        pairing_group.pack(side=tk.TOP, fill=tk.BOTH, pady=(8, 0))
+        pairing_toolbar = ttk.Frame(pairing_group)
+        pairing_toolbar.pack(side=tk.TOP, fill=tk.X, pady=(0, 6))
+        pairing_status_var = tk.StringVar(value="")
+        ttk.Label(pairing_toolbar, textvariable=pairing_status_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        pairing_candidates: dict[str, dict] = {}
+        pairing_tree = ttk.Treeview(
+            pairing_group,
+            columns=("score", "coverage", "type", "address"),
+            show="tree headings",
+            height=6,
+        )
+        pairing_tree.heading("#0", text="Candidate")
+        pairing_tree.heading("score", text="Score")
+        pairing_tree.heading("coverage", text="Evidence")
+        pairing_tree.heading("type", text="Type")
+        pairing_tree.heading("address", text="IP / MAC")
+        pairing_tree.column("#0", width=260, anchor=tk.W)
+        pairing_tree.column("score", width=70, anchor=tk.CENTER)
+        pairing_tree.column("coverage", width=80, anchor=tk.CENTER)
+        pairing_tree.column("type", width=150, anchor=tk.W)
+        pairing_tree.column("address", width=190, anchor=tk.W)
+        pairing_tree.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        def start_pairing_refresh() -> None:
+            cursor = {
+                "room_id": context["room_id"],
+                "room_name": context["room_name"],
+                "device_id": context["device_id"],
+                "device_name": context["device_name"],
+                "device_model": context["device_model"],
+                "object_id": object_id,
+                "object_session_id": object_id,
+            }
+            pairing_status_var.set("Matching network devices...")
+            _schedule_object_pairing_analysis(self, cursor, object_id)
+
+        def bind_selected_candidate() -> None:
+            selected = pairing_tree.selection()
+            if not selected:
+                pairing_status_var.set("Select a network candidate first")
+                return
+            candidate = pairing_candidates.get(selected[0])
+            if candidate is None:
+                return
+            canonical_id = str(candidate.get("canonical_device_id") or "")
+            try:
+                current_store = json.loads((device_dir / "points.json").read_text(encoding="utf-8"))
+                current_record = _find_object_record(current_store, object_id)
+                if current_record is None:
+                    raise ValueError("object not found")
+                conflict = _find_binding_conflict(
+                    self.args,
+                    context["room_id"],
+                    canonical_id,
+                    device_dir,
+                    object_id,
+                )
+                if conflict is not None:
+                    pairing_status_var.set(
+                        "Already bound to " + str(conflict.get("object_name") or conflict.get("object_id") or "")
+                    )
+                    return
+                profile = candidate.get("profile") or {}
+                current_record["network_binding"] = {
+                    "canonical_device_id": canonical_id,
+                    "display_name": str(candidate.get("display_name") or canonical_id),
+                    "method": "semantic_match_manual_confirmation",
+                    "score": int(candidate.get("score") or 0),
+                    "evidence_coverage_percent": int(candidate.get("evidence_coverage_percent") or 0),
+                    "bound_at_ms": _now_ms(),
+                    "profile_snapshot": profile,
+                }
+                current_record["updated_at_ms"] = _now_ms()
+                _save_point_store(device_dir, current_store)
+                pairing_status_var.set("Bound to " + str(candidate.get("display_name") or canonical_id))
+                refresh_detail()
+            except Exception as exc:
+                pairing_status_var.set("Bind failed: " + str(exc))
+
+        def unbind_candidate() -> None:
+            try:
+                current_store = json.loads((device_dir / "points.json").read_text(encoding="utf-8"))
+                current_record = _find_object_record(current_store, object_id)
+                if current_record is None:
+                    raise ValueError("object not found")
+                current_record.pop("network_binding", None)
+                current_record["updated_at_ms"] = _now_ms()
+                _save_point_store(device_dir, current_store)
+                pairing_status_var.set("Network binding removed")
+                refresh_detail()
+            except Exception as exc:
+                pairing_status_var.set("Unbind failed: " + str(exc))
+
+        ttk.Button(pairing_toolbar, text="Refresh Match", command=start_pairing_refresh).pack(side=tk.RIGHT)
+        ttk.Button(pairing_toolbar, text="Bind Selected", command=bind_selected_candidate).pack(side=tk.RIGHT, padx=(0, 6))
+        ttk.Button(pairing_toolbar, text="Unbind", command=unbind_candidate).pack(side=tk.RIGHT, padx=(0, 6))
 
         desc_group = ttk.LabelFrame(text_outer, text="VLM Description", padding=8)
         desc_group.pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=(8, 0))
         desc = scrolledtext.ScrolledText(desc_group, wrap=tk.WORD)
         desc.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-        description = str(record.get("vlm_description") or "")
-        if not description:
-            description = "No VLM description yet."
-        desc.insert(tk.END, description)
-        desc.configure(state=tk.DISABLED)
+
+        def refresh_detail() -> None:
+            try:
+                current_store = json.loads((device_dir / "points.json").read_text(encoding="utf-8"))
+            except Exception:
+                current_store = store
+            _mark_stale_vlm_records(self.args, device_dir, current_store)
+            current_record = _find_object_record(current_store, object_id) or record
+            lines = [
+                f"Object: {object_id}",
+                f"Completed: {_format_local_timestamp_s(int(current_record.get('completed_at_ms') or _now_ms()))}",
+                f"Images: {len(_object_images(current_store, object_id))}",
+                f"Points: {len(_object_points(current_store, object_id))}",
+                f"VLM: {current_record.get('vlm_status') or 'not run'}",
+            ]
+            if current_record.get("vlm_model"):
+                lines.append(f"Model: {current_record.get('vlm_model')}")
+            if current_record.get("vlm_started_at_ms"):
+                lines.append(f"Started: {_format_local_timestamp_s(int(current_record.get('vlm_started_at_ms')))}")
+            if current_record.get("vlm_completed_at_ms"):
+                lines.append(f"Finished: {_format_local_timestamp_s(int(current_record.get('vlm_completed_at_ms')))}")
+            if current_record.get("vlm_error"):
+                lines.append(f"Error: {current_record.get('vlm_error')}")
+            binding = current_record.get("network_binding")
+            if isinstance(binding, dict):
+                lines.append(f"Network: {binding.get('display_name') or binding.get('canonical_device_id')}")
+            meta_var.set("\n".join(lines))
+
+            pairing_tree.delete(*pairing_tree.get_children())
+            pairing_candidates.clear()
+            for candidate in current_record.get("pairing_candidates") or []:
+                profile = candidate.get("profile") or {}
+                connections = profile.get("connections") or {}
+                addresses = [*(connections.get("ip") or []), *(connections.get("mac") or [])]
+                item_id = pairing_tree.insert(
+                    "",
+                    tk.END,
+                    text=str(candidate.get("display_name") or candidate.get("canonical_device_id") or ""),
+                    values=(
+                        f"{int(candidate.get('score') or 0)}%",
+                        f"{int(candidate.get('evidence_coverage_percent') or 0)}%",
+                        str(profile.get("device_type") or ""),
+                        ", ".join(str(value) for value in addresses),
+                    ),
+                )
+                pairing_candidates[item_id] = candidate
+            pairing_state = str(current_record.get("pairing_status") or "not started")
+            if isinstance(binding, dict):
+                pairing_state += " | bound: " + str(binding.get("display_name") or "")
+            elif current_record.get("pairing_error"):
+                pairing_state += " | " + str(current_record.get("pairing_error"))
+            pairing_status_var.set(pairing_state)
+
+            description = str(current_record.get("vlm_description") or "")
+            if not description:
+                description = "No VLM description yet."
+            desc.configure(state=tk.NORMAL)
+            desc.delete("1.0", tk.END)
+            desc.insert(tk.END, description)
+            desc.configure(state=tk.DISABLED)
+            self.refresh_device_tree()
+
+        def schedule_detail_refresh() -> None:
+            if not window.winfo_exists():
+                return
+            refresh_detail()
+            window.after(2000, schedule_detail_refresh)
+
+        schedule_detail_refresh()
 
     def load_current_frame(self) -> None:
         if not self.frames:
@@ -4331,6 +6107,15 @@ class RgbdViewer:
         self.root.mainloop()
 
     def on_close(self) -> None:
+        self._closing = True
+        if self._network_refresh_after_id is not None:
+            try:
+                self.root.after_cancel(self._network_refresh_after_id)
+            except Exception:
+                pass
+            self._network_refresh_after_id = None
+        if self.discover_runtime is not None:
+            self.discover_runtime.stop()
         if self.any2full_service is not None:
             self.any2full_service.stop()
         self.root.destroy()

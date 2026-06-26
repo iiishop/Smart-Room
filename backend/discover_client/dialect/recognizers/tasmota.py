@@ -22,16 +22,15 @@ class TasmotaRecognizer(DialectRecognizer):
     def extract(self, topic: str, payload: Any) -> RecognizerOutput:
         segments = topic.split("/")
         sensor_key = segments[-1] if len(segments) > 1 else "value"
-        suffix = segments[-1].upper()
+        is_command_topic = bool(segments) and segments[0].lower() == "cmnd"
         # RESULT is command echo — no real operation
-        is_result = suffix in {"RESULT", "STATUS"}
 
         ops: list[RecognizedOperation] = []
         sensors: list[RecognizedSensor] = []
 
         if isinstance(payload, dict):
             for k, v in payload.items():
-                if not is_result:
+                if is_command_topic:
                     ops.append(
                         RecognizedOperation(
                             topic=topic,
@@ -47,7 +46,7 @@ class TasmotaRecognizer(DialectRecognizer):
                         value=_coerce_value(v),
                     )
                 )
-        elif not is_result:
+        elif is_command_topic:
             ops.append(
                 RecognizedOperation(
                     topic=topic,
@@ -57,6 +56,13 @@ class TasmotaRecognizer(DialectRecognizer):
                     is_enum=True,
                 )
             )
+            sensors.append(
+                RecognizedSensor(
+                    sensor_type=sensor_key.lower(),
+                    value=_coerce_value(payload),
+                )
+            )
+        elif payload is not None:
             sensors.append(
                 RecognizedSensor(
                     sensor_type=sensor_key.lower(),

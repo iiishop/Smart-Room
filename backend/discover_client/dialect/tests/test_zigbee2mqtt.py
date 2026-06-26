@@ -28,7 +28,13 @@ def test_zigbee2mqtt_nested_payload() -> None:
     rec = Zigbee2MQTTRecognizer()
     result = rec.extract("zigbee2mqtt/bulb", {"color": {"x": 0.5, "y": 0.5}})
     # flat key "color" with dict value — extracted as operation, skipped as sensor
-    op_keys = {op.sensor_key for op in result.operations}
-    assert "color" in op_keys
+    assert result.operations == []
     sensor_keys = {s.sensor_type for s in result.sensor_readings}
     assert "color" not in sensor_keys
+
+
+def test_zigbee2mqtt_set_topic_is_an_operation() -> None:
+    rec = Zigbee2MQTTRecognizer()
+    result = rec.extract("zigbee2mqtt/bulb/set", {"state": "ON"})
+    assert [operation.sensor_key for operation in result.operations] == ["state"]
+    assert result.sensor_readings == []

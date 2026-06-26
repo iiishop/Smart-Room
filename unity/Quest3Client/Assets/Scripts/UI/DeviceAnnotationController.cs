@@ -309,17 +309,24 @@ namespace SmartRoom.UI
                 if (saved == null || !saved.ok)
                     return;
 
+                TrackingManager.RoomObjectPointRecord[] boardPoints = saved.points;
+                TrackingManager.RoomObjectSpatialRecord boardSpatial = saved.spatial;
                 TrackingManager.ObjectActionResponse edit = await trackingManager.BeginEditObjectAsync(objectId);
                 if (edit != null && edit.ok)
                 {
                     RoomObjectSession.EnterSavedObject(objectId, edit.edit_session_id);
                     ShowPromptMarkers(edit.points);
+                    boardPoints = edit.points;
+                    if (edit.spatial != null && edit.spatial.valid)
+                        boardSpatial = edit.spatial;
                 }
                 else
                 {
                     RoomObjectSession.EnterSavedObject(objectId, string.Empty);
                     ShowPromptMarkers(saved.points);
                 }
+
+                DevicePlaceholderBoardManager.PlaceForObject(objectId, boardSpatial, boardPoints, xrCamera);
             }
             finally
             {

@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import json
+import os
+import time
+import uuid
 from typing import Any
 
 from discover_client.source import SourceConfig
@@ -73,13 +77,6 @@ SCHEMAS: dict[str, SourceTypeSchema] = {
             "scan_flags": "-sn -PR",
         },
     ),
-    "home_assistant": SourceTypeSchema(
-        required=["base_url", "token"],
-        defaults={
-            "base_url": "",
-            "token": "",
-        },
-    ),
 }
 
 
@@ -139,3 +136,77 @@ def load_config(path: str | Path | None = None) -> list[SourceConfig]:
         )
 
     return configs
+
+
+def save_config(configs: list[SourceConfig], path: str | Path | None = None) -> Path:
+    if path is None:
+        target = Path(__file__).resolve().parent / "config.toml"
+    else:
+        target = Path(path)
+
+    lines = ["# discover_client/config.toml"]
+    for config in configs:
+        lines.extend(
+            [
+                "",
+                "[[sources]]",
+                f"source_id = {_toml_string(config.source_id)}",
+                f"source_type = {_toml_string(config.source_type)}",
+                f"enabled = {'true' if config.enabled else 'false'}",
+                "",
+                "[sources.settings]",
+            ]
+        )
+        for key, value in sorted(config.settings.items()):
+            lines.append(f"{key} = {_toml_value(value)}")
+
+    save_config_text("\n".join(lines) + "\n", target)
+    return target
+
+
+def save_config_text(content: str, path: str | Path) -> Path:
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    last_error: Exception | None = None
+    for attempt in range(7):
+        tmp = target.with_name(
+            f".{target.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+        )
+        try:
+            with tmp.open("w", encoding="utf-8", newline="\n") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, target)
+            return target
+        except PermissionError as exc:
+            last_error = exc
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            time.sleep(0.025 * (2**attempt))
+        except Exception:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+    assert last_error is not None
+    raise last_error
+
+
+def _toml_string(value: object) -> str:
+    return json.dumps(str(value), ensure_ascii=False)
+
+
+def _toml_value(value: Any) -> str:
+    if value is None:
+        return '""'
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return str(value)
+    if isinstance(value, list):
+        return "[" + ", ".join(_toml_value(item) for item in value) + "]"
+    return _toml_string(value)

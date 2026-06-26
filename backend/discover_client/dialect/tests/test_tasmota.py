@@ -41,6 +41,7 @@ def test_tasmota_dict_payload() -> None:
     sensor_keys = {s.sensor_type for s in result.sensor_readings}
     assert "power" in sensor_keys
     assert "dimmer" in sensor_keys
+    assert result.operations == []
 
 
 def test_tasmota_skips_result_topic() -> None:

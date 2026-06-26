@@ -28,8 +28,10 @@ def extract_device_id(dialect: str, topic: str) -> str:
         # Everything except the last segment (action suffix)
         return "/".join(segments[:-1]) if len(segments) > 1 else topic
     elif dialect == "barevalue":
-        # First segment as fallback
-        return segments[0] if segments else topic
+        # A bare value normally occupies the terminal property topic. Keeping
+        # the full parent path avoids collapsing every device below a shared
+        # site/root segment into one runtime device.
+        return "/".join(segments[:-1]) if len(segments) > 1 else topic
     else:
         # Unknown dialect: pass-through
         return topic

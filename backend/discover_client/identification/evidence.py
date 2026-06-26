@@ -28,6 +28,7 @@ class SignalEvidence:
     event_type: str = "data"
     dialect: str | None = None
     dialect_confidence: float = 0.0
+    identity_tokens: set[str] | None = None
 
     def summarize(self) -> str:
         parts: list[str] = []
@@ -57,4 +58,6 @@ class SignalEvidence:
             parts.append(f"usn={self.ssdp_usn[:60]}")
         if self.ssdp_server:
             parts.append(f"srv={self.ssdp_server}")
+        if self.identity_tokens:
+            parts.append("ids={" + ",".join(sorted(self.identity_tokens)) + "}")
         return "  ".join(parts) if parts else "(no clues)"

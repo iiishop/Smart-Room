@@ -5,6 +5,7 @@ from __future__ import annotations
 from discover_client.identification.annotator import Annotator, register_annotator
 from discover_client.identification.evidence import SignalEvidence
 from discover_client.source import SourceEvent
+from discover_client.identification.tokens import extract_identity_tokens
 
 
 @register_annotator("ssdp")
@@ -34,6 +35,7 @@ class SsdpAnnotator(Annotator):
             ssdp_server=server,
             ip_address=ip_address,
             hostname=hostname,
+            identity_tokens=extract_identity_tokens(usn, server, location),
             timestamp=event.timestamp,
         )
 

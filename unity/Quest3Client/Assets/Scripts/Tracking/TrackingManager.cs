@@ -662,6 +662,21 @@ namespace SmartRoom.Tracking
         }
 
         [Serializable]
+        public sealed class RoomObjectSpatialRecord
+        {
+            public bool valid = false;
+            public string reason = string.Empty;
+            public float[] center_xyz_m = Array.Empty<float>();
+            public float[] min_xyz_m = Array.Empty<float>();
+            public float[] max_xyz_m = Array.Empty<float>();
+            public float[] extent_xyz_m = Array.Empty<float>();
+            public float radius_m = 0f;
+            public int point_count = 0;
+            public int image_count = 0;
+            public string source = string.Empty;
+        }
+
+        [Serializable]
         public sealed class ObjectActionResponse
         {
             public bool ok = false;
@@ -671,6 +686,7 @@ namespace SmartRoom.Tracking
             public string object_id = string.Empty;
             public string edit_session_id = string.Empty;
             public string name = string.Empty;
+            public RoomObjectSpatialRecord spatial = new RoomObjectSpatialRecord();
             public RoomObjectPointRecord[] points = Array.Empty<RoomObjectPointRecord>();
         }
     }

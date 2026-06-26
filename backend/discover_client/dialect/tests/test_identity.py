@@ -26,8 +26,12 @@ def test_extract_device_id_flatdict() -> None:
 
 
 def test_extract_device_id_barevalue() -> None:
-    """BareValue: first segment as fallback device id."""
+    """BareValue: the terminal property is removed from the entity path."""
     assert extract_device_id("barevalue", "some/topic") == "some"
+    assert (
+        extract_device_id("barevalue", "UCL/OPSEBO/206/Room/TPS/value")
+        == "UCL/OPSEBO/206/Room/TPS"
+    )
 
 
 def test_extract_device_id_unknown_dialect() -> None:
