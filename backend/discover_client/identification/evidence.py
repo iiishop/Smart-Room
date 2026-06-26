@@ -11,6 +11,7 @@ class SignalEvidence:
     source_id: str
     source_type: str
     mqtt_topic: str | None = None
+    mqtt_client_id: str | None = None
     mqtt_payload_keys: set[str] | None = None
     mqtt_payload: Any = None
     topic_prefix: str | None = None    # govee/H5179/a1b2c3d4e5f6 (trim last segment)
@@ -46,6 +47,8 @@ class SignalEvidence:
             parts.append(f"os={self.nmap_os_guess}")
         if self.mqtt_topic:
             parts.append(f"topic={self.mqtt_topic}")
+        if self.mqtt_client_id:
+            parts.append(f"client_id={self.mqtt_client_id}")
         if self.mqtt_payload_keys:
             keys = ",".join(sorted(self.mqtt_payload_keys))
             parts.append(f"keys={{{keys}}}")

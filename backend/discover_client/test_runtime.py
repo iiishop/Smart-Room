@@ -156,6 +156,80 @@ def test_runtime_exposes_tasmota_discovery_operation_without_observing_command(
     ]
 
 
+def test_runtime_exposes_homie_settable_property_operation(tmp_path: Path) -> None:
+    runtime = DiscoverRuntime(registry_path=tmp_path / "registry.json")
+    runtime.ingest_event(
+        SourceEvent(
+            source_id="mqtt-test",
+            source_type="mqtt",
+            timestamp=1.0,
+            event_type="data",
+            payload={
+                "topic": "homie/5/fan-001/$description",
+                "value": {
+                    "name": "Desk fan",
+                    "id": "fan-001",
+                    "nodes": {
+                        "control": {
+                            "properties": {
+                                "power": {
+                                    "datatype": "enum",
+                                    "format": "OFF,ON",
+                                    "settable": True,
+                                }
+                            }
+                        }
+                    },
+                },
+            },
+        )
+    )
+
+    profiles = runtime.profiles()
+
+    assert len(profiles) == 1
+    assert profiles[0]["display_name"] == "Desk fan"
+    assert profiles[0]["classification"]["method"] == "explicit MQTT discovery metadata"
+    assert profiles[0]["operations"][0]["topic"] == "homie/5/fan-001/control/power/set"
+    assert profiles[0]["operations"][0]["accepted_values"] == ["OFF", "ON"]
+
+
+def test_runtime_merges_packet_sniff_mqtt_identity_with_topic_profile(tmp_path: Path) -> None:
+    runtime = DiscoverRuntime(registry_path=tmp_path / "registry.json")
+    runtime.ingest_event(
+        SourceEvent(
+            source_id="mqtt-main",
+            source_type="mqtt",
+            timestamp=1.0,
+            event_type="data",
+            payload={"topic": "student/PiCloud/picloud-12/poe", "value": 1},
+        )
+    )
+    runtime.ingest_event(
+        SourceEvent(
+            source_id="sniff-lab",
+            source_type="packet_sniff",
+            timestamp=2.0,
+            event_type="discovery",
+            payload={
+                "kind": "mqtt_publish",
+                "client_id": "picloud-12",
+                "ip": "192.168.1.44",
+                "mac": "AA:BB:CC:DD:EE:FF",
+                "topic": "student/PiCloud/picloud-12/poe",
+            },
+        )
+    )
+
+    profiles = runtime.profiles()
+
+    assert len(profiles) == 1
+    identifiers = profiles[0]["identifiers"]
+    assert "sniff-lab|picloud-12" in identifiers["mqtt_client_id"]
+    assert profiles[0]["connections"]["ip"] == ["192.168.1.44"]
+    assert profiles[0]["connections"]["mac"] == ["AA:BB:CC:DD:EE:FF"]
+
+
 def test_runtime_keeps_tasmota_devices_separate_from_sensor_snapshots(
     tmp_path: Path,
 ) -> None:

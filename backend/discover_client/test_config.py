@@ -30,6 +30,20 @@ def test_config_save_and_load_round_trip(tmp_path: Path) -> None:
                 "service_types": ["_mqtt._tcp.local.", "_matter._tcp.local."],
             },
         ),
+        SourceConfig(
+            source_id="sniff-pcap",
+            source_type="packet_sniff",
+            enabled=True,
+            settings={
+                "pcap_path": "D:\\captures\\mqtt.pcap",
+                "live": False,
+                "interface": "",
+                "broker_ports": [1883],
+                "capture_filter": "",
+                "emit_publish_topics": True,
+                "max_packets": 0,
+            },
+        ),
     ]
 
     save_config(original, path)

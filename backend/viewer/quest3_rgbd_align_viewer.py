@@ -4603,7 +4603,12 @@ class RgbdViewer:
                     widgets[key] = (widget, variable)
                 elif isinstance(default, int):
                     variable = tk.IntVar(value=int(value))
-                    widget = ttk.Spinbox(settings_group, from_=1, to=65535, textvariable=variable)
+                    widget = ttk.Spinbox(
+                        settings_group,
+                        from_=0 if int(default) == 0 else 1,
+                        to=65535,
+                        textvariable=variable,
+                    )
                     widget.grid(row=row, column=1, sticky=tk.EW, pady=4)
                     widgets[key] = (widget, variable)
                 else:
@@ -5075,6 +5080,8 @@ class RgbdViewer:
             "",
             "Physical entity:",
             *[f"  {value}" for value in identifiers.get("mqtt_entity_prefix") or []],
+            "MQTT client ids:",
+            *[f"  {value}" for value in identifiers.get("mqtt_client_id") or []],
             "Channels: " + (", ".join(identifiers.get("mqtt_channel") or []) or "-"),
             "Observed topic prefixes:",
             *[f"  {value}" for value in identifiers.get("mqtt_topic_prefix") or []],

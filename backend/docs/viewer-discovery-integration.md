@@ -44,8 +44,13 @@ MQTT identity is resolved in this order:
 
 Operations are exposed only when there is a publishable command topic:
 
-- Home Assistant MQTT discovery supplies `command_topic`.
+- Home Assistant MQTT discovery supplies `command_topic` or `cmd_t`. The
+  parser expands `~` base-topic shorthand and device-based `components`/`cmps`
+  configs into concrete state and command topics.
 - Zigbee2MQTT supplies writable `exposes` entries and the device `/set` topic.
+  Only properties with `access & 2` contribute command values.
+- Homie 5 supplies a retained `homie/5/<device-id>/$description`; properties
+  with `settable: true` become `<property-topic>/set` operations.
 - Tasmota discovery supplies `FullTopic`, Topic, prefix order, relay layout, and
   accepted power states. These are expanded into the exact `POWER` command
   topic.
@@ -53,6 +58,11 @@ Operations are exposed only when there is a publishable command topic:
   tracked directly.
 - A telemetry value such as `POWER=ON` is not by itself considered an
   operation because it does not identify a safe publish destination.
+
+MQTT 5 request/response properties and packet-level traffic fingerprints are
+not promoted to confirmed operations in the current application pipeline. They
+can indicate that a control exchange happened, but they do not always provide a
+stable, safe publish destination for the Viewer operation UI.
 
 Legacy Tasmota `/sensors` discovery snapshots are consumed as metadata rather
 than devices. Earlier registries that treated the `sn` sensor-snapshot key as a
@@ -95,6 +105,12 @@ took approximately 250 ms. The previous implementation would have attempted
 - MQTT remains the primary source. Prefer explicit device metadata from Home
   Assistant discovery, Zigbee2MQTT, Homie, or Sparkplug when the publisher can
   provide it.
+- Packet sniffing is an optional identity source. A `packet_sniff` source can
+  import pcap/pcapng captures or run a live Scapy/Npcap capture for ARP plus
+  MQTT TCP port 1883. It extracts `MQTT CONNECT` client IDs, client IPs,
+  ARP-derived MAC addresses, and client-to-broker `PUBLISH` topic prefixes.
+  This evidence is used for identity binding only; it is not treated as
+  data/operation evidence.
 - mDNS and SSDP add hostname, service, USN, and description identities for
   local IP devices.
 - Nmap contributes MAC/OUI, hostnames, and network reachability.
@@ -104,6 +120,48 @@ took approximately 250 ms. The previous implementation would have attempted
 - Traffic-fingerprint ML is useful as a candidate/type signal, not as an
   automatic persistent identity. It should remain below explicit identifiers
   and require user confirmation for ambiguous pairings.
+
+### Packet Sniff Source
+
+Offline pcap import needs no extra Python dependencies. Capture on the broker
+host or a switch mirror port, then add this source in Discovery Settings:
+
+```toml
+[[sources]]
+source_id = "sniff-lab-pcap"
+source_type = "packet_sniff"
+enabled = true
+
+[sources.settings]
+pcap_path = "D:\\captures\\mqtt.pcap"
+live = false
+interface = ""
+broker_ports = [1883]
+capture_filter = ""
+emit_publish_topics = true
+max_packets = 0
+```
+
+Live capture is optional and requires Scapy plus Npcap/libpcap privileges:
+
+```toml
+[[sources]]
+source_id = "sniff-lab-live"
+source_type = "packet_sniff"
+enabled = true
+
+[sources.settings]
+pcap_path = ""
+live = true
+interface = "Wi-Fi"
+broker_ports = [1883]
+capture_filter = ""
+emit_publish_topics = true
+max_packets = 0
+```
+
+The default live BPF filter is `arp or (tcp port 1883)`. TLS MQTT on 8883 is
+not decoded because the MQTT CONNECT/PUBLISH payload is encrypted.
 
 ## Pairing Flow
 

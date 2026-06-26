@@ -138,6 +138,7 @@ def _merge_device(target: Device, source: Device) -> None:
     target.payload_keys.update(source.payload_keys)
     target.topic_prefixes.update(source.topic_prefixes)
     target.mqtt_identities.update(source.mqtt_identities)
+    target.mqtt_client_ids.update(source.mqtt_client_ids)
     target.source_ids.update(source.source_ids)
     target.identity_tokens.update(source.identity_tokens)
     for reason in source.identity_reasons:

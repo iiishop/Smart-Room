@@ -36,6 +36,89 @@ def test_home_assistant_discovery_groups_state_topics_by_device_identifier() -> 
     assert "temperature" in device.metadata_capabilities
 
 
+def test_home_assistant_discovery_expands_base_topic_and_component_commands() -> None:
+    index = MqttMetadataIndex()
+    payload = {
+        "~": "lab/light-1",
+        "dev": {
+            "ids": ["light-1"],
+            "name": "Lab light",
+            "mf": "Acme",
+            "mdl": "Dimmer",
+        },
+        "cmps": {
+            "switch": {
+                "p": "switch",
+                "uniq_id": "light-1-switch",
+                "stat_t": "~/state",
+                "cmd_t": "~/set",
+                "pl_on": "ON",
+                "pl_off": "OFF",
+            },
+            "brightness": {
+                "p": "number",
+                "uniq_id": "light-1-brightness",
+                "state_topic": "~/brightness/state",
+                "command_topic": "~/brightness/set",
+            },
+        },
+    }
+
+    assert index.ingest("mqtt-main", "homeassistant/device/light_1/config", payload)
+    metadata = index.lookup("mqtt-main", "lab/light-1/brightness/state")
+
+    assert metadata is not None
+    assert metadata.identity == "light-1"
+    assert metadata.name == "Lab light"
+    assert metadata.command_topics == {
+        "lab/light-1/set",
+        "lab/light-1/brightness/set",
+    }
+    assert metadata.command_values["lab/light-1/set"] == {"ON", "OFF"}
+    assert metadata.command_values["lab/light-1/brightness/set"] == set()
+
+
+def test_homie_v5_description_exposes_settable_properties_as_operations() -> None:
+    index = MqttMetadataIndex()
+    payload = {
+        "name": "Desk fan",
+        "id": "fan-001",
+        "manufacturer": "Lab",
+        "model": "FanCtl",
+        "nodes": {
+            "control": {
+                "properties": {
+                    "power": {
+                        "name": "Power",
+                        "datatype": "enum",
+                        "format": "OFF,ON,AUTO",
+                        "settable": True,
+                    },
+                    "rpm": {
+                        "name": "RPM",
+                        "datatype": "integer",
+                        "settable": False,
+                    },
+                }
+            }
+        },
+    }
+
+    assert index.ingest("mqtt-main", "homie/5/fan-001/$description", payload)
+    metadata = index.lookup("mqtt-main", "homie/5/fan-001/control/power")
+
+    assert metadata is not None
+    assert metadata.identity == "fan-001"
+    assert metadata.name == "Desk fan"
+    assert metadata.command_topics == {"homie/5/fan-001/control/power/set"}
+    assert metadata.command_values["homie/5/fan-001/control/power/set"] == {
+        "OFF",
+        "ON",
+        "AUTO",
+    }
+    assert index.lookup("mqtt-main", "homie/5/fan-001/control/rpm") is metadata
+
+
 def test_zigbee2mqtt_bridge_metadata_exposes_identity_and_writable_operation() -> None:
     index = MqttMetadataIndex()
     payload = [
@@ -70,6 +153,43 @@ def test_zigbee2mqtt_bridge_metadata_exposes_identity_and_writable_operation() -
     assert metadata.identity == "0x00158d0001abcdef"
     assert metadata.command_topics == {"zigbee2mqtt/office_lamp/set"}
     assert metadata.command_values["zigbee2mqtt/office_lamp/set"] == {"ON", "OFF"}
+
+
+def test_zigbee2mqtt_bridge_metadata_uses_only_writable_expose_values() -> None:
+    index = MqttMetadataIndex()
+    payload = [
+        {
+            "type": "EndDevice",
+            "ieee_address": "0x00158d0001fedcba",
+            "friendly_name": "contact_sensor",
+            "definition": {
+                "vendor": "Acme",
+                "model": "Contact1",
+                "exposes": [
+                    {
+                        "property": "contact",
+                        "access": 1,
+                        "values": ["OPEN", "CLOSED"],
+                    },
+                    {
+                        "property": "mode",
+                        "access": 7,
+                        "values": ["normal", "test"],
+                    },
+                ],
+            },
+        }
+    ]
+
+    assert index.ingest("mqtt-main", "zigbee2mqtt/bridge/devices", payload)
+    metadata = index.lookup("mqtt-main", "zigbee2mqtt/contact_sensor")
+
+    assert metadata is not None
+    assert metadata.command_topics == {"zigbee2mqtt/contact_sensor/set"}
+    assert metadata.command_values["zigbee2mqtt/contact_sensor/set"] == {
+        "normal",
+        "test",
+    }
 
 
 def test_bridge_metadata_does_not_create_a_data_device() -> None:

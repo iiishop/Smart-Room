@@ -41,6 +41,13 @@ class Deduplicator:
         if evidence.identity_tokens and device.identity_tokens.intersection(evidence.identity_tokens):
             shared = sorted(device.identity_tokens.intersection(evidence.identity_tokens))
             return 88, "shared high-specificity identifier " + ", ".join(shared[:3])
+        mqtt_client_identity = (
+            f"{evidence.source_id}|{evidence.mqtt_client_id.strip()}"
+            if evidence.mqtt_client_id and evidence.mqtt_client_id.strip()
+            else ""
+        )
+        if mqtt_client_identity and mqtt_client_identity in device.mqtt_client_ids:
+            return 75, "same source-scoped MQTT client id"
         if self._mac_prefix_hostname_ip_match(device, evidence):
             return 95, "hostname embeds the observed MAC prefix on the same IP"
         if evidence.ip_address and evidence.mdns_service_type:
@@ -54,6 +61,12 @@ class Deduplicator:
         )
         if mqtt_identity and mqtt_identity in device.mqtt_identities:
             return 60, "same source-scoped MQTT entity identity"
+        if (
+            evidence.source_type == "packet_sniff"
+            and evidence.topic_prefix
+            and evidence.topic_prefix in device.topic_prefixes
+        ):
+            return 58, "same observed MQTT topic prefix"
         if evidence.ip_address and evidence.ip_address in device.ip_addresses:
             return 50, "same currently observed IP address"
         if self._hostname_prefix_subnet_match(device, evidence):
@@ -83,6 +96,8 @@ class Deduplicator:
             device.ssdp_usns.add(evidence.ssdp_usn.strip())
         if evidence.mqtt_payload_keys:
             device.payload_keys.update(evidence.mqtt_payload_keys)
+        if evidence.mqtt_client_id and evidence.mqtt_client_id.strip():
+            device.mqtt_client_ids.add(f"{evidence.source_id}|{evidence.mqtt_client_id.strip()}")
         if evidence.topic_prefix:
             device.topic_prefixes.add(evidence.topic_prefix)
             if evidence.source_type == "mqtt":

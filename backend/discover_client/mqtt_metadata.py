@@ -55,6 +55,11 @@ class MqttMetadataIndex:
                 self._store(_home_assistant_metadata(source_id, topic, payload))
             return True
 
+        if _is_homie_v5_description(topic):
+            if isinstance(payload, dict) and payload:
+                self._store(_homie_v5_metadata(source_id, topic, payload))
+            return True
+
         if topic.casefold().endswith("/bridge/devices") and isinstance(payload, list):
             for metadata in _zigbee2mqtt_metadata(source_id, topic, payload):
                 self._store(metadata)
@@ -138,6 +143,16 @@ def _is_home_assistant_config(topic: str) -> bool:
     return len(parts) >= 4 and parts[0].casefold() == "homeassistant" and parts[-1].casefold() == "config"
 
 
+def _is_homie_v5_description(topic: str) -> bool:
+    parts = [part for part in topic.split("/") if part]
+    return (
+        len(parts) == 4
+        and parts[0].casefold() == "homie"
+        and parts[1] == "5"
+        and parts[3].casefold() == "$description"
+    )
+
+
 def _is_tasmota_discovery_config(topic: str) -> bool:
     parts = [part for part in topic.split("/") if part]
     return (
@@ -167,6 +182,9 @@ def _home_assistant_metadata(
     component = parts[1] if len(parts) > 1 else ""
     object_id = "/".join(parts[2:-1])
     device = _first_dict(payload, "device", "dev")
+    base_topic = str(_first_value(payload, "~") or "").strip()
+    component_payloads = _home_assistant_component_payloads(payload)
+    config_payloads = [payload, *(component_payload for _, component_payload in component_payloads)]
     identifiers = set(_string_values(_first_value(device, "identifiers", "ids")))
     for connection in _first_value(device, "connections", "cns") or []:
         if isinstance(connection, (list, tuple)) and len(connection) >= 2:
@@ -175,36 +193,44 @@ def _home_assistant_metadata(
     unique_id = str(_first_value(payload, "unique_id", "uniq_id") or "").strip()
     if unique_id:
         identifiers.add(unique_id)
+    for _, component_payload in component_payloads:
+        identifiers.update(
+            _string_values(_first_value(component_payload, "unique_id", "uniq_id"))
+        )
     identity = next(iter(sorted(identifiers)), "") or object_id or topic
-    state_topics = set(
-        _string_values(
-            [
-                _first_value(payload, "state_topic", "stat_t"),
-                _first_value(payload, "json_attributes_topic", "json_attr_t"),
-            ]
+    state_topics: set[str] = set()
+    command_topics: set[str] = set()
+    command_values: dict[str, set[str]] = {}
+    root_command_values = _home_assistant_command_values(payload)
+    for index, config_payload in enumerate(config_payloads):
+        state_topics.update(
+            _mqtt_topic_config_values(config_payload, base_topic, command=False)
         )
-    )
-    command_topics = set(
-        _string_values([_first_value(payload, "command_topic", "cmd_t")])
-    )
-    command_values = {
-        command_topic: set(
-            _string_values(
-                [
-                    _first_value(payload, "payload_on", "pl_on"),
-                    _first_value(payload, "payload_off", "pl_off"),
-                    _first_value(payload, "payload_open", "pl_open"),
-                    _first_value(payload, "payload_close", "pl_cls"),
-                ]
-            )
+        config_command_topics = _mqtt_topic_config_values(
+            config_payload,
+            base_topic,
+            command=True,
         )
-        for command_topic in command_topics
-    }
+        command_topics.update(config_command_topics)
+        values = _home_assistant_command_values(config_payload)
+        if index > 0 and not values:
+            values = root_command_values
+        for command_topic in config_command_topics:
+            command_values.setdefault(command_topic, set()).update(values)
     capability_values = [
         component,
         _first_value(payload, "device_class", "dev_cla"),
         _first_value(payload, "name"),
     ]
+    for component_id, component_payload in component_payloads:
+        capability_values.extend(
+            [
+                component_id,
+                _first_value(component_payload, "platform", "p"),
+                _first_value(component_payload, "device_class", "dev_cla"),
+                _first_value(component_payload, "name"),
+            ]
+        )
     return MqttDeviceMetadata(
         source_id=source_id,
         identity=identity,
@@ -219,6 +245,59 @@ def _home_assistant_metadata(
         state_topics=state_topics,
         command_topics=command_topics,
         command_values=command_values,
+    )
+
+
+def _homie_v5_metadata(
+    source_id: str,
+    topic: str,
+    payload: dict[str, Any],
+) -> MqttDeviceMetadata:
+    parts = [part for part in topic.split("/") if part]
+    device_id = parts[2] if len(parts) >= 3 else topic
+    base = f"homie/5/{device_id}"
+    nodes = payload.get("nodes")
+    if not isinstance(nodes, dict):
+        nodes = {}
+
+    state_topics = {_join_topic(base, "$state"), _join_topic(base, "$description")}
+    command_topics: set[str] = set()
+    command_values: dict[str, set[str]] = {}
+    capabilities: set[str] = set()
+    for node_id, node_payload in nodes.items():
+        if not isinstance(node_payload, dict):
+            continue
+        properties = node_payload.get("properties")
+        if not isinstance(properties, dict):
+            continue
+        for property_id, property_payload in properties.items():
+            if not isinstance(property_payload, dict):
+                continue
+            property_topic = _join_topic(base, _join_topic(str(node_id), str(property_id)))
+            state_topics.add(property_topic)
+            property_name = str(property_payload.get("name") or property_id).strip()
+            data_type = str(property_payload.get("datatype") or "").strip()
+            capabilities.update(value for value in (property_name, data_type) if value)
+            if _truthy(property_payload.get("settable")):
+                command_topic = _join_topic(property_topic, "set")
+                command_topics.add(command_topic)
+                command_values[command_topic] = _homie_accepted_values(property_payload)
+
+    return MqttDeviceMetadata(
+        source_id=source_id,
+        identity=str(payload.get("id") or device_id).strip() or device_id,
+        topic_prefix=base,
+        convention="Homie 5 MQTT description",
+        name=str(payload.get("name") or device_id).strip(),
+        manufacturer=str(payload.get("manufacturer") or "").strip(),
+        model=str(payload.get("model") or "").strip(),
+        description=str(payload.get("description") or "").strip(),
+        identifiers={value for value in (device_id, str(payload.get("id") or "").strip()) if value},
+        capabilities=capabilities,
+        state_topics=state_topics,
+        command_topics=command_topics,
+        command_values=command_values,
+        match_prefixes={base},
     )
 
 
@@ -344,11 +423,14 @@ def _zigbee_exposes(value: Any) -> tuple[set[str], bool, set[str]]:
         property_name = str(node.get("property") or node.get("name") or "").strip()
         if property_name:
             capabilities.add(property_name)
+        is_writable = False
         try:
-            writable = writable or bool(int(node.get("access") or 0) & 2)
+            is_writable = bool(int(node.get("access") or 0) & 2)
         except (TypeError, ValueError):
             pass
-        accepted_values.update(_string_values(node.get("values")))
+        writable = writable or is_writable
+        if is_writable:
+            accepted_values.update(_zigbee_writable_values(node))
         visit(node.get("features"))
 
     visit(value)
@@ -378,6 +460,115 @@ def _first_value(payload: dict[str, Any], *keys: str) -> Any:
         if key in payload:
             return payload[key]
     return None
+
+
+def _home_assistant_component_payloads(
+    payload: dict[str, Any],
+) -> list[tuple[str, dict[str, Any]]]:
+    components = _first_value(payload, "components", "cmps")
+    if not isinstance(components, dict):
+        return []
+    result: list[tuple[str, dict[str, Any]]] = []
+    for component_id, component_payload in components.items():
+        if isinstance(component_payload, dict):
+            result.append((str(component_id), component_payload))
+    return result
+
+
+def _mqtt_topic_config_values(
+    payload: dict[str, Any],
+    base_topic: str,
+    *,
+    command: bool,
+) -> set[str]:
+    topics: set[str] = set()
+    for key, value in payload.items():
+        normalized = str(key or "").casefold()
+        if normalized in {"device", "dev", "components", "cmps"}:
+            continue
+        is_command_key = (
+            normalized in {"command_topic", "cmd_t"}
+            or normalized.endswith("_command_topic")
+            or normalized.endswith("_cmd_t")
+        )
+        is_topic_key = (
+            "topic" in normalized
+            or normalized.endswith("_t")
+        )
+        if command != is_command_key or not is_topic_key:
+            continue
+        for candidate in _string_values(value):
+            expanded = _expand_base_topic(candidate, base_topic)
+            if _looks_like_mqtt_topic(expanded):
+                topics.add(expanded)
+    return topics
+
+
+def _home_assistant_command_values(payload: dict[str, Any]) -> set[str]:
+    keys = {
+        "payload_on",
+        "pl_on",
+        "payload_off",
+        "pl_off",
+        "payload_open",
+        "pl_open",
+        "payload_close",
+        "pl_cls",
+        "payload_stop",
+        "pl_stop",
+    }
+    result: set[str] = set()
+    for key, value in payload.items():
+        if str(key or "").casefold() in keys:
+            result.update(_string_values(value))
+    return result
+
+
+def _expand_base_topic(value: str, base_topic: str) -> str:
+    text = str(value or "").strip().strip("/")
+    base = str(base_topic or "").strip().strip("/")
+    if not text:
+        return ""
+    if "~" not in text:
+        return text
+    if not base:
+        return ""
+    return "/".join(base if part == "~" else part for part in text.split("/"))
+
+
+def _looks_like_mqtt_topic(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text or text.startswith("$"):
+        return False
+    return any(separator in text for separator in ("/", "~")) or text.isidentifier()
+
+
+def _homie_accepted_values(property_payload: dict[str, Any]) -> set[str]:
+    data_type = str(property_payload.get("datatype") or "").casefold()
+    raw_format = str(property_payload.get("format") or "").strip()
+    if data_type in {"boolean", "bool"}:
+        return {"false", "true"}
+    if data_type == "enum" and raw_format:
+        return {part.strip() for part in raw_format.split(",") if part.strip()}
+    return set()
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().casefold() in {"1", "true", "yes", "on"}
+    return False
+
+
+def _zigbee_writable_values(node: dict[str, Any]) -> set[str]:
+    values = set(_string_values(node.get("values")))
+    values.update(_string_values(node.get("value_on")))
+    values.update(_string_values(node.get("value_off")))
+    values.update(_string_values(node.get("value_toggle")))
+    return values
 
 
 def _string_values(value: Any) -> list[str]:

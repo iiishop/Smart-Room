@@ -30,6 +30,7 @@ class Device:
     payload_keys: set[str] = field(default_factory=set)
     topic_prefixes: set[str] = field(default_factory=set)
     mqtt_identities: set[str] = field(default_factory=set)
+    mqtt_client_ids: set[str] = field(default_factory=set)
     mqtt_entity_prefixes: set[str] = field(default_factory=set)
     mqtt_entity_identities: set[str] = field(default_factory=set)
     mqtt_channels: set[str] = field(default_factory=set)

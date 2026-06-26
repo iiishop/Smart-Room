@@ -131,6 +131,7 @@ def build_device_profile(
         identifiers={
             "mqtt_topic_prefix": sorted(device.topic_prefixes),
             "mqtt_identity": sorted(device.mqtt_identities),
+            "mqtt_client_id": sorted(device.mqtt_client_ids),
             "mqtt_entity_prefix": entity_prefixes,
             "mqtt_entity_identity": sorted(device.mqtt_entity_identities),
             "mqtt_channel": sorted(device.mqtt_channels),
@@ -186,6 +187,11 @@ def identity_aliases(device: Device) -> list[tuple[str, str]]:
     aliases.extend(
         ("mqtt_identity", value.strip().lower())
         for value in sorted(device.mqtt_identities)
+        if value.strip()
+    )
+    aliases.extend(
+        ("mqtt_client_id", value.strip().lower())
+        for value in sorted(device.mqtt_client_ids)
         if value.strip()
     )
     aliases.extend(

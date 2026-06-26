@@ -77,6 +77,18 @@ SCHEMAS: dict[str, SourceTypeSchema] = {
             "scan_flags": "-sn -PR",
         },
     ),
+    "packet_sniff": SourceTypeSchema(
+        required=[],
+        defaults={
+            "pcap_path": "",
+            "live": False,
+            "interface": "",
+            "broker_ports": [1883],
+            "capture_filter": "",
+            "emit_publish_topics": True,
+            "max_packets": 0,
+        },
+    ),
 }
 
 

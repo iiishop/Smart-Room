@@ -97,6 +97,7 @@ class SourcePalette(QScrollArea):
             ("mdns", "mDNS Scanner", "Discover mDNS/Bonjour services on the local network."),
             ("ssdp", "SSDP Scanner", "Discover UPnP devices via SSDP multicast."),
             ("nmap", "Nmap Scanner", "Periodic network scan for hosts, MACs, and OS detection."),
+            ("packet_sniff", "Packet Sniff", "Passively map MQTT client IDs to IP/MAC/topic evidence."),
         ]
         for stype, label, desc in items:
             card = PaletteCard(stype, label, desc)
