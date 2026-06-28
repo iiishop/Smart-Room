@@ -476,10 +476,13 @@ namespace SmartRoom.UI
             TextMeshProUGUI nameText = CreateText(rowRect, "Name", record.name, 22f, selected ? FontStyles.Bold : FontStyles.Normal, TextAlignmentOptions.Left);
             SetTopLeft(nameText.rectTransform, 124f, 11f, 470f, 30f);
 
+            string bindingLabel = record.network_binding != null && !string.IsNullOrWhiteSpace(record.network_binding.canonical_device_id)
+                ? " | bound: " + ShortText(record.network_binding.display_name, 32)
+                : "";
             TextMeshProUGUI subText = CreateText(
                 rowRect,
                 "Sub",
-                $"{record.image_count} image(s), +{record.positive_point_count}/-{record.negative_point_count}",
+                $"{record.image_count} image(s), +{record.positive_point_count}/-{record.negative_point_count}{bindingLabel}",
                 16f,
                 FontStyles.Normal,
                 TextAlignmentOptions.Left);
@@ -790,6 +793,7 @@ namespace SmartRoom.UI
             public int positive_point_count = 0;
             public int negative_point_count = 0;
             public long thumbnail_version = 0;
+            public TrackingManager.NetworkBindingRecord network_binding = new TrackingManager.NetworkBindingRecord();
         }
     }
 }

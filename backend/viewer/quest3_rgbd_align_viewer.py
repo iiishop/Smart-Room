@@ -6,6 +6,7 @@ import http.server
 import json
 import math
 import io
+import os
 import queue
 import re
 import shutil
@@ -16,6 +17,7 @@ import time
 import urllib.parse
 import urllib.error
 import urllib.request
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -65,6 +67,11 @@ from rgb_edge_depth_refine import EdgeDepthRefineConfig, refine_depth_anchors
 
 DEFAULT_DATA_DIR = Path("E:/test/rgbd-v10/rgbd_test")
 DEFAULT_ANY2FULL_ROOT = Path("D:/FromGithub/Any2Full")
+DEFAULT_ROOM_STORE_ROOT = BACKEND_ROOT / "viewer_room_store"
+DEFAULT_ANY2FULL_CACHE_ROOT = BACKEND_ROOT / "viewer_any2full_cache"
+DEFAULT_SEGMENT_CACHE_ROOT = BACKEND_ROOT / "viewer_device_segments"
+_ATOMIC_WRITE_LOCKS: dict[str, threading.RLock] = {}
+_ATOMIC_WRITE_LOCKS_GUARD = threading.Lock()
 
 
 @dataclass
@@ -88,6 +95,43 @@ class FrameData:
     projected_depth_count: int
     any2full_depth_count: int
     alignment_mode: str
+
+
+def _atomic_write_json(path: Path, payload: object) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_key = str(path.resolve()).casefold()
+    with _ATOMIC_WRITE_LOCKS_GUARD:
+        lock = _ATOMIC_WRITE_LOCKS.setdefault(lock_key, threading.RLock())
+
+    body = json.dumps(payload, indent=2, ensure_ascii=False)
+    last_error: PermissionError | None = None
+    with lock:
+        for attempt in range(7):
+            tmp = path.with_name(
+                f".{path.name}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}.tmp"
+            )
+            try:
+                with tmp.open("w", encoding="utf-8", newline="\n") as handle:
+                    handle.write(body)
+                os.replace(tmp, path)
+                return
+            except PermissionError as exc:
+                last_error = exc
+                try:
+                    tmp.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                time.sleep(0.025 * (2**attempt))
+            except Exception:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                raise
+
+    assert last_error is not None
+    raise last_error
 
 
 def parse_args() -> argparse.Namespace:
@@ -154,7 +198,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--any2full-cache-dir",
         type=Path,
-        default=Path("viewer_any2full_cache"),
+        default=DEFAULT_ANY2FULL_CACHE_ROOT,
         help="Directory for per-trigger Any2Full RGB/depth inputs and dense outputs.",
     )
     parser.add_argument(
@@ -201,11 +245,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sam2-checkpoint", type=Path, default=None)
     parser.add_argument("--sam2-config", default=None)
     parser.add_argument("--sam2-device", default="cuda")
-    parser.add_argument("--segment-cache-dir", type=Path, default=Path("viewer_device_segments"))
+    parser.add_argument("--segment-cache-dir", type=Path, default=DEFAULT_SEGMENT_CACHE_ROOT)
     parser.add_argument(
         "--room-store-dir",
         type=Path,
-        default=Path("viewer_room_store"),
+        default=DEFAULT_ROOM_STORE_ROOT,
         help="Room/device/object capture store used by Quest point prompts.",
     )
     parser.add_argument(
@@ -223,7 +267,7 @@ def parse_args() -> argparse.Namespace:
         "--pairing-max-candidates",
         type=int,
         default=50,
-        help="Maximum network devices evaluated in one semantic pairing request.",
+        help="Maximum shortlisted network devices reviewed by the LLM and retained in the saved pairing result.",
     )
     parser.add_argument("--vlm-timeout-seconds", type=float, default=120.0)
     parser.add_argument("--point-debounce-ms", type=int, default=250)
@@ -1446,23 +1490,43 @@ def _room_context(cursor: dict) -> dict:
 
 def _room_store_root(args: argparse.Namespace) -> Path:
     root = args.room_store_dir
-    return root if root.is_absolute() else Path.cwd() / root
+    return (root if root.is_absolute() else Path.cwd() / root).resolve()
 
 
 def _vlm_config_path(args: argparse.Namespace) -> Path:
     return _room_store_root(args) / "vlm_config.json"
 
 
+def _legacy_vlm_config_paths(args: argparse.Namespace) -> list[Path]:
+    if _room_store_root(args) != DEFAULT_ROOM_STORE_ROOT.resolve():
+        return []
+    return [
+        Path(__file__).resolve().parent / "viewer_room_store" / "vlm_config.json",
+    ]
+
+
 def _load_vlm_config(args: argparse.Namespace) -> dict:
     path = _vlm_config_path(args)
     if not path.exists():
-        return {
-            "base_url": "",
-            "token": "",
-            "model": "",
-            "tested_at_ms": 0,
-            "saved_at_ms": 0,
-        }
+        for legacy_path in _legacy_vlm_config_paths(args):
+            if not legacy_path.exists() or legacy_path.resolve() == path.resolve():
+                continue
+            try:
+                legacy_config = json.loads(legacy_path.read_text(encoding="utf-8"))
+                if isinstance(legacy_config, dict):
+                    _atomic_write_json(path, legacy_config)
+                    print(f"[vlm] migrated config from {legacy_path} to {path}", flush=True)
+                    break
+            except Exception as exc:
+                print(f"[vlm] failed to migrate config from {legacy_path}: {exc}", flush=True)
+        if not path.exists():
+            return {
+                "base_url": "",
+                "token": "",
+                "model": "",
+                "tested_at_ms": 0,
+                "saved_at_ms": 0,
+            }
     try:
         config = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
@@ -1479,7 +1543,6 @@ def _load_vlm_config(args: argparse.Namespace) -> dict:
 
 def _save_vlm_config(args: argparse.Namespace, config: dict) -> None:
     path = _vlm_config_path(args)
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "base_url": str(config.get("base_url") or "").strip(),
         "token": str(config.get("token") or "").strip(),
@@ -1487,9 +1550,7 @@ def _save_vlm_config(args: argparse.Namespace, config: dict) -> None:
         "tested_at_ms": int(config.get("tested_at_ms") or 0),
         "saved_at_ms": _now_ms(),
     }
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-    tmp.replace(path)
+    _atomic_write_json(path, payload)
 
 
 def _vlm_api_url(base_url: str, suffix: str) -> str:
@@ -1600,11 +1661,7 @@ def _load_point_store(args: argparse.Namespace, cursor: dict) -> tuple[dict, Pat
 
 
 def _save_point_store(device_dir: Path, store: dict) -> None:
-    device_dir.mkdir(parents=True, exist_ok=True)
-    path = device_dir / "points.json"
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(store, indent=2, ensure_ascii=False), encoding="utf-8")
-    tmp.replace(path)
+    _atomic_write_json(device_dir / "points.json", store)
 
 
 def _resolve_store_path(device_dir: Path, value: object) -> Path:
@@ -2456,21 +2513,120 @@ def _completed_object_records(store: dict) -> list[dict]:
                 "thumbnail_version": int(record.get("thumbnail_version") or record.get("updated_at_ms") or 0),
                 "pairing_status": str(record.get("pairing_status") or "not_started"),
                 "network_binding": record.get("network_binding"),
+                "spatial": record.get("spatial") or _empty_object_spatial_summary("missing"),
             }
         )
     records.sort(key=lambda record: int(record.get("completed_at_ms") or 0), reverse=True)
     return records
 
 
-def _pairing_record_payload(record: dict) -> dict:
+def _compact_network_profile(profile: dict) -> dict:
+    identifiers = profile.get("identifiers") if isinstance(profile.get("identifiers"), dict) else {}
+    connections = profile.get("connections") if isinstance(profile.get("connections"), dict) else {}
+    data = profile.get("data") if isinstance(profile.get("data"), dict) else {}
+    operations = profile.get("operations") if isinstance(profile.get("operations"), list) else []
+
+    def flatten(mapping: dict, limit: int = 6) -> list[str]:
+        values: list[str] = []
+        for key in sorted(mapping):
+            raw = mapping.get(key)
+            if isinstance(raw, list):
+                for item in raw:
+                    text = str(item or "").strip()
+                    if text:
+                        values.append(text)
+            else:
+                text = str(raw or "").strip()
+                if text:
+                    values.append(text)
+            if len(values) >= limit:
+                break
+        return values[:limit]
+
+    data_preview = []
+    for key, value in list(sorted(data.items()))[:6]:
+        if isinstance(value, dict):
+            rendered_value = value.get("value")
+            unit = str(value.get("unit") or "")
+        else:
+            rendered_value = value
+            unit = ""
+        data_preview.append(
+            {
+                "key": str(key),
+                "value": str(rendered_value),
+                "unit": unit,
+            }
+        )
+
+    operation_preview = []
+    for operation in operations[:6]:
+        if not isinstance(operation, dict):
+            continue
+        operation_preview.append(
+            {
+                "topic": str(operation.get("topic") or operation.get("command_topic") or ""),
+                "action": str(operation.get("action") or operation.get("property") or ""),
+            }
+        )
+
+    addresses = flatten(connections, limit=8)
+    identity_values = flatten(identifiers, limit=8)
     return {
+        "canonical_device_id": str(profile.get("canonical_device_id") or ""),
+        "display_name": str(profile.get("display_name") or ""),
+        "summary": str(profile.get("summary") or ""),
+        "vendor": str(profile.get("vendor") or ""),
+        "model_candidates": profile.get("model_candidates") or [],
+        "device_type": str(profile.get("device_type") or ""),
+        "capabilities": profile.get("capabilities") or [],
+        "protocols": profile.get("protocols") or [],
+        "online": bool(profile.get("online", False)),
+        "last_seen": float(profile.get("last_seen") or 0.0),
+        "data_count": len(data),
+        "operation_count": len(operations),
+        "data_preview": data_preview,
+        "operation_preview": operation_preview,
+        "address_summary": " / ".join(addresses),
+        "identifier_summary": " / ".join(identity_values),
+    }
+
+
+def _pairing_candidate_payloads(record: dict, limit: int | None = None, compact_profile: bool = False) -> list[dict]:
+    candidates = record.get("pairing_candidates") or []
+    if not isinstance(candidates, list):
+        return []
+    if limit is not None:
+        candidates = candidates[: max(0, int(limit))]
+    if not compact_profile:
+        return candidates
+    payloads: list[dict] = []
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        item = dict(candidate)
+        profile = item.get("profile")
+        if isinstance(profile, dict):
+            item["profile"] = _compact_network_profile(profile)
+        payloads.append(item)
+    return payloads
+
+
+def _pairing_record_payload(record: dict, candidate_limit: int | None = None, compact_profile: bool = False) -> dict:
+    return {
+        "object_name": str(record.get("name") or record.get("object_id") or ""),
+        "vlm_status": str(record.get("vlm_status") or "not_started"),
+        "vlm_error": str(record.get("vlm_error") or ""),
         "pairing_status": str(record.get("pairing_status") or "not_started"),
         "pairing_error": str(record.get("pairing_error") or ""),
+        "pairing_warning": str(record.get("pairing_warning") or ""),
         "visual_profile": record.get("pairing_visual_profile") or _object_visual_profile(record),
-        "candidates": record.get("pairing_candidates") or [],
+        "candidates": _pairing_candidate_payloads(record, candidate_limit, compact_profile),
         "binding": record.get("network_binding"),
         "started_at_ms": int(record.get("pairing_started_at_ms") or 0),
         "completed_at_ms": int(record.get("pairing_completed_at_ms") or 0),
+        "evaluated_candidate_count": int(record.get("pairing_evaluated_candidate_count") or 0),
+        "llm_candidate_count": int(record.get("pairing_llm_candidate_count") or 0),
     }
 
 
@@ -2481,35 +2637,38 @@ def _find_binding_conflict(
     current_device_dir: Path,
     current_object_id: str,
 ) -> dict | None:
-    room_dir = _room_store_root(args) / _safe_path_component(room_id, "room_default")
-    if not room_dir.exists():
+    store_root = _room_store_root(args)
+    if not store_root.exists():
         return None
-    for device_dir in room_dir.iterdir():
-        if not device_dir.is_dir():
+    for room_dir in store_root.iterdir():
+        if not room_dir.is_dir():
             continue
-        points_path = device_dir / "points.json"
-        if not points_path.exists():
-            continue
-        try:
-            store = json.loads(points_path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        for record in _object_records(store):
-            object_id = str(record.get("object_id") or "")
-            if device_dir.resolve() == current_device_dir.resolve() and object_id == current_object_id:
+        for device_dir in room_dir.iterdir():
+            if not device_dir.is_dir():
                 continue
-            binding = record.get("network_binding")
-            if not isinstance(binding, dict):
+            points_path = device_dir / "points.json"
+            if not points_path.exists():
                 continue
-            if str(binding.get("canonical_device_id") or "") != canonical_device_id:
+            try:
+                store = json.loads(points_path.read_text(encoding="utf-8"))
+            except Exception:
                 continue
-            return {
-                "room_id": str(store.get("room_id") or room_id),
-                "quest_device_id": str(store.get("device_id") or device_dir.name),
-                "object_id": object_id,
-                "object_name": str(record.get("name") or object_id),
-                "binding": binding,
-            }
+            for record in _object_records(store):
+                object_id = str(record.get("object_id") or "")
+                if device_dir.resolve() == current_device_dir.resolve() and object_id == current_object_id:
+                    continue
+                binding = record.get("network_binding")
+                if not isinstance(binding, dict):
+                    continue
+                if str(binding.get("canonical_device_id") or "") != canonical_device_id:
+                    continue
+                return {
+                    "room_id": str(store.get("room_id") or room_id or room_dir.name),
+                    "quest_device_id": str(store.get("device_id") or device_dir.name),
+                    "object_id": object_id,
+                    "object_name": str(record.get("name") or object_id),
+                    "binding": binding,
+                }
     return None
 
 
@@ -2640,20 +2799,27 @@ def _build_vlm_object_messages(viewer: "RgbdViewer", device_dir: Path, store: di
 
 
 def _run_vlm_object_analysis(viewer: "RgbdViewer", cursor: dict, object_id: str) -> None:
-    config = _load_vlm_config(viewer.args)
-    if not str(config.get("base_url") or "").strip() or not str(config.get("model") or "").strip():
-        print("[vlm] skipped: VLM config is incomplete", flush=True)
-        return
+    try:
+        config = _load_vlm_config(viewer.args)
+        if not str(config.get("base_url") or "").strip() or not str(config.get("model") or "").strip():
+            print("[vlm] skipped: VLM config is incomplete", flush=True)
+            _finish_analysis_job(viewer, "vlm", cursor, object_id)
+            return
 
-    ctx, device_dir, store = _load_point_store(viewer.args, cursor)
-    _ = ctx
-    record = _find_object_record(store, object_id)
-    if record is None:
+        ctx, device_dir, store = _load_point_store(viewer.args, cursor)
+        _ = ctx
+        record = _find_object_record(store, object_id)
+        if record is None:
+            _finish_analysis_job(viewer, "vlm", cursor, object_id)
+            return
+        record["vlm_status"] = "processing"
+        record["vlm_started_at_ms"] = _now_ms()
+        record["vlm_error"] = ""
+        _save_point_store(device_dir, store)
+    except Exception as exc:
+        _finish_analysis_job(viewer, "vlm", cursor, object_id)
+        print(f"[vlm] failed to initialize object analysis for {object_id}: {exc}", flush=True)
         return
-    record["vlm_status"] = "processing"
-    record["vlm_started_at_ms"] = _now_ms()
-    record["vlm_error"] = ""
-    _save_point_store(device_dir, store)
     if hasattr(viewer, "root"):
         viewer.root.after(0, viewer.refresh_device_tree)
 
@@ -2667,6 +2833,8 @@ def _run_vlm_object_analysis(viewer: "RgbdViewer", cursor: dict, object_id: str)
             timeout=float(getattr(viewer.args, "vlm_timeout_seconds", 120.0)),
             max_tokens=1600,
         )
+        if not description.strip():
+            raise ValueError("VLM returned an empty device description")
         ctx, device_dir, store = _load_point_store(viewer.args, cursor)
         _ = ctx
         record = _find_object_record(store, object_id)
@@ -2691,6 +2859,7 @@ def _run_vlm_object_analysis(viewer: "RgbdViewer", cursor: dict, object_id: str)
             _save_point_store(device_dir, store)
         print(f"[vlm] object analysis failed for {object_id}: {exc}", flush=True)
     finally:
+        _finish_analysis_job(viewer, "vlm", cursor, object_id)
         if hasattr(viewer, "root"):
             viewer.root.after(0, viewer.refresh_device_tree)
 
@@ -2703,9 +2872,58 @@ def _object_visual_profile(record: dict) -> dict:
     return normalize_visual_profile(parse_json_object(description), description)
 
 
+def _visual_profile_has_evidence(profile: dict) -> bool:
+    if str(profile.get("summary") or "").strip() or str(profile.get("device_type") or "").strip():
+        return True
+    return any(
+        bool(profile.get(key))
+        for key in (
+            "vendor_candidates",
+            "model_candidates",
+            "visible_text",
+            "capabilities",
+            "physical_features",
+        )
+    )
+
+
+def _analysis_job_key(cursor: dict, object_id: str) -> tuple[str, str, str]:
+    ctx = _room_context(cursor)
+    return ctx["room_id"], ctx["device_id"], str(object_id)
+
+
+def _reserve_analysis_job(viewer: "RgbdViewer", job_type: str, cursor: dict, object_id: str) -> bool:
+    key = _analysis_job_key(cursor, object_id)
+    jobs = viewer._vlm_jobs if job_type == "vlm" else viewer._pairing_jobs
+    with viewer._analysis_jobs_lock:
+        if key in jobs:
+            return False
+        jobs.add(key)
+        return True
+
+
+def _finish_analysis_job(viewer: "RgbdViewer", job_type: str, cursor: dict, object_id: str) -> None:
+    key = _analysis_job_key(cursor, object_id)
+    jobs = viewer._vlm_jobs if job_type == "vlm" else viewer._pairing_jobs
+    with viewer._analysis_jobs_lock:
+        jobs.discard(key)
+
+
 def _run_object_pairing_analysis(viewer: "RgbdViewer", cursor: dict, object_id: str) -> None:
     runtime = getattr(viewer, "discover_runtime", None)
     if runtime is None:
+        try:
+            with viewer._pairing_lock:
+                _ctx, device_dir, store = _load_point_store(viewer.args, cursor)
+                record = _find_object_record(store, object_id)
+                if record is not None:
+                    record["pairing_status"] = "error"
+                    record["pairing_error"] = "discovery runtime is not running"
+                    record["pairing_completed_at_ms"] = _now_ms()
+                    _save_point_store(device_dir, store)
+        except Exception:
+            pass
+        _finish_analysis_job(viewer, "pairing", cursor, object_id)
         return
 
     try:
@@ -2715,36 +2933,56 @@ def _run_object_pairing_analysis(viewer: "RgbdViewer", cursor: dict, object_id: 
             record = _find_object_record(store, object_id)
             if record is None:
                 return
+            visual_profile = _object_visual_profile(record)
+            if str(record.get("vlm_status") or "") != "done" or not _visual_profile_has_evidence(visual_profile):
+                record["pairing_status"] = "waiting_for_vlm"
+                record["pairing_error"] = "Visual device description is unavailable. Run VLM analysis first."
+                record["pairing_candidates"] = []
+                record["pairing_completed_at_ms"] = _now_ms()
+                _save_point_store(device_dir, store)
+                return
             record["pairing_status"] = "processing"
             record["pairing_started_at_ms"] = _now_ms()
             record["pairing_error"] = ""
+            record["pairing_warning"] = ""
+            record["pairing_candidates"] = []
             _save_point_store(device_dir, store)
 
-        visual_profile = _object_visual_profile(record)
         profiles = runtime.profiles()
-        profiles.sort(
-            key=lambda item: (
-                bool(item.get("online", False)),
-                float(item.get("last_seen") or 0.0),
-            ),
-            reverse=True,
-        )
-        profiles = profiles[: max(1, int(getattr(viewer.args, "pairing_max_candidates", 50)))]
+        baseline_candidates = score_candidates(visual_profile, profiles)
+        profile_by_id = {
+            str(profile.get("canonical_device_id") or ""): profile
+            for profile in profiles
+        }
+        shortlist_limit = max(1, int(getattr(viewer.args, "pairing_max_candidates", 50)))
+        shortlisted_profiles = [
+            profile_by_id[str(candidate.get("canonical_device_id") or "")]
+            for candidate in baseline_candidates[:shortlist_limit]
+            if str(candidate.get("canonical_device_id") or "") in profile_by_id
+        ]
 
         llm_payload = None
         llm_response = ""
+        llm_warning = ""
         config = _load_vlm_config(viewer.args)
-        if profiles and str(config.get("base_url") or "").strip() and str(config.get("model") or "").strip():
-            prompt = build_pairing_prompt(visual_profile, profiles)
-            llm_response = _vlm_chat_completion(
-                config,
-                [{"role": "user", "content": prompt}],
-                timeout=float(getattr(viewer.args, "vlm_timeout_seconds", 120.0)),
-                max_tokens=max(1800, min(8000, 900 + len(profiles) * 350)),
-            )
-            llm_payload = parse_json_object(llm_response)
+        if shortlisted_profiles and str(config.get("base_url") or "").strip() and str(config.get("model") or "").strip():
+            try:
+                prompt = build_pairing_prompt(visual_profile, shortlisted_profiles)
+                llm_response = _vlm_chat_completion(
+                    config,
+                    [{"role": "user", "content": prompt}],
+                    timeout=float(getattr(viewer.args, "vlm_timeout_seconds", 120.0)),
+                    max_tokens=max(1800, min(8000, 900 + len(shortlisted_profiles) * 350)),
+                )
+                llm_payload = parse_json_object(llm_response)
+                if llm_payload is None:
+                    llm_warning = "LLM pairing response was not valid JSON; deterministic scoring was used."
+            except Exception as exc:
+                llm_warning = f"LLM pairing review failed; deterministic scoring was used: {exc}"
+                print(f"[pairing] LLM review failed for {object_id}: {exc}", flush=True)
 
-        candidates = score_candidates(visual_profile, profiles, llm_payload)
+        all_candidates = score_candidates(visual_profile, profiles, llm_payload)
+        candidates = all_candidates[:shortlist_limit]
         with viewer._pairing_lock:
             _ctx, device_dir, store = _load_point_store(viewer.args, cursor)
             record = _find_object_record(store, object_id)
@@ -2754,8 +2992,11 @@ def _run_object_pairing_analysis(viewer: "RgbdViewer", cursor: dict, object_id: 
                 record["pairing_candidates"] = candidates
                 record["pairing_llm_model"] = str(config.get("model") or "") if llm_payload is not None else ""
                 record["pairing_llm_response"] = llm_response
+                record["pairing_evaluated_candidate_count"] = len(all_candidates)
+                record["pairing_llm_candidate_count"] = len(shortlisted_profiles)
                 record["pairing_completed_at_ms"] = _now_ms()
                 record["pairing_error"] = ""
+                record["pairing_warning"] = llm_warning
                 _save_point_store(device_dir, store)
     except Exception as exc:
         try:
@@ -2771,29 +3012,61 @@ def _run_object_pairing_analysis(viewer: "RgbdViewer", cursor: dict, object_id: 
             pass
         print(f"[pairing] analysis failed for {object_id}: {exc}", flush=True)
     finally:
+        _finish_analysis_job(viewer, "pairing", cursor, object_id)
         if hasattr(viewer, "root"):
             viewer.root.after(0, viewer.refresh_device_tree)
 
 
-def _schedule_object_pairing_analysis(viewer: "RgbdViewer", cursor: dict, object_id: str) -> None:
-    worker = threading.Thread(
-        target=_run_object_pairing_analysis,
-        args=(viewer, dict(cursor), object_id),
-        daemon=True,
-    )
-    worker.start()
+def _schedule_object_pairing_analysis(viewer: "RgbdViewer", cursor: dict, object_id: str) -> bool:
+    if not _reserve_analysis_job(viewer, "pairing", cursor, object_id):
+        return False
+    try:
+        worker = threading.Thread(
+            target=_run_object_pairing_analysis,
+            args=(viewer, dict(cursor), object_id),
+            daemon=True,
+        )
+        worker.start()
+    except Exception:
+        _finish_analysis_job(viewer, "pairing", cursor, object_id)
+        raise
+    return True
 
 
 def _schedule_vlm_object_analysis(viewer: "RgbdViewer", cursor: dict, object_id: str) -> bool:
     config = _load_vlm_config(viewer.args)
-    if not str(config.get("base_url") or "").strip() or not str(config.get("model") or "").strip():
+    _ctx, device_dir, store = _load_point_store(viewer.args, cursor)
+    record = _find_object_record(store, object_id)
+    if record is None:
         return False
-    worker = threading.Thread(
-        target=_run_vlm_object_analysis,
-        args=(viewer, dict(cursor), object_id),
-        daemon=True,
-    )
-    worker.start()
+    if not str(config.get("base_url") or "").strip() or not str(config.get("model") or "").strip():
+        record["vlm_status"] = "error"
+        record["vlm_error"] = "VLM is not configured. Configure a base URL and model before pairing."
+        record["vlm_completed_at_ms"] = _now_ms()
+        record["pairing_status"] = "waiting_for_vlm"
+        record["pairing_error"] = "Waiting for a visual device description."
+        record["pairing_candidates"] = []
+        _save_point_store(device_dir, store)
+        return False
+    if not _reserve_analysis_job(viewer, "vlm", cursor, object_id):
+        return True
+    try:
+        record["vlm_status"] = "processing"
+        record["vlm_started_at_ms"] = _now_ms()
+        record["vlm_error"] = ""
+        record["pairing_status"] = "waiting_for_vlm"
+        record["pairing_error"] = ""
+        record["pairing_candidates"] = []
+        _save_point_store(device_dir, store)
+        worker = threading.Thread(
+            target=_run_vlm_object_analysis,
+            args=(viewer, dict(cursor), object_id),
+            daemon=True,
+        )
+        worker.start()
+    except Exception:
+        _finish_analysis_job(viewer, "vlm", cursor, object_id)
+        raise
     return True
 
 
@@ -3488,7 +3761,18 @@ class _PayloadHandler(http.server.BaseHTTPRequestHandler):
         query = urllib.parse.parse_qs(parsed.query)
         cursor = _preview_query_to_cursor(query)
         try:
-            ctx, _device_dir, store = _load_point_store(viewer.args, cursor)
+            ctx, device_dir, store = _load_point_store(viewer.args, cursor)
+            spatial_changed = False
+            for record in _object_records(store):
+                if str(record.get("status") or "") != "completed":
+                    continue
+                object_id = str(record.get("object_id") or "")
+                spatial = record.get("spatial")
+                if object_id and (not isinstance(spatial, dict) or not spatial.get("valid", False)):
+                    record["spatial"] = _compute_object_spatial_summary(viewer.args, device_dir, store, object_id)
+                    spatial_changed = True
+            if spatial_changed:
+                _save_point_store(device_dir, store)
             records = _completed_object_records(store)
         except Exception as exc:
             print(f"[room-object] list failed: {exc}", flush=True)
@@ -3602,6 +3886,7 @@ class _PayloadHandler(http.server.BaseHTTPRequestHandler):
                 "name": str(record.get("name") or object_id),
                 "spatial": record.get("spatial") or _empty_object_spatial_summary("missing"),
                 "points": points,
+                "pairing": _pairing_record_payload(record, candidate_limit=10, compact_profile=True),
             },
         )
 
@@ -3625,8 +3910,9 @@ class _PayloadHandler(http.server.BaseHTTPRequestHandler):
         try:
             ctx, device_dir, store = _load_point_store(viewer.args, payload)
             record = _complete_object(viewer.args, device_dir, store, object_id, edit_session_id)
-            if not _schedule_vlm_object_analysis(viewer, payload, object_id):
-                _schedule_object_pairing_analysis(viewer, payload, object_id)
+            _schedule_vlm_object_analysis(viewer, payload, object_id)
+            _ctx, device_dir, store = _load_point_store(viewer.args, payload)
+            record = _find_object_record(store, object_id) or record
         except ValueError as exc:
             self._send_json(400, {"ok": False, "reason": str(exc)})
             return
@@ -3645,6 +3931,7 @@ class _PayloadHandler(http.server.BaseHTTPRequestHandler):
                 "object": record,
                 "spatial": record.get("spatial") or _empty_object_spatial_summary("missing"),
                 "points": _object_spatial_points(store, object_id),
+                "pairing": _pairing_record_payload(record, candidate_limit=10, compact_profile=True),
             },
         )
         viewer.root.after(0, viewer.refresh_device_tree)
@@ -3788,7 +4075,13 @@ class _PayloadHandler(http.server.BaseHTTPRequestHandler):
             if record is None:
                 self._send_json(404, {"ok": False, "reason": "object_not_found", "candidates": []})
                 return
-            payload = _pairing_record_payload(record)
+            limit_raw = (query.get("limit") or [""])[0]
+            try:
+                limit = int(limit_raw) if str(limit_raw).strip() else None
+            except ValueError:
+                limit = None
+            compact = str((query.get("compact") or [""])[0]).lower() in {"1", "true", "yes"}
+            payload = _pairing_record_payload(record, candidate_limit=limit, compact_profile=compact)
         except Exception as exc:
             self._send_json(500, {"ok": False, "reason": str(exc), "candidates": []})
             return
@@ -3816,9 +4109,35 @@ class _PayloadHandler(http.server.BaseHTTPRequestHandler):
             if record is None:
                 self._send_json(404, {"ok": False, "reason": "object_not_found"})
                 return
+            visual_profile = _object_visual_profile(record)
+            if str(record.get("vlm_status") or "") == "processing":
+                self._send_json(
+                    202,
+                    {
+                        "ok": True,
+                        "object_id": object_id,
+                        "vlm_status": "processing",
+                        "pairing_status": "waiting_for_vlm",
+                    },
+                )
+                return
+            if str(record.get("vlm_status") or "") != "done" or not _visual_profile_has_evidence(visual_profile):
+                if _schedule_vlm_object_analysis(viewer, payload, object_id):
+                    self._send_json(
+                        202,
+                        {"ok": True, "object_id": object_id, "vlm_status": "processing", "pairing_status": "waiting_for_vlm"},
+                    )
+                else:
+                    self._send_json(
+                        409,
+                        {"ok": False, "object_id": object_id, "reason": "vlm_not_configured"},
+                    )
+                return
             record["pairing_status"] = "processing"
             record["pairing_started_at_ms"] = _now_ms()
             record["pairing_error"] = ""
+            record["pairing_warning"] = ""
+            record["pairing_candidates"] = []
             _save_point_store(device_dir, store)
             _schedule_object_pairing_analysis(viewer, payload, object_id)
         except Exception as exc:
@@ -3853,7 +4172,7 @@ class _PayloadHandler(http.server.BaseHTTPRequestHandler):
                 device_dir,
                 object_id,
             )
-            if conflict is not None and not bool(payload.get("force", False)):
+            if conflict is not None:
                 self._send_json(409, {"ok": False, "reason": "device_already_bound", "conflict": conflict})
                 return
             candidates = record.get("pairing_candidates") or []
@@ -3888,6 +4207,12 @@ class _PayloadHandler(http.server.BaseHTTPRequestHandler):
                 "bound_at_ms": _now_ms(),
                 "profile_snapshot": profile,
             }
+            history = record.setdefault("binding_history", [])
+            if isinstance(history, list):
+                previous = record.get("network_binding")
+                if isinstance(previous, dict) and str(previous.get("canonical_device_id") or "") != canonical_id:
+                    history.append({"action": "replaced", "at_ms": _now_ms(), "previous": previous})
+                history.append({"action": "bound", "at_ms": binding["bound_at_ms"], "binding": binding})
             record["network_binding"] = binding
             record["updated_at_ms"] = _now_ms()
             _save_point_store(device_dir, store)
@@ -3971,6 +4296,9 @@ class RgbdViewer:
         self._closing = False
         self.discover_runtime: DiscoverRuntime | None = None
         self._pairing_lock = threading.RLock()
+        self._analysis_jobs_lock = threading.Lock()
+        self._vlm_jobs: set[tuple[str, str, str]] = set()
+        self._pairing_jobs: set[tuple[str, str, str]] = set()
         self._device_tree_item_context: dict[str, dict] = {}
         self._network_tree_item_context: dict[str, dict] = {}
         self._network_operation_context: dict[str, dict] = {}

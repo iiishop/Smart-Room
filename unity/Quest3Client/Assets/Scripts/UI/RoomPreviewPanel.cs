@@ -115,7 +115,8 @@ namespace SmartRoom.UI
 
             bool visible = RoomCoordinateSystemPanel.HasEnteredRoom
                            && !RoomCoordinateSystemPanel.IsPanelVisible
-                           && !DeviceArchivePanel.IsPanelVisible;
+                           && !DeviceArchivePanel.IsPanelVisible
+                           && !DeviceBindingPanel.IsPanelVisible;
             SetVisible(visible);
             if (!visible)
                 return;

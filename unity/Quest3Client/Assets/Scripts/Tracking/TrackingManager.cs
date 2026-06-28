@@ -50,6 +50,12 @@ namespace SmartRoom.Tracking
         private float _hideStatusAt = -1f;
         private GameObject _statusTextObject;
         private TextMesh _statusText;
+        private bool _statusOperationActive;
+        private float _statusOperationStartedAt;
+        private string _statusOperationMessage = string.Empty;
+        private string _statusOverlayMessage = string.Empty;
+        private float _statusOverlayUntil = -1f;
+        private int _lastStatusAnimationFrame = -1;
 
         public bool IsBusy => _uploadInFlight;
 
@@ -83,7 +89,11 @@ namespace SmartRoom.Tracking
                 _prevTriggerPressed = triggerPressed;
             }
 
-            if (_statusTextObject != null && _hideStatusAt > 0f && Time.time >= _hideStatusAt)
+            if (_statusOperationActive)
+            {
+                UpdatePersistentStatus();
+            }
+            else if (_statusTextObject != null && _hideStatusAt > 0f && Time.time >= _hideStatusAt)
             {
                 _statusTextObject.SetActive(false);
                 _hideStatusAt = -1f;
@@ -102,23 +112,25 @@ namespace SmartRoom.Tracking
 
             try
             {
-                ShowStatus("Capturing RGB-D...");
+                BeginOperationStatus("Capturing RGB-D...");
                 if (finalRgbdCapture == null || !finalRgbdCapture.CaptureOnceToPayload(out var capture) || capture == null)
                 {
                     Debug.LogWarning("[TrackingManager] RGB-D capture unavailable.");
-                    ShowStatus("RGB-D capture unavailable");
+                    FailOperationStatus("RGB-D capture unavailable");
                     return;
                 }
 
-                ShowStatus("Uploading RGB-D...");
+                UpdateOperationStatus("Uploading RGB-D and processing...");
                 bool ok = await UploadCaptureAsync(capture, null);
                 if (ok)
-                    ShowStatus("RGB-D sent to viewer");
+                    CompleteOperationStatus("RGB-D sent to viewer");
+                else
+                    FailOperationStatus(_statusOperationMessage);
             }
             catch (Exception ex)
             {
                 Debug.LogWarning($"[TrackingManager] RGB-D upload error: {ex}");
-                ShowStatus("RGB-D upload error: " + BuildVisibleError(ex));
+                FailOperationStatus("RGB-D upload error: " + BuildVisibleError(ex));
             }
             finally
             {
@@ -143,32 +155,37 @@ namespace SmartRoom.Tracking
             try
             {
                 string cursorJson = BuildCursorJson(worldPoint, pixel, label, mode, frameWidth, frameHeight);
-                ShowStatus(label > 0 ? "Positive point: checking saved images..." : "Negative point: checking saved images...");
+                BeginOperationStatus(
+                    label > 0
+                        ? "Positive point: checking images and updating mask..."
+                        : "Negative point: checking images and updating mask...");
 
                 if (await TrySendPointOnlyAsync(cursorJson))
                 {
-                    ShowStatus("Point sent to existing image");
+                    CompleteOperationStatus("Point processed on saved image");
                     return true;
                 }
 
-                ShowStatus("Capturing RGB-D...");
+                UpdateOperationStatus("No matching image. Capturing RGB-D...");
                 if (finalRgbdCapture == null || !finalRgbdCapture.CaptureOnceToPayload(out var capture) || capture == null)
                 {
                     Debug.LogWarning("[TrackingManager] RGB-D capture unavailable.");
-                    ShowStatus("RGB-D capture unavailable");
+                    FailOperationStatus("RGB-D capture unavailable");
                     return false;
                 }
 
-                ShowStatus("Uploading RGB-D...");
+                UpdateOperationStatus("Uploading RGB-D and running segmentation...");
                 bool ok = await UploadCaptureAsync(capture, cursorJson);
                 if (ok)
-                    ShowStatus("RGB-D point sent");
+                    CompleteOperationStatus("Point and mask updated");
+                else
+                    FailOperationStatus(_statusOperationMessage);
                 return ok;
             }
             catch (Exception ex)
             {
                 Debug.LogWarning($"[TrackingManager] Point prompt error: {ex}");
-                ShowStatus("Point prompt error: " + BuildVisibleError(ex));
+                FailOperationStatus("Point prompt error: " + BuildVisibleError(ex));
                 return false;
             }
             finally
@@ -185,6 +202,7 @@ namespace SmartRoom.Tracking
             _uploadInFlight = true;
             try
             {
+                BeginOperationStatus("Deleting point and recomputing masks...");
                 string deleteJson = BuildDeletePointJson(worldPoint);
                 string url = BuildUrl(backendBaseUrl, deletePointPath);
                 using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(Mathf.Max(1f, requestTimeoutSeconds)) };
@@ -194,7 +212,7 @@ namespace SmartRoom.Tracking
                 if (!response.IsSuccessStatusCode)
                 {
                     Debug.LogWarning($"[TrackingManager] Point delete failed ({response.StatusCode}): {body}");
-                    ReportStatus($"Point delete failed {(int)response.StatusCode}: {ShortStatus(body)}");
+                    FailOperationStatus($"Point delete failed {(int)response.StatusCode}: {ShortStatus(body)}");
                     return false;
                 }
 
@@ -209,13 +227,16 @@ namespace SmartRoom.Tracking
                 }
 
                 bool deleted = parsed == null || parsed.deleted;
-                ReportStatus(deleted ? "Point deleted" : "No saved point near cursor");
+                if (deleted)
+                    CompleteOperationStatus("Point deleted and masks updated");
+                else
+                    FailOperationStatus("No saved point near cursor");
                 return deleted;
             }
             catch (Exception ex)
             {
                 Debug.LogWarning($"[TrackingManager] Point delete error: {ex}");
-                ReportStatus("Point delete error: " + BuildVisibleError(ex));
+                FailOperationStatus("Point delete error: " + BuildVisibleError(ex));
                 return false;
             }
             finally
@@ -264,7 +285,7 @@ namespace SmartRoom.Tracking
 
             try
             {
-                ReportStatus(status);
+                BeginOperationStatus(status);
                 string url = BuildUrl(backendBaseUrl, path);
                 string json = BuildObjectActionJson(cleanObjectId, editSessionId, name);
                 using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(Mathf.Max(1f, requestTimeoutSeconds)) };
@@ -274,7 +295,7 @@ namespace SmartRoom.Tracking
                 if (!response.IsSuccessStatusCode)
                 {
                     Debug.LogWarning($"[TrackingManager] Object action failed ({response.StatusCode}): {body}");
-                    ReportStatus($"Device action failed {(int)response.StatusCode}: {ShortStatus(body)}");
+                    FailOperationStatus($"Device action failed {(int)response.StatusCode}: {ShortStatus(body)}");
                     return new ObjectActionResponse { ok = false, reason = body };
                 }
 
@@ -291,15 +312,15 @@ namespace SmartRoom.Tracking
                 if (parsed == null)
                     parsed = new ObjectActionResponse { ok = true, object_id = cleanObjectId };
                 if (parsed.ok)
-                    ReportStatus("Device action complete");
+                    CompleteOperationStatus("Device action complete");
                 else
-                    ReportStatus("Device action failed: " + ShortStatus(parsed.reason));
+                    FailOperationStatus("Device action failed: " + ShortStatus(parsed.reason));
                 return parsed;
             }
             catch (Exception ex)
             {
                 Debug.LogWarning($"[TrackingManager] Object action error: {ex}");
-                ReportStatus("Device action error: " + BuildVisibleError(ex));
+                FailOperationStatus("Device action error: " + BuildVisibleError(ex));
                 return new ObjectActionResponse { ok = false, reason = BuildVisibleError(ex) };
             }
         }
@@ -569,16 +590,160 @@ namespace SmartRoom.Tracking
         public void ReportStatus(string message)
         {
             Debug.Log($"[TrackingManager] {message}");
+            if (_statusOperationActive)
+            {
+                if (!string.IsNullOrWhiteSpace(message) &&
+                    message.StartsWith("Point not sent:", StringComparison.Ordinal))
+                {
+                    _statusOverlayMessage = message;
+                    _statusOverlayUntil = Time.time + 2f;
+                    RenderPersistentStatus(force: true);
+                }
+                else
+                {
+                    UpdateOperationStatus(message);
+                }
+                return;
+            }
             if (!showStatusText || _statusText == null || _statusTextObject == null || xrCamera == null)
                 return;
 
             _statusText.text = message;
+            _statusText.color = Color.cyan;
             _statusTextObject.SetActive(true);
-            _statusTextObject.transform.position =
-                xrCamera.transform.position + xrCamera.transform.forward * statusDistanceMeters;
-            _statusTextObject.transform.LookAt(xrCamera.transform);
-            _statusTextObject.transform.Rotate(0f, 180f, 0f);
+            UpdateStatusPose(snap: true);
             _hideStatusAt = Time.time + Mathf.Max(statusVisibleSeconds, 4f);
+        }
+
+        private void BeginOperationStatus(string message)
+        {
+            Debug.Log($"[TrackingManager] {message}");
+            _statusOperationActive = true;
+            _statusOperationStartedAt = Time.time;
+            _statusOperationMessage = string.IsNullOrWhiteSpace(message) ? "Processing..." : message;
+            _statusOverlayMessage = string.Empty;
+            _statusOverlayUntil = -1f;
+            _lastStatusAnimationFrame = -1;
+            _hideStatusAt = -1f;
+            if (_statusTextObject != null)
+                _statusTextObject.SetActive(true);
+            if (_statusText != null)
+                _statusText.color = Color.cyan;
+            UpdateStatusPose(snap: true);
+            RenderPersistentStatus(force: true);
+        }
+
+        private void UpdateOperationStatus(string message)
+        {
+            if (!_statusOperationActive)
+            {
+                BeginOperationStatus(message);
+                return;
+            }
+            if (!string.IsNullOrWhiteSpace(message))
+                _statusOperationMessage = message;
+            RenderPersistentStatus(force: true);
+        }
+
+        private void CompleteOperationStatus(string message)
+        {
+            _statusOperationActive = false;
+            _statusOverlayMessage = string.Empty;
+            _statusOverlayUntil = -1f;
+            Debug.Log($"[TrackingManager] {message}");
+            if (_statusText != null)
+            {
+                _statusText.color = new Color(0.25f, 1f, 0.45f, 1f);
+                _statusText.text = message + "\n[==========] complete";
+            }
+            if (_statusTextObject != null)
+                _statusTextObject.SetActive(true);
+            UpdateStatusPose(snap: false);
+            _hideStatusAt = Time.time + 3f;
+        }
+
+        private void FailOperationStatus(string message)
+        {
+            _statusOperationActive = false;
+            _statusOverlayMessage = string.Empty;
+            _statusOverlayUntil = -1f;
+            string visible = string.IsNullOrWhiteSpace(message) ? "Operation failed" : message;
+            Debug.LogWarning($"[TrackingManager] {visible}");
+            if (_statusText != null)
+            {
+                _statusText.color = new Color(1f, 0.28f, 0.22f, 1f);
+                _statusText.text = "ERROR: " + visible;
+            }
+            if (_statusTextObject != null)
+                _statusTextObject.SetActive(true);
+            UpdateStatusPose(snap: false);
+            _hideStatusAt = Time.time + 12f;
+        }
+
+        private void UpdatePersistentStatus()
+        {
+            UpdateStatusPose(snap: false);
+            RenderPersistentStatus(force: false);
+        }
+
+        private void RenderPersistentStatus(bool force)
+        {
+            if (_statusText == null || !_statusOperationActive)
+                return;
+
+            int animationFrame = Mathf.FloorToInt((Time.time - _statusOperationStartedAt) * 4f);
+            if (!force && animationFrame == _lastStatusAnimationFrame)
+                return;
+            _lastStatusAnimationFrame = animationFrame;
+
+            float elapsed = Mathf.Max(0f, Time.time - _statusOperationStartedAt);
+            string message = Time.time < _statusOverlayUntil && !string.IsNullOrWhiteSpace(_statusOverlayMessage)
+                ? _statusOverlayMessage
+                : _statusOperationMessage;
+            _statusText.text = message + "\n" + BuildBusyBar(animationFrame) + $" {elapsed:F0}s";
+        }
+
+        private void UpdateStatusPose(bool snap)
+        {
+            if (_statusTextObject == null || xrCamera == null)
+                return;
+            Vector3 targetPosition =
+                xrCamera.transform.position +
+                xrCamera.transform.forward * statusDistanceMeters +
+                Vector3.down * 0.16f;
+            Quaternion targetRotation = Quaternion.LookRotation(
+                _statusTextObject.transform.position - xrCamera.transform.position,
+                Vector3.up);
+            if (snap || !_statusTextObject.activeSelf)
+            {
+                _statusTextObject.transform.position = targetPosition;
+                _statusTextObject.transform.rotation = Quaternion.LookRotation(
+                    targetPosition - xrCamera.transform.position,
+                    Vector3.up);
+                return;
+            }
+            float blend = 1f - Mathf.Exp(-6f * Time.deltaTime);
+            _statusTextObject.transform.position =
+                Vector3.Lerp(_statusTextObject.transform.position, targetPosition, blend);
+            targetRotation = Quaternion.LookRotation(
+                _statusTextObject.transform.position - xrCamera.transform.position,
+                Vector3.up);
+            _statusTextObject.transform.rotation =
+                Quaternion.Slerp(_statusTextObject.transform.rotation, targetRotation, blend);
+        }
+
+        private static string BuildBusyBar(int animationFrame)
+        {
+            const int width = 10;
+            int cycle = (width - 1) * 2;
+            int position = cycle > 0 ? Mathf.Abs(animationFrame % cycle) : 0;
+            if (position >= width)
+                position = cycle - position;
+            char[] cells = new char[width];
+            for (int i = 0; i < cells.Length; i++)
+                cells[i] = '-';
+            cells[Mathf.Clamp(position, 0, width - 1)] = '#';
+            return "[" + new string(cells) + "]";
         }
 
         [Serializable]
@@ -688,6 +853,79 @@ namespace SmartRoom.Tracking
             public string name = string.Empty;
             public RoomObjectSpatialRecord spatial = new RoomObjectSpatialRecord();
             public RoomObjectPointRecord[] points = Array.Empty<RoomObjectPointRecord>();
+            public PairingStatusRecord pairing = new PairingStatusRecord();
+        }
+
+        [Serializable]
+        public sealed class PairingStatusRecord
+        {
+            public string object_name = string.Empty;
+            public string vlm_status = string.Empty;
+            public string vlm_error = string.Empty;
+            public string pairing_status = string.Empty;
+            public string pairing_error = string.Empty;
+            public PairingCandidateRecord[] candidates = Array.Empty<PairingCandidateRecord>();
+            public NetworkBindingRecord binding = new NetworkBindingRecord();
+            public long started_at_ms = 0;
+            public long completed_at_ms = 0;
+        }
+
+        [Serializable]
+        public sealed class PairingCandidateRecord
+        {
+            public string canonical_device_id = string.Empty;
+            public string display_name = string.Empty;
+            public string summary = string.Empty;
+            public int score = 0;
+            public int confidence_percent = 0;
+            public int evidence_coverage_percent = 0;
+            public int rank = 0;
+            public PairingRuleRecord[] rules = Array.Empty<PairingRuleRecord>();
+            public NetworkProfileRecord profile = new NetworkProfileRecord();
+        }
+
+        [Serializable]
+        public sealed class PairingRuleRecord
+        {
+            public string rule_id = string.Empty;
+            public string label = string.Empty;
+            public string verdict = string.Empty;
+            public int points = 0;
+            public int max_points = 0;
+            public string visual_evidence = string.Empty;
+            public string network_evidence = string.Empty;
+            public string reason = string.Empty;
+            public string source = string.Empty;
+        }
+
+        [Serializable]
+        public sealed class NetworkProfileRecord
+        {
+            public string canonical_device_id = string.Empty;
+            public string display_name = string.Empty;
+            public string summary = string.Empty;
+            public string vendor = string.Empty;
+            public string device_type = string.Empty;
+            public string[] model_candidates = Array.Empty<string>();
+            public string[] capabilities = Array.Empty<string>();
+            public string[] protocols = Array.Empty<string>();
+            public bool online = false;
+            public float last_seen = 0f;
+            public int data_count = 0;
+            public int operation_count = 0;
+            public string address_summary = string.Empty;
+            public string identifier_summary = string.Empty;
+        }
+
+        [Serializable]
+        public sealed class NetworkBindingRecord
+        {
+            public string canonical_device_id = string.Empty;
+            public string display_name = string.Empty;
+            public string method = string.Empty;
+            public int score = 0;
+            public int evidence_coverage_percent = 0;
+            public long bound_at_ms = 0;
         }
     }
 }

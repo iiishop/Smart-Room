@@ -144,6 +144,7 @@ namespace SmartRoom.UI
             RemoveForObjectInternal(objectId);
             BoardEntry entry = CreateBoard(objectId, center, boardPosition);
             _boards[objectId] = entry;
+            DeviceSpatialMarkerManager.PlaceForObjectCenter(objectId, center, xrCamera);
             UpdateBoardRotation(entry, snap: true);
             Debug.Log($"[DevicePlaceholderBoard] Placed board for {objectId} center={center:F3} board={boardPosition:F3}");
         }
@@ -333,6 +334,7 @@ namespace SmartRoom.UI
             if (entry.Root != null)
                 Destroy(entry.Root);
             _boards.Remove(objectId);
+            DeviceSpatialMarkerManager.RemoveForObject(objectId);
         }
 
         private void ClearBoardsInternal()
@@ -343,6 +345,7 @@ namespace SmartRoom.UI
                     Destroy(entry.Root);
             }
             _boards.Clear();
+            DeviceSpatialMarkerManager.ClearMarkers();
         }
 
         private static Vector3 RobustCenter(List<Vector3> points)

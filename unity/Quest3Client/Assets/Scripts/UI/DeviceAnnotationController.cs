@@ -160,6 +160,7 @@ namespace SmartRoom.UI
             return RoomCoordinateSystemPanel.HasEnteredRoom
                    && !RoomCoordinateSystemPanel.IsPanelVisible
                    && !DeviceArchivePanel.IsPanelVisible
+                   && !DeviceBindingPanel.IsPanelVisible
                    && !_actionInFlight;
         }
 
@@ -214,7 +215,7 @@ namespace SmartRoom.UI
                 return;
             }
 
-            if (DeviceArchivePanel.IsPanelVisible)
+            if (DeviceArchivePanel.IsPanelVisible || DeviceBindingPanel.IsPanelVisible)
             {
                 ResetLeftGrab();
                 return;
@@ -327,6 +328,7 @@ namespace SmartRoom.UI
                 }
 
                 DevicePlaceholderBoardManager.PlaceForObject(objectId, boardSpatial, boardPoints, xrCamera);
+                DeviceBindingPanel.OpenForObject(objectId, xrCamera);
             }
             finally
             {

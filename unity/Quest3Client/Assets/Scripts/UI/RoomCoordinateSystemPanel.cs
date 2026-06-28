@@ -117,6 +117,8 @@ namespace SmartRoom.UI
             DeviceAnnotationController.EnsureExists(uiCamera);
             DeviceArchivePanel.EnsureExists(uiCamera);
             DevicePlaceholderBoardManager.EnsureExists(uiCamera);
+            DeviceSpatialMarkerManager.EnsureExists(uiCamera);
+            DeviceBindingPanel.EnsureExists(uiCamera);
         }
 
         private void LateUpdate()
@@ -668,6 +670,7 @@ namespace SmartRoom.UI
 
             WorldOriginReference.EnsureExists(uiCamera).SetOriginPose(selected.ToPose(), selected.name);
             SetSceneInteractionEnabled(true);
+            DeviceSpatialMarkerManager.RefreshCompletedObjects();
         }
 
         private void UpdateStatus()
@@ -709,6 +712,7 @@ namespace SmartRoom.UI
             {
                 PromptPointMarkerManager.ClearMarkers();
                 DevicePlaceholderBoardManager.ClearBoards();
+                DeviceSpatialMarkerManager.ClearMarkers();
                 WorldOriginReference.DestroyExisting();
             }
         }

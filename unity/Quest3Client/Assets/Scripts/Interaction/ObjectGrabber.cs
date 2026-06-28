@@ -69,7 +69,9 @@ namespace SmartRoom.Interaction
 
         private void Update()
         {
-            if (SmartRoom.UI.RoomCoordinateSystemPanel.IsUiBlockingSceneInput || SmartRoom.UI.DeviceArchivePanel.IsPanelVisible)
+            if (SmartRoom.UI.RoomCoordinateSystemPanel.IsUiBlockingSceneInput
+                || SmartRoom.UI.DeviceArchivePanel.IsPanelVisible
+                || SmartRoom.UI.DeviceBindingPanel.IsPanelVisible)
             {
                 _prevTriggerPressed = OVRInput.Get(OVRInput.RawButton.RIndexTrigger);
                 _prevDeletePressed = OVRInput.Get(OVRInput.Button.Two, OVRInput.Controller.RTouch);
@@ -77,7 +79,21 @@ namespace SmartRoom.Interaction
                 return;
             }
 
-            UpdatePromptPointHover();
+            bool triggerPressed = OVRInput.Get(OVRInput.RawButton.RIndexTrigger);
+            bool triggerPressedDown = triggerPressed && !_prevTriggerPressed;
+            Ray ray = controllerRaycaster != null ? controllerRaycaster.GetRay() : default(Ray);
+            bool markerConsumed = SmartRoom.UI.DeviceSpatialMarkerManager.UpdateHoverAndConsumeTrigger(ray, triggerPressedDown);
+            if (SmartRoom.UI.DeviceSpatialMarkerManager.IsHoveringMarker)
+                PromptPointMarkerManager.ClearHover();
+            else
+                UpdatePromptPointHover();
+            if (markerConsumed)
+            {
+                _prevTriggerPressed = triggerPressed;
+                _prevDeletePressed = OVRInput.Get(OVRInput.Button.Two, OVRInput.Controller.RTouch);
+                return;
+            }
+
             bool deletePressed = OVRInput.Get(OVRInput.Button.Two, OVRInput.Controller.RTouch);
             if (deletePressed && !_prevDeletePressed)
                 TryDeleteHoveredPromptPoint();
@@ -85,10 +101,8 @@ namespace SmartRoom.Interaction
 
             if (Time.time - _lastGrabTime < grabCooldownSeconds) return;
 
-            // OVRInput: Meta XR SDK v85 扳机输入
-            // OVRInput.RawButton.RIndexTrigger = 右手柄食指扳机
-            bool triggerPressed = OVRInput.Get(OVRInput.RawButton.RIndexTrigger);
-            if (triggerPressed && !_prevTriggerPressed)
+            // Reuse the trigger state captured before marker interaction.
+            if (triggerPressedDown)
             {
                 TryGrab();
             }

@@ -165,6 +165,7 @@ namespace SmartRoom.UI
             return RoomCoordinateSystemPanel.HasEnteredRoom
                    && !RoomCoordinateSystemPanel.IsPanelVisible
                    && !DeviceArchivePanel.IsPanelVisible
+                   && !DeviceBindingPanel.IsPanelVisible
                    && controllerRaycaster != null;
         }
 
