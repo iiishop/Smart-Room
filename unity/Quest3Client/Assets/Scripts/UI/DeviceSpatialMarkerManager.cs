@@ -292,6 +292,8 @@ namespace SmartRoom.UI
                 DeviceObjectRecord[] objects = response != null && response.objects != null
                     ? response.objects
                     : Array.Empty<DeviceObjectRecord>();
+                ClearMarkersInternal();
+                DevicePlaceholderBoardManager.ClearBoards();
                 for (int i = 0; i < objects.Length; i++)
                 {
                     DeviceObjectRecord record = objects[i];

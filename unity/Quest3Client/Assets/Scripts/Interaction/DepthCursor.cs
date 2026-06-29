@@ -310,12 +310,13 @@ namespace SmartRoom.Interaction
 
         private static string FormatCoordinateLabel(Vector3 worldPoint)
         {
+            Vector3 roomPoint = RoomSpatialAnchorManager.WorldToRoomPoint(worldPoint);
             return string.Format(
                 CultureInfo.InvariantCulture,
                 "X: {0:+0.000;-0.000;0.000} m\nY: {1:+0.000;-0.000;0.000} m\nZ: {2:+0.000;-0.000;0.000} m",
-                worldPoint.x,
-                worldPoint.y,
-                worldPoint.z);
+                roomPoint.x,
+                roomPoint.y,
+                roomPoint.z);
         }
 
         private void SetCursorColor(Color color)

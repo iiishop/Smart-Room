@@ -55,8 +55,7 @@ archive_code/
 backend/checkpoints/
 backend/viewer_any2full_cache/
 backend/viewer_device_segments/
-backend/viewer_room_store/*/
-backend/viewer_room_store/vlm_config.json
+backend/viewer_room_store/
 .codegraph/
 backend/viewer/viewer_any2full_cache/
 backend/viewer/viewer_room_store/

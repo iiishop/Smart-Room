@@ -1,12 +1,16 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Text;
 using SmartRoom.Interaction;
 using SmartRoom.Networking;
+using SmartRoom.Tracking;
 using TMPro;
 using UnityEngine;
 using UnityEngine.EventSystems;
 using UnityEngine.InputSystem.UI;
+using UnityEngine.Networking;
 using UnityEngine.UI;
 
 namespace SmartRoom.UI
@@ -53,6 +57,10 @@ namespace SmartRoom.UI
         private EventSystem _pointerEventSystem;
         private GameObject _hoveredObject;
         private GameObject _pressedObject;
+        private string _roomTransitionStatus = string.Empty;
+        private int _roomTransitionVersion;
+        private bool _roomSyncInFlight;
+        private float _nextRoomSyncAt;
 
         public static bool IsUiBlockingSceneInput { get; private set; }
         public static bool IsPanelVisible => _instance != null && _instance._panelVisible;
@@ -119,11 +127,18 @@ namespace SmartRoom.UI
             DevicePlaceholderBoardManager.EnsureExists(uiCamera);
             DeviceSpatialMarkerManager.EnsureExists(uiCamera);
             DeviceBindingPanel.EnsureExists(uiCamera);
+            RoomSpatialAnchorManager.EnsureExists();
+            _nextRoomSyncAt = Time.time + 1f;
         }
 
         private void LateUpdate()
         {
             ResolveReferences();
+            if (!_roomSyncInFlight && Time.time >= _nextRoomSyncAt)
+            {
+                _nextRoomSyncAt = Time.time + 5f;
+                StartCoroutine(SyncRoomsWithBackend());
+            }
 
             if (!_panelVisible)
             {
@@ -165,6 +180,8 @@ namespace SmartRoom.UI
             ResolveReferences();
             LoadRooms();
             _hasEnteredRoom = false;
+            _roomTransitionVersion++;
+            _roomTransitionStatus = string.Empty;
             _panelVisible = true;
             _initializedPose = false;
 
@@ -352,12 +369,154 @@ namespace SmartRoom.UI
 
             if (_database.rooms == null)
                 _database.rooms = new List<RoomCoordinateRecord>();
+            if (_database.deleted_rooms == null)
+                _database.deleted_rooms = new List<RoomDeletionRecord>();
         }
 
         private void SaveRooms()
         {
             PlayerPrefs.SetString(StoreKey, JsonUtility.ToJson(_database));
             PlayerPrefs.Save();
+        }
+
+        private IEnumerator SyncRoomsWithBackend()
+        {
+            TrackingManager trackingManager = FindFirstObjectByType<TrackingManager>();
+            if (trackingManager == null)
+                yield break;
+
+            _roomSyncInFlight = true;
+            var records = new List<RoomSyncRecord>();
+            for (int i = 0; i < _database.rooms.Count; i++)
+            {
+                RoomCoordinateRecord room = _database.rooms[i];
+                records.Add(
+                    new RoomSyncRecord
+                    {
+                        room_id = room.id,
+                        name = room.name,
+                        anchor_uuid = room.anchor_uuid,
+                        px = room.px,
+                        py = room.py,
+                        pz = room.pz,
+                        qx = room.qx,
+                        qy = room.qy,
+                        qz = room.qz,
+                        qw = room.qw,
+                        updated_at_ms = room.updated_at_ms,
+                        deleted_at_ms = 0,
+                    });
+            }
+            for (int i = 0; i < _database.deleted_rooms.Count; i++)
+            {
+                RoomDeletionRecord deletion = _database.deleted_rooms[i];
+                records.Add(
+                    new RoomSyncRecord
+                    {
+                        room_id = deletion.id,
+                        name = deletion.id,
+                        updated_at_ms = deletion.deleted_at_ms,
+                        deleted_at_ms = deletion.deleted_at_ms,
+                    });
+            }
+
+            string json = JsonUtility.ToJson(new RoomSyncRequest { rooms = records.ToArray() });
+            string url = trackingManager.BuildViewerUrl("/api/room/catalog/sync");
+            using (var request = new UnityWebRequest(url, "POST"))
+            {
+                request.uploadHandler = new UploadHandlerRaw(Encoding.UTF8.GetBytes(json));
+                request.downloadHandler = new DownloadHandlerBuffer();
+                request.SetRequestHeader("Content-Type", "application/json");
+                request.timeout = 10;
+                yield return request.SendWebRequest();
+                _roomSyncInFlight = false;
+                if (request.result != UnityWebRequest.Result.Success)
+                    yield break;
+
+                RoomSyncResponse response;
+                try
+                {
+                    response = JsonUtility.FromJson<RoomSyncResponse>(request.downloadHandler.text);
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogWarning("[RoomCoordinateSystemPanel] Room sync parse failed: " + ex.Message);
+                    yield break;
+                }
+                if (response == null || !response.ok || response.rooms == null)
+                    yield break;
+                ApplyRoomSync(response.rooms);
+            }
+        }
+
+        private void ApplyRoomSync(RoomSyncRecord[] records)
+        {
+            bool changed = false;
+            for (int i = 0; i < records.Length; i++)
+            {
+                RoomSyncRecord incoming = records[i];
+                if (incoming == null || string.IsNullOrWhiteSpace(incoming.room_id))
+                    continue;
+                RoomCoordinateRecord local = FindRoom(incoming.room_id);
+                RoomDeletionRecord localDeletion = _database.deleted_rooms.Find(item => item.id == incoming.room_id);
+                long localUpdated = local != null
+                    ? local.updated_at_ms
+                    : localDeletion != null ? localDeletion.deleted_at_ms : 0;
+                if (incoming.updated_at_ms <= localUpdated && local != null)
+                    continue;
+
+                if (incoming.deleted_at_ms > 0)
+                {
+                    if (local != null)
+                    {
+                        _database.rooms.Remove(local);
+                        if (_database.selected_id == incoming.room_id)
+                        {
+                            _database.selected_id = string.Empty;
+                            _hasEnteredRoom = false;
+                            SetSceneInteractionEnabled(false);
+                        }
+                        changed = true;
+                    }
+                    _database.deleted_rooms.RemoveAll(item => item.id == incoming.room_id);
+                    _database.deleted_rooms.Add(
+                        new RoomDeletionRecord
+                        {
+                            id = incoming.room_id,
+                            deleted_at_ms = incoming.deleted_at_ms,
+                        });
+                    continue;
+                }
+
+                _database.deleted_rooms.RemoveAll(item => item.id == incoming.room_id);
+                if (local == null)
+                {
+                    local = new RoomCoordinateRecord { id = incoming.room_id };
+                    _database.rooms.Add(local);
+                }
+                local.name = string.IsNullOrWhiteSpace(incoming.name) ? incoming.room_id : incoming.name;
+                if (!string.IsNullOrWhiteSpace(incoming.anchor_uuid) || string.IsNullOrWhiteSpace(local.anchor_uuid))
+                {
+                    local.anchor_uuid = incoming.anchor_uuid ?? string.Empty;
+                    local.px = incoming.px;
+                    local.py = incoming.py;
+                    local.pz = incoming.pz;
+                    local.qx = incoming.qx;
+                    local.qy = incoming.qy;
+                    local.qz = incoming.qz;
+                    local.qw = Mathf.Abs(incoming.qw) < 0.0001f ? 1f : incoming.qw;
+                }
+                local.updated_at_ms = incoming.updated_at_ms;
+                changed = true;
+            }
+
+            if (!changed)
+                return;
+            SaveRooms();
+            if (_panelVisible)
+                RefreshList();
+            if (_hasEnteredRoom)
+                DeviceSpatialMarkerManager.RefreshCompletedObjects();
         }
 
         private void BuildUi()
@@ -556,30 +715,25 @@ namespace SmartRoom.UI
                 qy = 0f,
                 qz = 0f,
                 qw = 1f,
-                anchor_uuid = string.Empty
+                anchor_uuid = string.Empty,
+                updated_at_ms = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
             };
 
             _database.rooms.Add(record);
             _database.selected_id = record.id;
-            _hasEnteredRoom = true;
             SaveRooms();
             RefreshList();
-            ApplySelectedRoomOrigin();
-            RoomObjectSession.StartNewObject();
-            if (_hasEnteredRoom)
-                HidePanel();
+            BeginRoomEntry(record, createAnchor: true);
         }
 
         private void SelectRoom(string roomId)
         {
             _database.selected_id = roomId;
-            _hasEnteredRoom = true;
             SaveRooms();
             RefreshList();
-            ApplySelectedRoomOrigin();
-            RoomObjectSession.StartNewObject();
-            if (_hasEnteredRoom)
-                HidePanel();
+            RoomCoordinateRecord record = FindRoom(roomId);
+            if (record != null)
+                BeginRoomEntry(record, createAnchor: string.IsNullOrWhiteSpace(record.anchor_uuid));
         }
 
         private void DeleteRoom(string roomId)
@@ -587,25 +741,34 @@ namespace SmartRoom.UI
             int index = _database.rooms.FindIndex(room => room.id == roomId);
             if (index < 0) return;
 
-            bool removedEnteredRoom = _hasEnteredRoom && _database.selected_id == roomId;
+            bool removedSelectedRoom = _database.selected_id == roomId;
+            RoomCoordinateRecord removedRoom = _database.rooms[index];
+            long deletedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             _database.rooms.RemoveAt(index);
-            if (_database.selected_id == roomId)
+            _database.deleted_rooms.RemoveAll(item => item.id == roomId);
+            _database.deleted_rooms.Add(new RoomDeletionRecord { id = roomId, deleted_at_ms = deletedAtMs });
+            if (removedSelectedRoom)
             {
-                _database.selected_id = removedEnteredRoom && _database.rooms.Count > 0
-                    ? _database.rooms[0].id
-                    : string.Empty;
-            }
-
-            if (removedEnteredRoom && _database.rooms.Count == 0)
+                _roomTransitionVersion++;
+                _roomTransitionStatus = string.Empty;
                 _hasEnteredRoom = false;
+                _database.selected_id = _database.rooms.Count > 0 ? _database.rooms[0].id : string.Empty;
+            }
 
             SaveRooms();
             RefreshList();
+            if (!string.IsNullOrWhiteSpace(removedRoom.anchor_uuid))
+                RoomSpatialAnchorManager.EnsureExists().EraseSavedAnchor(removedRoom.anchor_uuid);
 
-            if (_hasEnteredRoom)
-                ApplySelectedRoomOrigin();
-            else
+            if (removedSelectedRoom && _database.rooms.Count > 0)
+            {
+                RoomCoordinateRecord nextRoom = _database.rooms[0];
+                BeginRoomEntry(nextRoom, createAnchor: string.IsNullOrWhiteSpace(nextRoom.anchor_uuid));
+            }
+            else if (!_hasEnteredRoom)
+            {
                 SetSceneInteractionEnabled(false);
+            }
         }
 
         private void OpenRenameDialog(string roomId)
@@ -630,7 +793,10 @@ namespace SmartRoom.UI
 
             string nextName = (_renameInput.text ?? string.Empty).Trim();
             if (!string.IsNullOrWhiteSpace(nextName))
+            {
                 record.name = nextName;
+                record.updated_at_ms = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            }
 
             SaveRooms();
             CloseRenameDialog();
@@ -673,8 +839,56 @@ namespace SmartRoom.UI
             DeviceSpatialMarkerManager.RefreshCompletedObjects();
         }
 
+        private void BeginRoomEntry(RoomCoordinateRecord record, bool createAnchor)
+        {
+            if (record == null)
+                return;
+
+            int version = ++_roomTransitionVersion;
+            _hasEnteredRoom = false;
+            _roomTransitionStatus = createAnchor
+                ? "Creating and saving room spatial anchor..."
+                : "Loading and localizing room spatial anchor...";
+            SetSceneInteractionEnabled(false);
+            RefreshList();
+
+            RoomSpatialAnchorManager manager = RoomSpatialAnchorManager.EnsureExists();
+            Action<bool, string, string> completed = (success, anchorUuid, error) =>
+            {
+                if (version != _roomTransitionVersion || record.id != _database.selected_id)
+                    return;
+                if (!success)
+                {
+                    _roomTransitionStatus = "Room localization failed: " + error;
+                    _hasEnteredRoom = false;
+                    RefreshList();
+                    return;
+                }
+
+                record.anchor_uuid = anchorUuid;
+                record.updated_at_ms = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                _roomTransitionStatus = string.Empty;
+                _hasEnteredRoom = true;
+                SaveRooms();
+                RefreshList();
+                ApplySelectedRoomOrigin();
+                RoomObjectSession.StartNewObject();
+                HidePanel();
+            };
+
+            if (createAnchor)
+                manager.CreateAndSave(record.id, record.ToPose(), completed);
+            else
+                manager.LoadLocalizeAndAlign(record.id, record.anchor_uuid, record.ToPose(), completed);
+        }
+
         private void UpdateStatus()
         {
+            if (!string.IsNullOrWhiteSpace(_roomTransitionStatus))
+            {
+                _statusText.text = _roomTransitionStatus;
+                return;
+            }
             if (!_hasEnteredRoom)
             {
                 _statusText.text = "Current: not selected\nSelect a saved room or press + to enter.";
@@ -868,6 +1082,7 @@ namespace SmartRoom.UI
         {
             public string selected_id = string.Empty;
             public List<RoomCoordinateRecord> rooms = new List<RoomCoordinateRecord>();
+            public List<RoomDeletionRecord> deleted_rooms = new List<RoomDeletionRecord>();
         }
 
         [Serializable]
@@ -884,6 +1099,7 @@ namespace SmartRoom.UI
             public float qz;
             public float qw;
             public string anchor_uuid;
+            public long updated_at_ms;
 
             public Pose ToPose()
             {
@@ -903,6 +1119,43 @@ namespace SmartRoom.UI
                     new Vector3(px, py, pz),
                     rotation);
             }
+        }
+
+        [Serializable]
+        private sealed class RoomDeletionRecord
+        {
+            public string id = string.Empty;
+            public long deleted_at_ms;
+        }
+
+        [Serializable]
+        private sealed class RoomSyncRequest
+        {
+            public RoomSyncRecord[] rooms = Array.Empty<RoomSyncRecord>();
+        }
+
+        [Serializable]
+        private sealed class RoomSyncResponse
+        {
+            public bool ok;
+            public RoomSyncRecord[] rooms = Array.Empty<RoomSyncRecord>();
+        }
+
+        [Serializable]
+        private sealed class RoomSyncRecord
+        {
+            public string room_id = string.Empty;
+            public string name = string.Empty;
+            public string anchor_uuid = string.Empty;
+            public float px;
+            public float py;
+            public float pz;
+            public float qx;
+            public float qy;
+            public float qz;
+            public float qw = 1f;
+            public long updated_at_ms;
+            public long deleted_at_ms;
         }
     }
 }

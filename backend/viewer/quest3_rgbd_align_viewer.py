@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import concurrent.futures
 import http.server
 import json
 import math
@@ -25,7 +26,7 @@ import cv2
 import numpy as np
 from PIL import Image, ImageTk
 import tkinter as tk
-from tkinter import scrolledtext
+from tkinter import messagebox, scrolledtext, simpledialog
 from tkinter import ttk
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -35,8 +36,10 @@ if str(BACKEND_ROOT) not in sys.path:
 from discover_client.pairing import (
     build_pairing_prompt,
     normalize_visual_profile,
+    pairing_response_schema,
     parse_json_object,
     score_candidates,
+    shortlist_network_profiles,
 )
 from discover_client.config import (
     SCHEMAS as DISCOVER_SOURCE_SCHEMAS,
@@ -1493,8 +1496,158 @@ def _room_store_root(args: argparse.Namespace) -> Path:
     return (root if root.is_absolute() else Path.cwd() / root).resolve()
 
 
+_ROOM_CATALOG_LOCK = threading.RLock()
+
+
+def _room_catalog_path(args: argparse.Namespace) -> Path:
+    return _room_store_root(args) / "room_catalog.json"
+
+
+def _load_room_catalog(args: argparse.Namespace) -> dict:
+    path = _room_catalog_path(args)
+    with _ROOM_CATALOG_LOCK:
+        if path.exists():
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(payload, dict) and isinstance(payload.get("rooms"), list):
+                    return payload
+            except Exception as exc:
+                print(f"[room-catalog] failed to read {path}: {exc}", flush=True)
+
+        catalog = {"schema_version": 1, "rooms": []}
+        root = _room_store_root(args)
+        if root.exists():
+            for room_dir in root.iterdir():
+                if not room_dir.is_dir():
+                    continue
+                room_id = room_dir.name
+                room_name = room_id
+                updated_at_ms = int(room_dir.stat().st_mtime * 1000)
+                for points_path in room_dir.glob("*/points.json"):
+                    try:
+                        store = json.loads(points_path.read_text(encoding="utf-8"))
+                    except Exception:
+                        continue
+                    room_name = str(store.get("room_name") or room_name)
+                    updated_at_ms = max(updated_at_ms, int(points_path.stat().st_mtime * 1000))
+                    break
+                catalog["rooms"].append(
+                    {
+                        "room_id": room_id,
+                        "name": room_name,
+                        "updated_at_ms": updated_at_ms,
+                        "deleted_at_ms": 0,
+                    }
+                )
+        _atomic_write_json(path, catalog)
+        return catalog
+
+
+def _save_room_catalog(args: argparse.Namespace, catalog: dict) -> None:
+    with _ROOM_CATALOG_LOCK:
+        catalog["schema_version"] = 1
+        catalog["rooms"] = sorted(
+            [room for room in catalog.get("rooms", []) if isinstance(room, dict)],
+            key=lambda room: str(room.get("room_id") or ""),
+        )
+        _atomic_write_json(_room_catalog_path(args), catalog)
+
+
+def _catalog_room_by_id(catalog: dict) -> dict[str, dict]:
+    return {
+        str(room.get("room_id") or ""): room
+        for room in catalog.get("rooms", [])
+        if isinstance(room, dict) and str(room.get("room_id") or "")
+    }
+
+
+def _rename_room_store(args: argparse.Namespace, room_id: str, name: str, updated_at_ms: int | None = None) -> None:
+    clean_id = _safe_path_component(room_id, "")
+    clean_name = str(name or "").strip()
+    if not clean_id or not clean_name:
+        raise ValueError("room id and name are required")
+    timestamp = int(updated_at_ms or _now_ms())
+    room_dir = _room_store_root(args) / clean_id
+    if room_dir.exists():
+        for points_path in room_dir.glob("*/points.json"):
+            try:
+                store = json.loads(points_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            store["room_name"] = clean_name
+            _save_point_store(points_path.parent, store)
+    catalog = _load_room_catalog(args)
+    by_id = _catalog_room_by_id(catalog)
+    room = by_id.get(clean_id) or {"room_id": clean_id}
+    room.update({"name": clean_name, "updated_at_ms": timestamp, "deleted_at_ms": 0})
+    if clean_id not in by_id:
+        catalog["rooms"].append(room)
+    _save_room_catalog(args, catalog)
+
+
+def _delete_room_store(args: argparse.Namespace, room_id: str, deleted_at_ms: int | None = None) -> None:
+    clean_id = _safe_path_component(room_id, "")
+    if not clean_id:
+        raise ValueError("room id is required")
+    timestamp = int(deleted_at_ms or _now_ms())
+    root = _room_store_root(args)
+    room_dir = (root / clean_id).resolve()
+    if room_dir.parent != root:
+        raise ValueError("room path escaped room store")
+    if room_dir.exists():
+        shutil.rmtree(room_dir)
+    catalog = _load_room_catalog(args)
+    by_id = _catalog_room_by_id(catalog)
+    room = by_id.get(clean_id) or {"room_id": clean_id, "name": clean_id}
+    room["updated_at_ms"] = timestamp
+    room["deleted_at_ms"] = timestamp
+    if clean_id not in by_id:
+        catalog["rooms"].append(room)
+    _save_room_catalog(args, catalog)
+
+
+def _merge_room_catalog(args: argparse.Namespace, incoming_rooms: list[dict]) -> list[dict]:
+    for incoming in incoming_rooms:
+        if not isinstance(incoming, dict):
+            continue
+        room_id = _safe_path_component(incoming.get("room_id") or incoming.get("id"), "")
+        if not room_id:
+            continue
+        catalog = _load_room_catalog(args)
+        existing = _catalog_room_by_id(catalog).get(room_id)
+        incoming_updated = int(incoming.get("updated_at_ms") or incoming.get("deleted_at_ms") or 0)
+        existing_updated = int((existing or {}).get("updated_at_ms") or (existing or {}).get("deleted_at_ms") or 0)
+        if existing is not None and incoming_updated <= existing_updated:
+            if not str(existing.get("anchor_uuid") or "") and str(incoming.get("anchor_uuid") or ""):
+                for key in ("anchor_uuid", "px", "py", "pz", "qx", "qy", "qz", "qw"):
+                    if key in incoming:
+                        existing[key] = incoming[key]
+                _save_room_catalog(args, catalog)
+            continue
+        deleted_at_ms = int(incoming.get("deleted_at_ms") or 0)
+        if deleted_at_ms > 0:
+            _delete_room_store(args, room_id, deleted_at_ms)
+            continue
+        _rename_room_store(args, room_id, str(incoming.get("name") or room_id), incoming_updated or _now_ms())
+        catalog = _load_room_catalog(args)
+        room = _catalog_room_by_id(catalog).get(room_id)
+        if room is not None:
+            for key in ("anchor_uuid", "px", "py", "pz", "qx", "qy", "qz", "qw"):
+                if key in incoming:
+                    room[key] = incoming[key]
+            _save_room_catalog(args, catalog)
+    return _load_room_catalog(args).get("rooms", [])
+
+
 def _vlm_config_path(args: argparse.Namespace) -> Path:
     return _room_store_root(args) / "vlm_config.json"
+
+
+def _pairing_candidate_limit(value: object) -> int:
+    try:
+        return max(1, min(50, int(value)))
+    except (TypeError, ValueError, tk.TclError):
+        return 50
 
 
 def _legacy_vlm_config_paths(args: argparse.Namespace) -> list[Path]:
@@ -1524,6 +1677,9 @@ def _load_vlm_config(args: argparse.Namespace) -> dict:
                 "base_url": "",
                 "token": "",
                 "model": "",
+                "pairing_model": "",
+                "pairing_candidate_limit": 50,
+                "pairing_reasoning_effort": "minimal",
                 "tested_at_ms": 0,
                 "saved_at_ms": 0,
             }
@@ -1536,6 +1692,9 @@ def _load_vlm_config(args: argparse.Namespace) -> dict:
     config.setdefault("base_url", "")
     config.setdefault("token", "")
     config.setdefault("model", "")
+    config.setdefault("pairing_model", str(config.get("model") or ""))
+    config.setdefault("pairing_candidate_limit", 50)
+    config.setdefault("pairing_reasoning_effort", "minimal")
     config.setdefault("tested_at_ms", 0)
     config.setdefault("saved_at_ms", 0)
     return config
@@ -1547,6 +1706,9 @@ def _save_vlm_config(args: argparse.Namespace, config: dict) -> None:
         "base_url": str(config.get("base_url") or "").strip(),
         "token": str(config.get("token") or "").strip(),
         "model": str(config.get("model") or "").strip(),
+        "pairing_model": str(config.get("pairing_model") or config.get("model") or "").strip(),
+        "pairing_candidate_limit": _pairing_candidate_limit(config.get("pairing_candidate_limit")),
+        "pairing_reasoning_effort": str(config.get("pairing_reasoning_effort") or "minimal").strip(),
         "tested_at_ms": int(config.get("tested_at_ms") or 0),
         "saved_at_ms": _now_ms(),
     }
@@ -1592,8 +1754,16 @@ def _vlm_list_models(config: dict, timeout: float = 60.0) -> list[str]:
     return models
 
 
-def _vlm_chat_completion(config: dict, messages: list[dict], timeout: float = 120.0, max_tokens: int = 1200) -> str:
-    model = str(config.get("model") or "").strip()
+def _vlm_chat_completion_detail(
+    config: dict,
+    messages: list[dict],
+    timeout: float = 120.0,
+    max_tokens: int = 1200,
+    model_override: str = "",
+    response_format: dict | None = None,
+    extra_payload: dict | None = None,
+) -> tuple[str, str]:
+    model = str(model_override or config.get("model") or "").strip()
     if not model:
         raise ValueError("missing VLM model")
     url = _vlm_api_url(str(config.get("base_url") or ""), "/chat/completions")
@@ -1603,19 +1773,46 @@ def _vlm_chat_completion(config: dict, messages: list[dict], timeout: float = 12
         "max_tokens": max_tokens,
         "temperature": 0.2,
     }
+    if response_format:
+        payload["response_format"] = response_format
+    if extra_payload:
+        payload.update(extra_payload)
     data = _vlm_json_request("POST", url, str(config.get("token") or ""), payload=payload, timeout=timeout)
     choices = data.get("choices") or []
     if not choices:
-        return ""
-    message = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
+        return "", ""
+    choice = choices[0] if isinstance(choices[0], dict) else {}
+    message = choice.get("message", {})
+    finish_reason = str(choice.get("finish_reason") or "")
     content = message.get("content", "")
     if isinstance(content, list):
         parts = []
         for part in content:
             if isinstance(part, dict) and part.get("text"):
                 parts.append(str(part["text"]))
-        return "\n".join(parts).strip()
-    return str(content or "").strip()
+        return "\n".join(parts).strip(), finish_reason
+    return str(content or "").strip(), finish_reason
+
+
+def _vlm_chat_completion(
+    config: dict,
+    messages: list[dict],
+    timeout: float = 120.0,
+    max_tokens: int = 1200,
+    model_override: str = "",
+    response_format: dict | None = None,
+    extra_payload: dict | None = None,
+) -> str:
+    content, _finish_reason = _vlm_chat_completion_detail(
+        config,
+        messages,
+        timeout=timeout,
+        max_tokens=max_tokens,
+        model_override=model_override,
+        response_format=response_format,
+        extra_payload=extra_payload,
+    )
+    return content
 
 
 def _vlm_test_connection(config: dict, timeout: float = 60.0) -> tuple[list[str], str]:
@@ -1641,6 +1838,11 @@ def _room_device_paths(args: argparse.Namespace, cursor: dict) -> tuple[dict, Pa
 
 def _load_point_store(args: argparse.Namespace, cursor: dict) -> tuple[dict, Path, dict]:
     ctx, device_dir, points_path = _room_device_paths(args, cursor)
+    catalog_room = _catalog_room_by_id(_load_room_catalog(args)).get(ctx["room_id"])
+    if isinstance(catalog_room, dict):
+        if int(catalog_room.get("deleted_at_ms") or 0) > 0:
+            raise ValueError("room_deleted")
+        ctx["room_name"] = str(catalog_room.get("name") or ctx["room_name"])
     if points_path.exists():
         try:
             store = json.loads(points_path.read_text(encoding="utf-8"))
@@ -1661,7 +1863,59 @@ def _load_point_store(args: argparse.Namespace, cursor: dict) -> tuple[dict, Pat
 
 
 def _save_point_store(device_dir: Path, store: dict) -> None:
+    _compact_point_store_pairing_data(store)
     _atomic_write_json(device_dir / "points.json", store)
+
+
+def _compact_point_store_pairing_data(store: dict) -> None:
+    store["storage_schema_version"] = 2
+    for record in _object_records(store):
+        record.pop("pairing_llm_response", None)
+        diagnostics = record.get("pairing_llm_diagnostics")
+        if isinstance(diagnostics, list):
+            record["pairing_llm_diagnostics"] = [
+                {
+                    "batch": int(item.get("batch") or 0),
+                    "candidate_count": int(item.get("candidate_count") or 0),
+                    "finish_reason": str(item.get("finish_reason") or ""),
+                    "status": str(item.get("status") or ""),
+                    "response_preview": str(item.get("response_preview") or "")[:500],
+                }
+                for item in diagnostics
+                if isinstance(item, dict)
+            ]
+
+        candidates = record.get("pairing_candidates")
+        if isinstance(candidates, list):
+            compact_candidates: list[dict] = []
+            for candidate in candidates:
+                if not isinstance(candidate, dict):
+                    continue
+                item = dict(candidate)
+                profile = item.get("profile")
+                item["profile"] = _compact_network_profile(profile) if isinstance(profile, dict) else {}
+                rules = item.get("rules")
+                if isinstance(rules, list) and int(item.get("rank") or 0) <= 10:
+                    item["rules"] = [
+                        {
+                            "rule_id": str(rule.get("rule_id") or ""),
+                            "label": str(rule.get("label") or ""),
+                            "verdict": str(rule.get("verdict") or "unknown"),
+                            "points": int(rule.get("points") or 0),
+                            "max_points": int(rule.get("max_points") or 0),
+                            "source": str(rule.get("source") or ""),
+                        }
+                        for rule in rules
+                        if isinstance(rule, dict)
+                    ]
+                else:
+                    item["rules"] = []
+                compact_candidates.append(item)
+            record["pairing_candidates"] = compact_candidates
+
+        binding = record.get("network_binding")
+        if isinstance(binding, dict) and isinstance(binding.get("profile_snapshot"), dict):
+            binding["profile_snapshot"] = _compact_network_profile(binding["profile_snapshot"])
 
 
 def _resolve_store_path(device_dir: Path, value: object) -> Path:
@@ -1850,13 +2104,32 @@ def _point_world_xyz(cursor: dict, prompt: dict) -> list[float]:
     ]
 
 
+def _point_room_xyz(cursor: dict, world_xyz: list[float]) -> list[float]:
+    try:
+        return [
+            float(cursor["hit_room_x"]),
+            float(cursor["hit_room_y"]),
+            float(cursor["hit_room_z"]),
+        ]
+    except (KeyError, TypeError, ValueError):
+        return list(world_xyz)
+
+
+def _point_metric_xyz(point: dict) -> list[float]:
+    room = point.get("room_xyz_m")
+    if isinstance(room, list) and len(room) == 3:
+        return room
+    world = point.get("world_xyz_m")
+    return world if isinstance(world, list) and len(world) == 3 else [0.0, 0.0, 0.0]
+
+
 def _is_duplicate_point(args: argparse.Namespace, store: dict, point: dict) -> bool:
     debounce_ms = max(0, int(args.point_debounce_ms))
     debounce_world = max(0.0, float(args.point_debounce_world_m))
     if debounce_ms <= 0 and debounce_world <= 0:
         return False
     ts = int(point.get("timestamp_ms") or 0)
-    world = np.asarray(point.get("world_xyz_m") or [0.0, 0.0, 0.0], dtype=np.float32)
+    world = np.asarray(_point_metric_xyz(point), dtype=np.float32)
     for prev in reversed(store.get("points", [])):
         if prev.get("image_id") != point.get("image_id"):
             continue
@@ -1865,7 +2138,7 @@ def _is_duplicate_point(args: argparse.Namespace, store: dict, point: dict) -> b
         if int(prev.get("label", 1)) != int(point.get("label", 1)):
             continue
         prev_ts = int(prev.get("timestamp_ms") or 0)
-        prev_world = np.asarray(prev.get("world_xyz_m") or [0.0, 0.0, 0.0], dtype=np.float32)
+        prev_world = np.asarray(_point_metric_xyz(prev), dtype=np.float32)
         world_close = debounce_world > 0 and float(np.linalg.norm(world - prev_world)) <= debounce_world
         time_close = debounce_ms > 0 and ts > 0 and prev_ts > 0 and abs(ts - prev_ts) <= debounce_ms
         if world_close or (debounce_world <= 0 and time_close):
@@ -1884,6 +2157,7 @@ def _append_room_point(
     label = 1 if int(cursor.get("label", cursor.get("point_label", 1))) > 0 else 0
     timestamp_ms = int(cursor.get("timestamp_ms") or _now_ms())
     logical_point_id = str(cursor.get("logical_point_id") or "").strip()
+    world_xyz = _point_world_xyz(cursor, prompt)
     point = {
         "point_id": f"pt_{timestamp_ms}_{len(store.get('points', [])) + 1:04d}",
         "image_id": image_record["image_id"],
@@ -1891,7 +2165,8 @@ def _append_room_point(
         "label": label,
         "mode": cursor.get("mode") or ("add" if label > 0 else "del"),
         "rgb_xy": [int(prompt["rgb_x"]), int(prompt["rgb_y"])],
-        "world_xyz_m": _point_world_xyz(cursor, prompt),
+        "world_xyz_m": world_xyz,
+        "room_xyz_m": _point_room_xyz(cursor, world_xyz),
         "timestamp_ms": timestamp_ms,
         "rgb_camera_z_m": float(prompt.get("rgb_camera_z_m", 0.0)),
     }
@@ -1914,6 +2189,11 @@ def _cursor_for_stored_point(point: dict, fallback_cursor: dict) -> dict:
         cursor["hit_world_x"] = float(world[0])
         cursor["hit_world_y"] = float(world[1])
         cursor["hit_world_z"] = float(world[2])
+    room = point.get("room_xyz_m")
+    if isinstance(room, list) and len(room) == 3:
+        cursor["hit_room_x"] = float(room[0])
+        cursor["hit_room_y"] = float(room[1])
+        cursor["hit_room_z"] = float(room[2])
     cursor["is_hitting"] = True
     cursor["label"] = 1 if int(point.get("label", 1)) > 0 else 0
     cursor["mode"] = point.get("mode") or ("add" if int(point.get("label", 1)) > 0 else "del")
@@ -1966,6 +2246,7 @@ def _preseed_visible_points_for_new_image(
             continue
 
         timestamp_ms = _now_ms()
+        world_xyz = _point_world_xyz(cursor, prompt)
         point = {
             "point_id": f"pt_{timestamp_ms}_{len(store.get('points', [])) + 1:04d}",
             "image_id": image_record["image_id"],
@@ -1973,7 +2254,8 @@ def _preseed_visible_points_for_new_image(
             "label": 1 if int(source.get("label", 1)) > 0 else 0,
             "mode": source.get("mode") or ("add" if int(source.get("label", 1)) > 0 else "del"),
             "rgb_xy": [int(prompt["rgb_x"]), int(prompt["rgb_y"])],
-            "world_xyz_m": _point_world_xyz(cursor, prompt),
+            "world_xyz_m": world_xyz,
+            "room_xyz_m": list(source.get("room_xyz_m") or _point_room_xyz(cursor, world_xyz)),
             "timestamp_ms": timestamp_ms,
             "rgb_camera_z_m": float(prompt.get("rgb_camera_z_m", 0.0)),
             "source_point_id": str(source.get("source_point_id") or source.get("point_id")),
@@ -1999,13 +2281,11 @@ def _remove_room_points_near_world(
     cursor: dict,
 ) -> list[dict]:
     object_id = _room_context(cursor)["object_id"]
+    use_room_coordinates = all(key in cursor for key in ("hit_room_x", "hit_room_y", "hit_room_z"))
+    prefix = "hit_room" if use_room_coordinates else "hit_world"
     try:
         target = np.asarray(
-            [
-                float(cursor["hit_world_x"]),
-                float(cursor["hit_world_y"]),
-                float(cursor["hit_world_z"]),
-            ],
+            [float(cursor[f"{prefix}_x"]), float(cursor[f"{prefix}_y"]), float(cursor[f"{prefix}_z"])],
             dtype=np.float32,
         )
     except (KeyError, TypeError, ValueError):
@@ -2017,10 +2297,7 @@ def _remove_room_points_near_world(
     for index, point in enumerate(store.get("points", [])):
         if point.get("object_id") != object_id:
             continue
-        world = point.get("world_xyz_m")
-        if not isinstance(world, list) or len(world) != 3:
-            continue
-        point_world = np.asarray(world, dtype=np.float32)
+        point_world = np.asarray(_point_metric_xyz(point), dtype=np.float32)
         distance = float(np.linalg.norm(point_world - target))
         if distance < best_distance:
             best_distance = distance
@@ -2030,7 +2307,7 @@ def _remove_room_points_near_world(
         return []
 
     best_point = store["points"][best_index]
-    best_world = np.asarray(best_point.get("world_xyz_m") or [0.0, 0.0, 0.0], dtype=np.float32)
+    best_world = np.asarray(_point_metric_xyz(best_point), dtype=np.float32)
     logical_id = str(best_point.get("logical_point_id") or "").strip()
     source_id = str(best_point.get("source_point_id") or best_point.get("point_id") or "").strip()
     removed: list[dict] = []
@@ -2047,7 +2324,9 @@ def _remove_room_points_near_world(
         same_source = not logical_id and bool(source_id) and (point_source_id == source_id or point_id == source_id)
         if same_logical or same_source:
             item = dict(point)
-            item["delete_distance_m"] = float(np.linalg.norm(np.asarray(point.get("world_xyz_m") or best_world, dtype=np.float32) - target))
+            item["delete_distance_m"] = float(
+                np.linalg.norm(np.asarray(_point_metric_xyz(point), dtype=np.float32) - target)
+            )
             removed.append(item)
         else:
             kept.append(point)
@@ -2127,6 +2406,14 @@ def _object_spatial_points(store: dict, object_id: str) -> list[dict]:
                 "point_id": str(point.get("point_id") or key),
                 "label": 1 if int(point.get("label", 1)) > 0 else 0,
                 "world_xyz_m": [float(world[0]), float(world[1]), float(world[2])],
+                "room_xyz_m": [
+                    float(value)
+                    for value in (
+                        point.get("room_xyz_m")
+                        if isinstance(point.get("room_xyz_m"), list) and len(point.get("room_xyz_m")) == 3
+                        else world
+                    )
+                ],
                 "image_id": str(point.get("image_id") or ""),
             }
         )
@@ -2583,12 +2870,12 @@ def _compact_network_profile(profile: dict) -> dict:
         "protocols": profile.get("protocols") or [],
         "online": bool(profile.get("online", False)),
         "last_seen": float(profile.get("last_seen") or 0.0),
-        "data_count": len(data),
-        "operation_count": len(operations),
-        "data_preview": data_preview,
-        "operation_preview": operation_preview,
-        "address_summary": " / ".join(addresses),
-        "identifier_summary": " / ".join(identity_values),
+        "data_count": int(profile.get("data_count") or len(data)),
+        "operation_count": int(profile.get("operation_count") or len(operations)),
+        "data_preview": data_preview or list(profile.get("data_preview") or [])[:6],
+        "operation_preview": operation_preview or list(profile.get("operation_preview") or [])[:6],
+        "address_summary": " / ".join(addresses) or str(profile.get("address_summary") or ""),
+        "identifier_summary": " / ".join(identity_values) or str(profile.get("identifier_summary") or ""),
     }
 
 
@@ -2610,6 +2897,85 @@ def _pairing_candidate_payloads(record: dict, limit: int | None = None, compact_
             item["profile"] = _compact_network_profile(profile)
         payloads.append(item)
     return payloads
+
+
+def _network_profile_search_text(profile: dict) -> str:
+    values: list[str] = [
+        str(profile.get("canonical_device_id") or ""),
+        str(profile.get("runtime_device_id") or ""),
+        str(profile.get("display_name") or ""),
+        str(profile.get("summary") or ""),
+        str(profile.get("vendor") or ""),
+        str(profile.get("device_type") or ""),
+        *[str(value) for value in (profile.get("model_candidates") or [])],
+        *[str(value) for value in (profile.get("capabilities") or [])],
+        *[str(value) for value in (profile.get("protocols") or [])],
+    ]
+    for mapping_name in ("identifiers", "connections"):
+        mapping = profile.get(mapping_name)
+        if not isinstance(mapping, dict):
+            continue
+        for key, raw in mapping.items():
+            values.append(str(key))
+            if isinstance(raw, list):
+                values.extend(str(value) for value in raw)
+            else:
+                values.append(str(raw))
+    data = profile.get("data")
+    if isinstance(data, dict):
+        values.extend(str(key) for key in data)
+    operations = profile.get("operations")
+    if isinstance(operations, list):
+        for operation in operations:
+            if isinstance(operation, dict):
+                values.extend(str(value) for value in operation.values() if isinstance(value, (str, int, float)))
+    return "\n".join(values).casefold()
+
+
+def _search_pairing_candidates(
+    record: dict,
+    runtime_profiles: list[dict],
+    query: str,
+    limit: int,
+) -> list[dict]:
+    needle = str(query or "").strip().casefold()
+    if not needle:
+        return _pairing_candidate_payloads(record, limit=limit, compact_profile=True)
+
+    matching_profiles = [
+        profile
+        for profile in runtime_profiles
+        if isinstance(profile, dict) and needle in _network_profile_search_text(profile)
+    ]
+    visual_profile = record.get("pairing_visual_profile") or _object_visual_profile(record)
+    deterministic = score_candidates(visual_profile, matching_profiles)
+    saved_by_id = {
+        str(candidate.get("canonical_device_id") or ""): candidate
+        for candidate in (record.get("pairing_candidates") or [])
+        if isinstance(candidate, dict)
+    }
+    profile_by_id = {
+        str(profile.get("canonical_device_id") or ""): profile
+        for profile in matching_profiles
+    }
+    results: list[dict] = []
+    for candidate in deterministic:
+        candidate_id = str(candidate.get("canonical_device_id") or "")
+        saved = saved_by_id.get(candidate_id)
+        item = dict(saved) if isinstance(saved, dict) else dict(candidate)
+        item["profile"] = _compact_network_profile(profile_by_id.get(candidate_id, item.get("profile") or {}))
+        results.append(item)
+    results.sort(
+        key=lambda item: (
+            int(item.get("score") or 0),
+            int(item.get("evidence_coverage_percent") or 0),
+            str(item.get("display_name") or ""),
+        ),
+        reverse=True,
+    )
+    for rank, item in enumerate(results, start=1):
+        item["rank"] = rank
+    return results[:limit]
 
 
 def _pairing_record_payload(record: dict, candidate_limit: int | None = None, compact_profile: bool = False) -> dict:
@@ -2791,11 +3157,28 @@ def _vlm_object_prompt() -> str:
 
 
 def _build_vlm_object_messages(viewer: "RgbdViewer", device_dir: Path, store: dict, object_id: str) -> list[dict]:
-    content: list[dict] = [{"type": "text", "text": _vlm_object_prompt()}]
+    record = _find_object_record(store, object_id) or {}
+    user_note = str(record.get("user_note") or "").strip()[:280]
+    content: list[dict] = []
+    if user_note:
+        content.append(
+            {
+                "type": "text",
+                "text": (
+                    "USER_NOTE (unverified user-provided context; use it as a matching clue, not as visual fact):\n"
+                    + user_note
+                ),
+            }
+        )
+    else:
+        content.append({"type": "text", "text": "No user note was provided."})
     for image_record, image in _object_masked_images(viewer, device_dir, store, object_id):
         content.append({"type": "text", "text": f"Image {image_record.get('image_id', '')}"})
         content.append({"type": "image_url", "image_url": {"url": _pil_to_data_url(image)}})
-    return [{"role": "user", "content": content}]
+    return [
+        {"role": "system", "content": _vlm_object_prompt()},
+        {"role": "user", "content": content},
+    ]
 
 
 def _run_vlm_object_analysis(viewer: "RgbdViewer", cursor: dict, object_id: str) -> None:
@@ -2825,7 +3208,10 @@ def _run_vlm_object_analysis(viewer: "RgbdViewer", cursor: dict, object_id: str)
 
     try:
         messages = _build_vlm_object_messages(viewer, device_dir, store, object_id)
-        if len(messages[0]["content"]) <= 1:
+        if not any(
+            isinstance(item, dict) and item.get("type") == "image_url"
+            for item in messages[-1]["content"]
+        ):
             raise ValueError("no masked images available for VLM")
         description = _vlm_chat_completion(
             config,
@@ -2885,6 +3271,198 @@ def _visual_profile_has_evidence(profile: dict) -> bool:
             "physical_features",
         )
     )
+
+
+def _pairing_payload_is_complete(payload: dict | None, profiles: list[dict]) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    expected_ids = {
+        str(profile.get("canonical_device_id") or "")
+        for profile in profiles
+        if str(profile.get("canonical_device_id") or "")
+    }
+    candidates = payload.get("candidates")
+    if not isinstance(candidates, list):
+        return False
+    actual_ids: set[str] = set()
+    expected_rules = {
+        "exact_model_match",
+        "model_family_match",
+        "vendor_match",
+        "device_type_match",
+        "core_capability_match",
+        "secondary_capability_match",
+        "visible_identifier_support",
+        "physical_function_consistency",
+    }
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            return False
+        candidate_id = str(candidate.get("candidate_id") or "")
+        if candidate_id not in expected_ids:
+            return False
+        verdicts = candidate.get("verdicts")
+        if not isinstance(verdicts, list) or len(verdicts) != len(expected_rules):
+            return False
+        if any(str(verdict) not in {"match", "conflict", "unknown"} for verdict in verdicts):
+            return False
+        actual_ids.add(candidate_id)
+    return actual_ids == expected_ids
+
+
+def _normalize_pairing_verdict(value: object) -> str:
+    token = re.sub(r"[^a-z]+", "_", str(value or "").strip().lower()).strip("_")
+    if token in {"match", "yes", "true", "supported", "consistent", "same"}:
+        return "match"
+    if token in {"conflict", "no", "false", "mismatch", "inconsistent", "different"}:
+        return "conflict"
+    if token in {"unknown", "uncertain", "insufficient", "missing", "none", "null", "not_applicable", "n_a"}:
+        return "unknown"
+    return ""
+
+
+def _normalize_pairing_payload(payload: dict | None) -> dict | None:
+    if not isinstance(payload, dict) or not isinstance(payload.get("candidates"), list):
+        return None
+    normalized: list[dict] = []
+    for candidate in payload["candidates"]:
+        if not isinstance(candidate, dict):
+            continue
+        candidate_id = str(candidate.get("candidate_id") or "").strip()
+        verdicts = candidate.get("verdicts")
+        if not candidate_id or not isinstance(verdicts, list):
+            continue
+        normalized_verdicts = [_normalize_pairing_verdict(value) for value in verdicts]
+        if any(not verdict for verdict in normalized_verdicts):
+            continue
+        normalized.append({"candidate_id": candidate_id, "verdicts": normalized_verdicts})
+    return {"candidates": normalized}
+
+
+def _pairing_request_options(config: dict, structured: bool) -> dict:
+    effort = str(config.get("pairing_reasoning_effort") or "minimal").strip().lower()
+    options: dict = {}
+    if effort in {"none", "minimal", "low", "medium", "high"}:
+        options["reasoning"] = {"effort": effort, "exclude": True}
+    if "openrouter.ai" in str(config.get("base_url") or "").lower():
+        if structured:
+            options["plugins"] = [{"id": "response-healing"}]
+            options["provider"] = {"require_parameters": True}
+    return options
+
+
+def _pairing_llm_review(
+    config: dict,
+    prompt: str,
+    profiles: list[dict],
+    timeout: float,
+) -> tuple[dict | None, str, str, str]:
+    model = str(config.get("pairing_model") or config.get("model") or "").strip()
+    max_tokens = max(1000, min(4000, 800 + len(profiles) * 50))
+    response_format = pairing_response_schema()
+    response_format_used = "json_schema"
+    try:
+        response, finish_reason = _vlm_chat_completion_detail(
+            config,
+            [{"role": "user", "content": prompt}],
+            timeout=timeout,
+            max_tokens=max_tokens,
+            model_override=model,
+            response_format=response_format,
+            extra_payload=_pairing_request_options(config, structured=True),
+        )
+    except RuntimeError as exc:
+        error_text = str(exc).lower()
+        if "http 400" not in error_text and "http 422" not in error_text and "response_format" not in error_text:
+            raise
+        response_format_used = "prompt_json_fallback"
+        response, finish_reason = _vlm_chat_completion_detail(
+            config,
+            [{"role": "user", "content": prompt}],
+            timeout=timeout,
+            max_tokens=max_tokens,
+            model_override=model,
+            extra_payload=_pairing_request_options(config, structured=False),
+        )
+
+    payload = _normalize_pairing_payload(parse_json_object(response))
+    if finish_reason == "length" or not _pairing_payload_is_complete(payload, profiles):
+        retry_tokens = min(5000, max_tokens + 1000)
+        response_format_used += "+retry"
+        response, finish_reason = _vlm_chat_completion_detail(
+            config,
+            [{"role": "user", "content": prompt}],
+            timeout=timeout,
+            max_tokens=retry_tokens,
+            model_override=model,
+            response_format=response_format if response_format_used.startswith("json_schema") else None,
+            extra_payload=_pairing_request_options(
+                config,
+                structured=response_format_used.startswith("json_schema"),
+            ),
+        )
+        payload = _normalize_pairing_payload(parse_json_object(response))
+
+    if finish_reason == "length":
+        return None, response, finish_reason, "Pairing output reached the model token limit."
+    if not _pairing_payload_is_complete(payload, profiles):
+        return None, response, finish_reason, "Pairing output was incomplete or invalid JSON."
+    return payload, response, finish_reason, response_format_used
+
+
+def _pairing_llm_review_batches(
+    config: dict,
+    visual_profile: dict,
+    profiles: list[dict],
+    timeout: float,
+    batch_size: int = 10,
+) -> tuple[dict | None, list[dict], str]:
+    batches = [profiles[index : index + batch_size] for index in range(0, len(profiles), batch_size)]
+    diagnostics: list[dict] = []
+    valid_candidates: list[dict] = []
+
+    def run_batch(index_and_profiles: tuple[int, list[dict]]) -> tuple[int, dict | None, str, str, str]:
+        index, batch_profiles = index_and_profiles
+        try:
+            prompt = build_pairing_prompt(visual_profile, batch_profiles)
+            payload, response, finish_reason, status = _pairing_llm_review(
+                config,
+                prompt,
+                batch_profiles,
+                timeout,
+            )
+            return index, payload, response, finish_reason, status
+        except Exception as exc:
+            return index, None, "", "", "request failed: " + str(exc)
+
+    indexed_batches = list(enumerate(batches))
+    worker_count = max(1, min(4, len(indexed_batches)))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = [executor.submit(run_batch, item) for item in indexed_batches]
+        results = [future.result() for future in concurrent.futures.as_completed(futures)]
+
+    for index, payload, response, finish_reason, status in sorted(results, key=lambda item: item[0]):
+        candidate_count = len((payload or {}).get("candidates") or [])
+        diagnostics.append(
+            {
+                "batch": index + 1,
+                "candidate_count": candidate_count,
+                "finish_reason": finish_reason,
+                "status": status,
+                "response_preview": response[:500],
+            }
+        )
+        valid_candidates.extend((payload or {}).get("candidates") or [])
+
+    failed_batches = [item for item in diagnostics if item["candidate_count"] == 0]
+    warning = ""
+    if failed_batches:
+        warning = (
+            f"{len(failed_batches)} of {len(batches)} pairing batches failed validation; "
+            "deterministic scoring was used only for those candidates."
+        )
+    payload = {"candidates": valid_candidates} if valid_candidates else None
+    return payload, diagnostics, warning
 
 
 def _analysis_job_key(cursor: dict, object_id: str) -> tuple[str, str, str]:
@@ -2949,40 +3527,33 @@ def _run_object_pairing_analysis(viewer: "RgbdViewer", cursor: dict, object_id: 
             _save_point_store(device_dir, store)
 
         profiles = runtime.profiles()
-        baseline_candidates = score_candidates(visual_profile, profiles)
-        profile_by_id = {
-            str(profile.get("canonical_device_id") or ""): profile
-            for profile in profiles
-        }
-        shortlist_limit = max(1, int(getattr(viewer.args, "pairing_max_candidates", 50)))
-        shortlisted_profiles = [
-            profile_by_id[str(candidate.get("canonical_device_id") or "")]
-            for candidate in baseline_candidates[:shortlist_limit]
-            if str(candidate.get("canonical_device_id") or "") in profile_by_id
-        ]
+        result_limit = max(1, int(getattr(viewer.args, "pairing_max_candidates", 50)))
+        config = _load_vlm_config(viewer.args)
+        llm_limit = _pairing_candidate_limit(config.get("pairing_candidate_limit"))
+        shortlisted_profiles = shortlist_network_profiles(
+            visual_profile,
+            profiles,
+            llm_limit,
+        )
 
         llm_payload = None
-        llm_response = ""
         llm_warning = ""
-        config = _load_vlm_config(viewer.args)
-        if shortlisted_profiles and str(config.get("base_url") or "").strip() and str(config.get("model") or "").strip():
+        llm_diagnostics: list[dict] = []
+        pairing_model = str(config.get("pairing_model") or config.get("model") or "").strip()
+        if shortlisted_profiles and str(config.get("base_url") or "").strip() and pairing_model:
             try:
-                prompt = build_pairing_prompt(visual_profile, shortlisted_profiles)
-                llm_response = _vlm_chat_completion(
+                llm_payload, llm_diagnostics, llm_warning = _pairing_llm_review_batches(
                     config,
-                    [{"role": "user", "content": prompt}],
-                    timeout=float(getattr(viewer.args, "vlm_timeout_seconds", 120.0)),
-                    max_tokens=max(1800, min(8000, 900 + len(shortlisted_profiles) * 350)),
+                    visual_profile,
+                    shortlisted_profiles,
+                    float(getattr(viewer.args, "vlm_timeout_seconds", 120.0)),
                 )
-                llm_payload = parse_json_object(llm_response)
-                if llm_payload is None:
-                    llm_warning = "LLM pairing response was not valid JSON; deterministic scoring was used."
             except Exception as exc:
                 llm_warning = f"LLM pairing review failed; deterministic scoring was used: {exc}"
                 print(f"[pairing] LLM review failed for {object_id}: {exc}", flush=True)
 
         all_candidates = score_candidates(visual_profile, profiles, llm_payload)
-        candidates = all_candidates[:shortlist_limit]
+        candidates = all_candidates[:result_limit]
         with viewer._pairing_lock:
             _ctx, device_dir, store = _load_point_store(viewer.args, cursor)
             record = _find_object_record(store, object_id)
@@ -2990,8 +3561,11 @@ def _run_object_pairing_analysis(viewer: "RgbdViewer", cursor: dict, object_id: 
                 record["pairing_status"] = "done"
                 record["pairing_visual_profile"] = visual_profile
                 record["pairing_candidates"] = candidates
-                record["pairing_llm_model"] = str(config.get("model") or "") if llm_payload is not None else ""
-                record["pairing_llm_response"] = llm_response
+                record["pairing_llm_model"] = pairing_model if llm_payload is not None else ""
+                record.pop("pairing_llm_response", None)
+                record.pop("pairing_llm_finish_reason", None)
+                record.pop("pairing_llm_response_mode", None)
+                record["pairing_llm_diagnostics"] = llm_diagnostics
                 record["pairing_evaluated_candidate_count"] = len(all_candidates)
                 record["pairing_llm_candidate_count"] = len(shortlisted_profiles)
                 record["pairing_completed_at_ms"] = _now_ms()
@@ -3324,6 +3898,13 @@ class _PayloadHandler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/api/room/catalog":
+            viewer = self.viewer_ref
+            if viewer is None:
+                self._send_json(503, {"ok": False, "reason": "viewer_not_ready", "rooms": []})
+            else:
+                self._send_json(200, {"ok": True, "rooms": _load_room_catalog(viewer.args).get("rooms", [])})
+            return
         if parsed.path == "/api/room/preview/list":
             self._handle_room_preview_list(parsed)
             return
@@ -3351,6 +3932,18 @@ class _PayloadHandler(http.server.BaseHTTPRequestHandler):
         self.send_error(404)
 
     def do_POST(self) -> None:
+        if self.path == "/api/room/catalog/sync":
+            self._handle_room_catalog_sync()
+            return
+
+        if self.path == "/api/room/rename":
+            self._handle_room_rename()
+            return
+
+        if self.path == "/api/room/delete":
+            self._handle_room_delete()
+            return
+
         if self.path == "/api/room/object/begin_edit":
             self._handle_room_object_begin_edit()
             return
@@ -3909,6 +4502,12 @@ class _PayloadHandler(http.server.BaseHTTPRequestHandler):
 
         try:
             ctx, device_dir, store = _load_point_store(viewer.args, payload)
+            user_note = str(payload.get("user_note") or "").strip()[:280]
+            existing_record = _find_object_record(store, object_id)
+            if existing_record is not None:
+                existing_record["user_note"] = user_note
+                existing_record["updated_at_ms"] = _now_ms()
+                _save_point_store(device_dir, store)
             record = _complete_object(viewer.args, device_dir, store, object_id, edit_session_id)
             _schedule_vlm_object_analysis(viewer, payload, object_id)
             _ctx, device_dir, store = _load_point_store(viewer.args, payload)
@@ -4042,6 +4641,60 @@ class _PayloadHandler(http.server.BaseHTTPRequestHandler):
         self._send_json(200, {"ok": True, "object_id": object_id, "object": record})
         viewer.root.after(0, viewer.refresh_device_tree)
 
+    def _handle_room_catalog_sync(self) -> None:
+        viewer = self.viewer_ref
+        if viewer is None:
+            self._send_json(503, {"ok": False, "reason": "viewer_not_ready", "rooms": []})
+            return
+        payload, error = self._read_json_payload()
+        if error is not None:
+            self._send_json(400, {"ok": False, "reason": error, "rooms": []})
+            return
+        try:
+            rooms = _merge_room_catalog(viewer.args, payload.get("rooms") or [])
+        except Exception as exc:
+            self._send_json(500, {"ok": False, "reason": str(exc), "rooms": []})
+            return
+        self._send_json(200, {"ok": True, "rooms": rooms, "server_time_ms": _now_ms()})
+        viewer.root.after(0, viewer.refresh_device_tree)
+
+    def _handle_room_rename(self) -> None:
+        viewer = self.viewer_ref
+        if viewer is None:
+            self._send_json(503, {"ok": False, "reason": "viewer_not_ready"})
+            return
+        payload, error = self._read_json_payload()
+        if error is not None:
+            self._send_json(400, {"ok": False, "reason": error})
+            return
+        try:
+            room_id = str(payload.get("room_id") or "")
+            name = str(payload.get("name") or "").strip()
+            _rename_room_store(viewer.args, room_id, name)
+        except Exception as exc:
+            self._send_json(400, {"ok": False, "reason": str(exc)})
+            return
+        self._send_json(200, {"ok": True, "room_id": room_id, "name": name})
+        viewer.root.after(0, viewer.refresh_device_tree)
+
+    def _handle_room_delete(self) -> None:
+        viewer = self.viewer_ref
+        if viewer is None:
+            self._send_json(503, {"ok": False, "reason": "viewer_not_ready"})
+            return
+        payload, error = self._read_json_payload()
+        if error is not None:
+            self._send_json(400, {"ok": False, "reason": error})
+            return
+        try:
+            room_id = str(payload.get("room_id") or "")
+            _delete_room_store(viewer.args, room_id)
+        except Exception as exc:
+            self._send_json(400, {"ok": False, "reason": str(exc)})
+            return
+        self._send_json(200, {"ok": True, "room_id": room_id})
+        viewer.root.after(0, viewer.refresh_device_tree)
+
     def _handle_discover_status(self) -> None:
         viewer = self.viewer_ref
         runtime = getattr(viewer, "discover_runtime", None) if viewer is not None else None
@@ -4077,11 +4730,21 @@ class _PayloadHandler(http.server.BaseHTTPRequestHandler):
                 return
             limit_raw = (query.get("limit") or [""])[0]
             try:
-                limit = int(limit_raw) if str(limit_raw).strip() else None
+                limit = max(1, min(50, int(limit_raw))) if str(limit_raw).strip() else 10
             except ValueError:
-                limit = None
+                limit = 10
             compact = str((query.get("compact") or [""])[0]).lower() in {"1", "true", "yes"}
-            payload = _pairing_record_payload(record, candidate_limit=limit, compact_profile=compact)
+            search_query = str((query.get("q") or [""])[0]).strip()
+            payload = _pairing_record_payload(record, candidate_limit=0, compact_profile=compact)
+            runtime = getattr(viewer, "discover_runtime", None)
+            runtime_profiles = runtime.profiles() if runtime is not None else []
+            payload["candidates"] = _search_pairing_candidates(
+                record,
+                runtime_profiles,
+                search_query,
+                limit,
+            )
+            payload["search_query"] = search_query
         except Exception as exc:
             self._send_json(500, {"ok": False, "reason": str(exc), "candidates": []})
             return
@@ -4477,6 +5140,8 @@ class RgbdViewer:
         toolbar = ttk.Frame(parent)
         toolbar.pack(side=tk.TOP, fill=tk.X, pady=(0, 8))
         ttk.Button(toolbar, text="Refresh", command=self.refresh_device_tree).pack(side=tk.LEFT)
+        ttk.Button(toolbar, text="Rename", command=self.rename_selected_room_object).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(toolbar, text="Delete", command=self.delete_selected_room_object).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(toolbar, text="Retry VLM", command=self.retry_selected_vlm).pack(side=tk.LEFT, padx=(8, 0))
         self.device_tree_status_var = tk.StringVar(value="")
         ttk.Label(toolbar, textvariable=self.device_tree_status_var).pack(side=tk.LEFT, padx=12)
@@ -4509,6 +5174,15 @@ class RgbdViewer:
         self.vlm_base_url_var = tk.StringVar(value=str(config.get("base_url") or ""))
         self.vlm_token_var = tk.StringVar(value=str(config.get("token") or ""))
         self.vlm_model_var = tk.StringVar(value=str(config.get("model") or ""))
+        self.vlm_pairing_model_var = tk.StringVar(
+            value=str(config.get("pairing_model") or config.get("model") or "")
+        )
+        self.vlm_pairing_candidate_limit_var = tk.IntVar(
+            value=_pairing_candidate_limit(config.get("pairing_candidate_limit"))
+        )
+        self.vlm_pairing_reasoning_var = tk.StringVar(
+            value=str(config.get("pairing_reasoning_effort") or "minimal")
+        )
         self.vlm_status_var = tk.StringVar(value="VLM config loaded" if config.get("model") else "Configure VLM endpoint")
 
         form = ttk.Frame(parent)
@@ -4517,9 +5191,33 @@ class RgbdViewer:
         ttk.Entry(form, textvariable=self.vlm_base_url_var, width=72).grid(row=0, column=1, sticky=tk.EW, pady=6)
         ttk.Label(form, text="Token").grid(row=1, column=0, sticky=tk.W, padx=(0, 8), pady=6)
         ttk.Entry(form, textvariable=self.vlm_token_var, width=72, show="*").grid(row=1, column=1, sticky=tk.EW, pady=6)
-        ttk.Label(form, text="Model").grid(row=2, column=0, sticky=tk.W, padx=(0, 8), pady=6)
+        ttk.Label(form, text="Device analysis model").grid(row=2, column=0, sticky=tk.W, padx=(0, 8), pady=6)
         self.vlm_model_combo = ttk.Combobox(form, textvariable=self.vlm_model_var, values=(), width=68)
         self.vlm_model_combo.grid(row=2, column=1, sticky=tk.EW, pady=6)
+        ttk.Label(form, text="Pairing model").grid(row=3, column=0, sticky=tk.W, padx=(0, 8), pady=6)
+        self.vlm_pairing_model_combo = ttk.Combobox(
+            form,
+            textvariable=self.vlm_pairing_model_var,
+            values=(),
+            width=68,
+        )
+        self.vlm_pairing_model_combo.grid(row=3, column=1, sticky=tk.EW, pady=6)
+        ttk.Label(form, text="Pairing shortlist").grid(row=4, column=0, sticky=tk.W, padx=(0, 8), pady=6)
+        ttk.Spinbox(
+            form,
+            from_=1,
+            to=50,
+            textvariable=self.vlm_pairing_candidate_limit_var,
+            width=8,
+        ).grid(row=4, column=1, sticky=tk.W, pady=6)
+        ttk.Label(form, text="Pairing reasoning").grid(row=5, column=0, sticky=tk.W, padx=(0, 8), pady=6)
+        ttk.Combobox(
+            form,
+            textvariable=self.vlm_pairing_reasoning_var,
+            values=("none", "minimal", "low", "medium", "high"),
+            state="readonly",
+            width=12,
+        ).grid(row=5, column=1, sticky=tk.W, pady=6)
         form.columnconfigure(1, weight=1)
 
         actions = ttk.Frame(parent)
@@ -5463,6 +6161,9 @@ class RgbdViewer:
             "base_url": self.vlm_base_url_var.get().strip(),
             "token": self.vlm_token_var.get().strip(),
             "model": self.vlm_model_var.get().strip(),
+            "pairing_model": self.vlm_pairing_model_var.get().strip() or self.vlm_model_var.get().strip(),
+            "pairing_candidate_limit": _pairing_candidate_limit(self.vlm_pairing_candidate_limit_var.get()),
+            "pairing_reasoning_effort": self.vlm_pairing_reasoning_var.get().strip() or "minimal",
         }
 
     def _vlm_form_signature(self) -> str:
@@ -5472,6 +6173,9 @@ class RgbdViewer:
                 "base_url": config["base_url"],
                 "token": config["token"],
                 "model": config["model"],
+                "pairing_model": config["pairing_model"],
+                "pairing_candidate_limit": config["pairing_candidate_limit"],
+                "pairing_reasoning_effort": config["pairing_reasoning_effort"],
             },
             sort_keys=True,
         )
@@ -5492,8 +6196,11 @@ class RgbdViewer:
 
     def _on_vlm_models_loaded(self, models: list[str]) -> None:
         self.vlm_model_combo.configure(values=models)
+        self.vlm_pairing_model_combo.configure(values=models)
         if models and not self.vlm_model_var.get().strip():
             self.vlm_model_var.set(models[0])
+        if models and not self.vlm_pairing_model_var.get().strip():
+            self.vlm_pairing_model_var.set(self.vlm_model_var.get().strip() or models[0])
         self._vlm_last_test_ok = False
         self.vlm_status_var.set(f"Loaded {len(models)} model(s)")
 
@@ -5508,6 +6215,45 @@ class RgbdViewer:
         def worker() -> None:
             try:
                 models, response = _vlm_test_connection(config, timeout=float(getattr(self.args, "vlm_timeout_seconds", 120.0)))
+                pairing_model = str(config.get("pairing_model") or config.get("model") or "")
+                if pairing_model and pairing_model != str(config.get("model") or ""):
+                    pairing_response = _vlm_chat_completion(
+                        config,
+                        [{"role": "user", "content": "Reply with exactly: Smart Room Pairing OK"}],
+                        timeout=float(getattr(self.args, "vlm_timeout_seconds", 120.0)),
+                        max_tokens=32,
+                        model_override=pairing_model,
+                    )
+                    response = response + " / " + pairing_response
+                pairing_test_profiles = [
+                    {
+                        "canonical_device_id": "smart-room-pairing-test",
+                        "display_name": "Test temperature node",
+                        "summary": "MQTT node with an observed temperature property",
+                        "device_type": "network_device",
+                        "capabilities": ["temperature"],
+                        "protocols": ["MQTT"],
+                        "identifiers": {"mqtt_topic_prefix": ["test/device/temperature"]},
+                        "connections": {},
+                        "data": {"temperature": {"value": 20, "unit": "C"}},
+                        "operations": [],
+                    }
+                ]
+                pairing_test_visual = normalize_visual_profile(
+                    {
+                        "summary": "A device that may observe temperature",
+                        "capabilities": ["temperature"],
+                    }
+                )
+                pairing_payload, _raw, _finish, pairing_status = _pairing_llm_review(
+                    config,
+                    build_pairing_prompt(pairing_test_visual, pairing_test_profiles),
+                    pairing_test_profiles,
+                    float(getattr(self.args, "vlm_timeout_seconds", 120.0)),
+                )
+                if pairing_payload is None:
+                    raise RuntimeError("Pairing model schema test failed: " + pairing_status)
+                response = response + " / pairing schema OK"
                 self.root.after(0, lambda: self._on_vlm_test_ok(models, response, signature))
             except Exception as exc:
                 reason = str(exc)
@@ -5518,6 +6264,7 @@ class RgbdViewer:
     def _on_vlm_test_ok(self, models: list[str], response: str, signature: str) -> None:
         if models:
             self.vlm_model_combo.configure(values=models)
+            self.vlm_pairing_model_combo.configure(values=models)
         self._vlm_last_test_ok = True
         self._vlm_last_test_signature = signature
         self.vlm_status_var.set("Test passed: " + (response[:80] if response else "empty response"))
@@ -5555,6 +6302,8 @@ class RgbdViewer:
                     continue
                 if not isinstance(store, dict):
                     continue
+                if int(store.get("storage_schema_version") or 0) < 2:
+                    _save_point_store(device_dir, store)
                 _mark_stale_vlm_records(self.args, device_dir, store)
                 for record in _object_records(store):
                     if str(record.get("status") or "") != "completed":
@@ -5588,6 +6337,28 @@ class RgbdViewer:
         self._device_tree_photo_refs = []
         room_items: dict[str, str] = {}
         device_items: dict[tuple[str, str], str] = {}
+        catalog_rooms = [
+            room
+            for room in _load_room_catalog(self.args).get("rooms", [])
+            if isinstance(room, dict) and int(room.get("deleted_at_ms") or 0) <= 0
+        ]
+        for room in catalog_rooms:
+            room_key = str(room.get("room_id") or "")
+            if not room_key:
+                continue
+            room_item = self.device_tree.insert(
+                "",
+                tk.END,
+                text=str(room.get("name") or room_key),
+                values=("", "", "", "", ""),
+                open=True,
+            )
+            room_items[room_key] = room_item
+            self._device_tree_item_context[room_item] = {
+                "kind": "room",
+                "room_id": room_key,
+                "room_name": str(room.get("name") or room_key),
+            }
         objects = self.scan_completed_room_objects()
         for item in objects:
             room_key = item["room_id"]
@@ -5596,9 +6367,14 @@ class RgbdViewer:
                     "",
                     tk.END,
                     text=item["room_name"],
-                    values=("", "", "", ""),
+                    values=("", "", "", "", ""),
                     open=True,
                 )
+                self._device_tree_item_context[room_items[room_key]] = {
+                    "kind": "room",
+                    "room_id": room_key,
+                    "room_name": item["room_name"],
+                }
             device_key = (item["room_id"], item["device_id"])
             if device_key not in device_items:
                 device_label = item["device_name"]
@@ -5608,7 +6384,7 @@ class RgbdViewer:
                     room_items[room_key],
                     tk.END,
                     text=device_label,
-                    values=("", "", "", ""),
+                    values=("", "", "", "", ""),
                     open=True,
                 )
             record = item["object"]
@@ -5633,7 +6409,7 @@ class RgbdViewer:
             if photo is not None:
                 insert_kwargs["image"] = photo
             object_item = self.device_tree.insert(device_items[device_key], tk.END, **insert_kwargs)
-            self._device_tree_item_context[object_item] = item
+            self._device_tree_item_context[object_item] = {**item, "kind": "object"}
         self.device_tree_status_var.set(f"{len(objects)} completed device(s)")
 
     def _make_tree_thumbnail(self, item: dict) -> ImageTk.PhotoImage | None:
@@ -5650,9 +6426,73 @@ class RgbdViewer:
     def on_device_tree_double_click(self, _event: tk.Event) -> None:
         item_id = self.device_tree.focus()
         context = self._device_tree_item_context.get(item_id)
-        if context is None:
+        if context is None or context.get("kind") != "object":
             return
         self.open_object_detail_window(context)
+
+    def rename_selected_room_object(self) -> None:
+        item_id = self.device_tree.focus()
+        context = self._device_tree_item_context.get(item_id)
+        if context is None or context.get("kind") != "object":
+            self.device_tree_status_var.set("Select a room or object")
+            return
+        kind = str(context.get("kind") or "")
+        current_name = (
+            str(context.get("room_name") or context.get("room_id") or "")
+            if kind == "room"
+            else str((context.get("object") or {}).get("name") or context.get("object_id") or "")
+        )
+        name = simpledialog.askstring("Rename", "New name:", initialvalue=current_name, parent=self.root)
+        if not name or not name.strip():
+            return
+        try:
+            if kind == "room":
+                _rename_room_store(self.args, str(context.get("room_id") or ""), name.strip())
+            elif kind == "object":
+                device_dir = Path(context["device_dir"])
+                store = json.loads((device_dir / "points.json").read_text(encoding="utf-8"))
+                record = _find_object_record(store, str(context.get("object_id") or ""))
+                if record is None:
+                    raise ValueError("object not found")
+                record["name"] = name.strip()
+                record["updated_at_ms"] = _now_ms()
+                _save_point_store(device_dir, store)
+            else:
+                raise ValueError("Select a room or object")
+        except Exception as exc:
+            messagebox.showerror("Rename failed", str(exc), parent=self.root)
+            return
+        self.refresh_device_tree()
+
+    def delete_selected_room_object(self) -> None:
+        item_id = self.device_tree.focus()
+        context = self._device_tree_item_context.get(item_id)
+        if context is None:
+            self.device_tree_status_var.set("Select a room or object")
+            return
+        kind = str(context.get("kind") or "")
+        label = (
+            str(context.get("room_name") or context.get("room_id") or "")
+            if kind == "room"
+            else str((context.get("object") or {}).get("name") or context.get("object_id") or "")
+        )
+        if kind not in {"room", "object"}:
+            self.device_tree_status_var.set("Select a room or object")
+            return
+        if not messagebox.askyesno("Delete", f"Delete {kind} '{label}'?", parent=self.root):
+            return
+        try:
+            if kind == "room":
+                _delete_room_store(self.args, str(context.get("room_id") or ""))
+            else:
+                device_dir = Path(context["device_dir"])
+                store = json.loads((device_dir / "points.json").read_text(encoding="utf-8"))
+                _remove_object_content(device_dir, store, str(context.get("object_id") or ""))
+                _save_point_store(device_dir, store)
+        except Exception as exc:
+            messagebox.showerror("Delete failed", str(exc), parent=self.root)
+            return
+        self.refresh_device_tree()
 
     def retry_selected_vlm(self) -> None:
         item_id = self.device_tree.focus()
@@ -5872,6 +6712,8 @@ class RgbdViewer:
                 lines.append(f"Finished: {_format_local_timestamp_s(int(current_record.get('vlm_completed_at_ms')))}")
             if current_record.get("vlm_error"):
                 lines.append(f"Error: {current_record.get('vlm_error')}")
+            if current_record.get("user_note"):
+                lines.append(f"User note: {current_record.get('user_note')}")
             binding = current_record.get("network_binding")
             if isinstance(binding, dict):
                 lines.append(f"Network: {binding.get('display_name') or binding.get('canonical_device_id')}")
@@ -5883,6 +6725,7 @@ class RgbdViewer:
                 profile = candidate.get("profile") or {}
                 connections = profile.get("connections") or {}
                 addresses = [*(connections.get("ip") or []), *(connections.get("mac") or [])]
+                address_text = ", ".join(str(value) for value in addresses) or str(profile.get("address_summary") or "")
                 item_id = pairing_tree.insert(
                     "",
                     tk.END,
@@ -5891,7 +6734,7 @@ class RgbdViewer:
                         f"{int(candidate.get('score') or 0)}%",
                         f"{int(candidate.get('evidence_coverage_percent') or 0)}%",
                         str(profile.get("device_type") or ""),
-                        ", ".join(str(value) for value in addresses),
+                        address_text,
                     ),
                 )
                 pairing_candidates[item_id] = candidate

@@ -49,6 +49,7 @@ namespace SmartRoom.UI
         private TextMeshProUGUI _titleText;
         private TextMeshProUGUI _statusText;
         private TextMeshProUGUI _bindingText;
+        private TMP_InputField _searchInput;
         private Button _refreshButton;
         private Button _unbindButton;
         private GameObject _emptyObject;
@@ -195,6 +196,8 @@ namespace SmartRoom.UI
             _nextRefreshAt = 0f;
             _activeStatusStage = string.Empty;
             _activeStatusMessage = string.Empty;
+            if (_searchInput != null)
+                _searchInput.text = string.Empty;
             if (_canvasRoot != null)
                 _canvasRoot.gameObject.SetActive(true);
             if (_canvasGroup != null)
@@ -208,6 +211,7 @@ namespace SmartRoom.UI
         private void HidePanel()
         {
             _panelVisible = false;
+            QuestSystemKeyboard.CloseFor(_searchInput);
             _activeStatusStage = string.Empty;
             _activeStatusMessage = string.Empty;
             ClearHover();
@@ -417,8 +421,22 @@ namespace SmartRoom.UI
             _bindingText.color = new Color(0.88f, 0.92f, 0.96f, 1f);
             SetTopLeft(_bindingText.rectTransform, 28f, 112f, 784f, 36f);
 
+            _searchInput = CreateInput(_canvasRoot, "CandidateSearch", "Search name, model, MQTT topic...");
+            SetTopLeft((RectTransform)_searchInput.transform, 28f, 150f, 650f, 44f);
+            _searchInput.onSubmit.AddListener(_ => RequestCandidateSearch());
+            _searchInput.gameObject.AddComponent<QuestSystemKeyboardInputBridge>().Configure(
+                _searchInput,
+                "Search name, model, IP, MAC, or MQTT topic",
+                multiline: false,
+                characterLimit: 160,
+                RequestCandidateSearch);
+
+            Button searchButton = CreateButton(_canvasRoot, "Search", "Search", new Color(0.15f, 0.42f, 0.34f, 0.95f));
+            SetTopRight((RectTransform)searchButton.transform, 28f, 150f, 116f, 44f);
+            searchButton.onClick.AddListener(RequestCandidateSearch);
+
             _listRoot = AddRect(_canvasRoot, "CandidateList");
-            Stretch(_listRoot, 28f, 28f, 158f, 24f);
+            Stretch(_listRoot, 28f, 28f, 204f, 24f);
 
             _emptyObject = CreateText(_listRoot, "Empty", "No candidates yet.", 24f, FontStyles.Normal, TextAlignmentOptions.Center).gameObject;
             Stretch((RectTransform)_emptyObject.transform, 12f, 12f, 24f, 24f);
@@ -428,6 +446,12 @@ namespace SmartRoom.UI
         {
             if (!_requestInFlight)
                 StartCoroutine(RequestPairingRefreshAsync());
+        }
+
+        private void RequestCandidateSearch()
+        {
+            _refreshRequested = true;
+            _nextRefreshAt = 0f;
         }
 
         private IEnumerator RequestPairingRefreshAsync()
@@ -464,6 +488,7 @@ namespace SmartRoom.UI
                 "&device_model=" + UnityWebRequest.EscapeURL(SystemInfo.deviceModel) +
                 "&object_id=" + UnityWebRequest.EscapeURL(_objectId) +
                 "&limit=" + CandidateLimit +
+                "&q=" + UnityWebRequest.EscapeURL(_searchInput != null ? _searchInput.text : string.Empty) +
                 "&compact=1");
 
             using (UnityWebRequest request = UnityWebRequest.Get(url))
@@ -859,6 +884,40 @@ namespace SmartRoom.UI
             Stretch(label.rectTransform, 4f, 4f, 4f, 4f);
             label.overflowMode = TextOverflowModes.Overflow;
             return button;
+        }
+
+        private static TMP_InputField CreateInput(Transform parent, string name, string placeholderText)
+        {
+            GameObject go = new GameObject(name, typeof(RectTransform), typeof(Image), typeof(TMP_InputField));
+            go.transform.SetParent(parent, false);
+            go.GetComponent<Image>().color = new Color(0.92f, 0.94f, 0.96f, 1f);
+
+            RectTransform root = (RectTransform)go.transform;
+            RectTransform viewport = AddRect(root, "Viewport");
+            Stretch(viewport, 10f, 10f, 6f, 6f);
+
+            TextMeshProUGUI text = CreateText(viewport, "Text", string.Empty, 19f, FontStyles.Normal, TextAlignmentOptions.Left);
+            text.color = new Color(0.04f, 0.05f, 0.06f, 1f);
+            text.raycastTarget = true;
+            Stretch(text.rectTransform, 4f, 4f, 2f, 2f);
+
+            TextMeshProUGUI placeholder = CreateText(
+                viewport,
+                "Placeholder",
+                placeholderText,
+                18f,
+                FontStyles.Italic,
+                TextAlignmentOptions.Left);
+            placeholder.color = new Color(0.42f, 0.46f, 0.50f, 1f);
+            Stretch(placeholder.rectTransform, 4f, 4f, 2f, 2f);
+
+            TMP_InputField input = go.GetComponent<TMP_InputField>();
+            input.textViewport = viewport;
+            input.textComponent = text;
+            input.placeholder = placeholder;
+            input.lineType = TMP_InputField.LineType.SingleLine;
+            input.characterLimit = 160;
+            return input;
         }
 
         private static void ConfigureButtonColors(Button button, Color normalColor)

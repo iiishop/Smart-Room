@@ -130,7 +130,8 @@ namespace SmartRoom.Interaction
 
         private void LateUpdate()
         {
-            if (SmartRoom.UI.RoomCoordinateSystemPanel.IsUiBlockingSceneInput)
+            if (SmartRoom.UI.RoomCoordinateSystemPanel.IsUiBlockingSceneInput
+                || SmartRoom.UI.DeviceNoteInputPanel.IsPanelVisible)
             {
                 _points.Clear();
                 ReleaseBuffer();

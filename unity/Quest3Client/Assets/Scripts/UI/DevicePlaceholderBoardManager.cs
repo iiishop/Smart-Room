@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using SmartRoom.Interaction;
 using SmartRoom.Tracking;
 using UnityEngine;
 using UnityEngine.UI;
@@ -204,9 +205,22 @@ namespace SmartRoom.UI
             for (int i = 0; i < points.Length; i++)
             {
                 TrackingManager.RoomObjectPointRecord point = points[i];
-                if (point == null || point.world_xyz_m == null || point.world_xyz_m.Length < 3)
+                if (point == null)
                     continue;
-                Vector3 world = new Vector3(point.world_xyz_m[0], point.world_xyz_m[1], point.world_xyz_m[2]);
+                Vector3 world;
+                if (point.room_xyz_m != null && point.room_xyz_m.Length >= 3)
+                {
+                    world = RoomSpatialAnchorManager.RoomToWorldPoint(
+                        new Vector3(point.room_xyz_m[0], point.room_xyz_m[1], point.room_xyz_m[2]));
+                }
+                else if (point.world_xyz_m != null && point.world_xyz_m.Length >= 3)
+                {
+                    world = new Vector3(point.world_xyz_m[0], point.world_xyz_m[1], point.world_xyz_m[2]);
+                }
+                else
+                {
+                    continue;
+                }
                 if (!IsFinite(world))
                     continue;
                 allPoints.Add(world);

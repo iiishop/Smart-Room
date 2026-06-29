@@ -71,7 +71,8 @@ namespace SmartRoom.Interaction
         {
             if (SmartRoom.UI.RoomCoordinateSystemPanel.IsUiBlockingSceneInput
                 || SmartRoom.UI.DeviceArchivePanel.IsPanelVisible
-                || SmartRoom.UI.DeviceBindingPanel.IsPanelVisible)
+                || SmartRoom.UI.DeviceBindingPanel.IsPanelVisible
+                || SmartRoom.UI.DeviceNoteInputPanel.IsPanelVisible)
             {
                 _prevTriggerPressed = OVRInput.Get(OVRInput.RawButton.RIndexTrigger);
                 _prevDeletePressed = OVRInput.Get(OVRInput.Button.Two, OVRInput.Controller.RTouch);

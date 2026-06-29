@@ -97,9 +97,22 @@ namespace SmartRoom.UI
             for (int i = 0; i < points.Length; i++)
             {
                 TrackingManager.RoomObjectPointRecord point = points[i];
-                if (point == null || point.world_xyz_m == null || point.world_xyz_m.Length < 3)
+                if (point == null)
                     continue;
-                Vector3 world = new Vector3(point.world_xyz_m[0], point.world_xyz_m[1], point.world_xyz_m[2]);
+                Vector3 world;
+                if (point.room_xyz_m != null && point.room_xyz_m.Length >= 3)
+                {
+                    world = RoomSpatialAnchorManager.RoomToWorldPoint(
+                        new Vector3(point.room_xyz_m[0], point.room_xyz_m[1], point.room_xyz_m[2]));
+                }
+                else if (point.world_xyz_m != null && point.world_xyz_m.Length >= 3)
+                {
+                    world = new Vector3(point.world_xyz_m[0], point.world_xyz_m[1], point.world_xyz_m[2]);
+                }
+                else
+                {
+                    continue;
+                }
                 PromptPointMarkerManager.AddMarker(world, point.label);
             }
         }
@@ -116,6 +129,7 @@ namespace SmartRoom.UI
             ResolveReferences();
             BuildRing();
             HideRing();
+            DeviceNoteInputPanel.EnsureExists(xrCamera);
         }
 
         private void OnDestroy()
@@ -161,6 +175,7 @@ namespace SmartRoom.UI
                    && !RoomCoordinateSystemPanel.IsPanelVisible
                    && !DeviceArchivePanel.IsPanelVisible
                    && !DeviceBindingPanel.IsPanelVisible
+                   && !DeviceNoteInputPanel.IsPanelVisible
                    && !_actionInFlight;
         }
 
@@ -273,7 +288,7 @@ namespace SmartRoom.UI
                 _holdTriggered = true;
                 HideRing();
                 if (action == HoldAction.Save)
-                    _ = CompleteCurrentObjectAsync();
+                    BeginCompletionNote();
                 else if (action == HoldAction.Abandon)
                     _ = AbandonCurrentObjectAndStartNewAsync();
             }
@@ -294,11 +309,27 @@ namespace SmartRoom.UI
             _ = AbandonCurrentObjectAndStartNewAsync();
         }
 
-        private async Task CompleteCurrentObjectAsync()
+        private void BeginCompletionNote()
         {
             if (_actionInFlight)
                 return;
             _actionInFlight = true;
+            ResetHold();
+            DeviceNoteInputPanel.Open(
+                (confirmed, note) =>
+                {
+                    if (!confirmed)
+                    {
+                        _actionInFlight = false;
+                        return;
+                    }
+                    _ = CompleteCurrentObjectAsync(note);
+                },
+                xrCamera);
+        }
+
+        private async Task CompleteCurrentObjectAsync(string userNote)
+        {
             try
             {
                 if (trackingManager == null)
@@ -306,7 +337,10 @@ namespace SmartRoom.UI
 
                 string objectId = RoomObjectSession.CurrentObjectId;
                 TrackingManager.ObjectActionResponse saved =
-                    await trackingManager.CompleteObjectAsync(objectId, RoomObjectSession.CurrentEditSessionId);
+                    await trackingManager.CompleteObjectAsync(
+                        objectId,
+                        RoomObjectSession.CurrentEditSessionId,
+                        userNote);
                 if (saved == null || !saved.ok)
                     return;
 

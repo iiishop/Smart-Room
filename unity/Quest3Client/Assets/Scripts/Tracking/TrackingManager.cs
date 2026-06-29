@@ -3,6 +3,7 @@ using System.Net.Http;
 using System.Text;
 using System.Threading.Tasks;
 using SmartRoom.Capture;
+using SmartRoom.Interaction;
 using SmartRoom.UI;
 using UnityEngine;
 
@@ -250,9 +251,15 @@ namespace SmartRoom.Tracking
             return PostObjectActionAsync(objectBeginEditPath, objectId, string.Empty, string.Empty, "Opening saved device...");
         }
 
-        public Task<ObjectActionResponse> CompleteObjectAsync(string objectId, string editSessionId)
+        public Task<ObjectActionResponse> CompleteObjectAsync(string objectId, string editSessionId, string userNote = "")
         {
-            return PostObjectActionAsync(objectCompletePath, objectId, editSessionId, string.Empty, "Saving device...");
+            return PostObjectActionAsync(
+                objectCompletePath,
+                objectId,
+                editSessionId,
+                string.Empty,
+                "Saving device...",
+                userNote);
         }
 
         public Task<ObjectActionResponse> AbandonObjectAsync(string objectId, string editSessionId)
@@ -277,7 +284,8 @@ namespace SmartRoom.Tracking
             string objectId,
             string editSessionId,
             string name,
-            string status)
+            string status,
+            string userNote = "")
         {
             string cleanObjectId = string.IsNullOrWhiteSpace(objectId) ? RoomObjectSession.CurrentObjectId : objectId;
             if (string.IsNullOrWhiteSpace(cleanObjectId))
@@ -287,7 +295,7 @@ namespace SmartRoom.Tracking
             {
                 BeginOperationStatus(status);
                 string url = BuildUrl(backendBaseUrl, path);
-                string json = BuildObjectActionJson(cleanObjectId, editSessionId, name);
+                string json = BuildObjectActionJson(cleanObjectId, editSessionId, name, userNote);
                 using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(Mathf.Max(1f, requestTimeoutSeconds)) };
                 using var content = new StringContent(json, Encoding.UTF8, "application/json");
                 using HttpResponseMessage response = await http.PostAsync(url, content);
@@ -504,6 +512,7 @@ namespace SmartRoom.Tracking
             int frameWidth,
             int frameHeight)
         {
+            Vector3 roomPoint = RoomSpatialAnchorManager.WorldToRoomPoint(worldPoint);
             var payload = new CursorPointPayload
             {
                 type = "room_point_prompt",
@@ -511,6 +520,9 @@ namespace SmartRoom.Tracking
                 hit_world_x = worldPoint.x,
                 hit_world_y = worldPoint.y,
                 hit_world_z = worldPoint.z,
+                hit_room_x = roomPoint.x,
+                hit_room_y = roomPoint.y,
+                hit_room_z = roomPoint.z,
                 x = pixel.x,
                 y = pixel.y,
                 label = label > 0 ? 1 : 0,
@@ -531,12 +543,16 @@ namespace SmartRoom.Tracking
 
         private static string BuildDeletePointJson(Vector3 worldPoint)
         {
+            Vector3 roomPoint = RoomSpatialAnchorManager.WorldToRoomPoint(worldPoint);
             var payload = new PointDeletePayload
             {
                 type = "room_point_delete",
                 hit_world_x = worldPoint.x,
                 hit_world_y = worldPoint.y,
                 hit_world_z = worldPoint.z,
+                hit_room_x = roomPoint.x,
+                hit_room_y = roomPoint.y,
+                hit_room_z = roomPoint.z,
                 timestamp_ms = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                 room_id = RoomCoordinateSystemPanel.CurrentRoomId,
                 room_name = RoomCoordinateSystemPanel.CurrentRoomName,
@@ -548,7 +564,11 @@ namespace SmartRoom.Tracking
             return JsonUtility.ToJson(payload);
         }
 
-        private static string BuildObjectActionJson(string objectId, string editSessionId, string name)
+        private static string BuildObjectActionJson(
+            string objectId,
+            string editSessionId,
+            string name,
+            string userNote = "")
         {
             var payload = new ObjectActionPayload
             {
@@ -561,6 +581,7 @@ namespace SmartRoom.Tracking
                 object_session_id = objectId,
                 edit_session_id = editSessionId ?? string.Empty,
                 name = name ?? string.Empty,
+                user_note = userNote ?? string.Empty,
                 timestamp_ms = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
             };
             return JsonUtility.ToJson(payload);
@@ -754,6 +775,9 @@ namespace SmartRoom.Tracking
             public float hit_world_x;
             public float hit_world_y;
             public float hit_world_z;
+            public float hit_room_x;
+            public float hit_room_y;
+            public float hit_room_z;
             public int x;
             public int y;
             public int label;
@@ -777,6 +801,9 @@ namespace SmartRoom.Tracking
             public float hit_world_x;
             public float hit_world_y;
             public float hit_world_z;
+            public float hit_room_x;
+            public float hit_room_y;
+            public float hit_room_z;
             public long timestamp_ms;
             public string room_id;
             public string room_name;
@@ -814,6 +841,7 @@ namespace SmartRoom.Tracking
             public string object_session_id;
             public string edit_session_id;
             public string name;
+            public string user_note;
             public long timestamp_ms;
         }
 
@@ -823,6 +851,7 @@ namespace SmartRoom.Tracking
             public string point_id = string.Empty;
             public int label = 1;
             public float[] world_xyz_m = Array.Empty<float>();
+            public float[] room_xyz_m = Array.Empty<float>();
             public string image_id = string.Empty;
         }
 
