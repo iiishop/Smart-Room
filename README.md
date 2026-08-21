@@ -33,3 +33,7 @@ python main.py
 - Old backend/frontend code has been archived to `archive_code/`.
 - Current `backend/` is reset for clean rebuild (Python receiver + dashboard API).
 - Unity project for Quest 3 is planned under `unity/` (to be created next).
+
+## Demo
+
+<video src="https://raw.githubusercontent.com/iiishop/Smart-Room/master/Video_compressed.mp4" controls width="100%"></video>
