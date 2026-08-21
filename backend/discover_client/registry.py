@@ -75,6 +75,13 @@ class PersistentDeviceRegistry:
             if save:
                 self._save_locked()
 
+    def created_at(self, canonical_device_id: str) -> float:
+        with self._lock:
+            record = self._data["devices"].get(canonical_device_id)
+            if not isinstance(record, dict):
+                return 0.0
+            return float(record.get("created_at") or 0.0)
+
     def set_user_name(self, canonical_device_id: str, name: str) -> bool:
         with self._lock:
             record = self._data["devices"].get(canonical_device_id)
@@ -107,13 +114,19 @@ class PersistentDeviceRegistry:
                 if not profile:
                     continue
                 profile["canonical_device_id"] = canonical_id
+                profile["discovered_at"] = float(record.get("created_at") or 0.0)
                 user_name = str(record.get("user_name") or "").strip()
                 if user_name:
                     profile["display_name"] = user_name
                     profile["user_name"] = user_name
                 profile.setdefault("online", False)
                 profiles.append(profile)
-            profiles.sort(key=lambda item: float(item.get("last_seen") or 0.0), reverse=True)
+            profiles.sort(
+                key=lambda item: (
+                    float(item.get("discovered_at") or 0.0),
+                    str(item.get("canonical_device_id") or ""),
+                )
+            )
             return profiles
 
     def compact_mqtt_channels(self) -> int:

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import base64
 import concurrent.futures
+import copy
 import http.server
 import json
 import math
@@ -16,12 +18,11 @@ import sys
 import threading
 import time
 import urllib.parse
-import urllib.error
-import urllib.request
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+import aiohttp
 import cv2
 import numpy as np
 from PIL import Image, ImageTk
@@ -34,6 +35,8 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from discover_client.pairing import (
+    PAIRING_RELATIONS,
+    PAIRING_RULES,
     build_pairing_prompt,
     normalize_visual_profile,
     pairing_response_schema,
@@ -273,6 +276,7 @@ def parse_args() -> argparse.Namespace:
         help="Maximum shortlisted network devices reviewed by the LLM and retained in the saved pairing result.",
     )
     parser.add_argument("--vlm-timeout-seconds", type=float, default=120.0)
+    parser.add_argument("--pairing-timeout-seconds", type=float, default=60.0)
     parser.add_argument("--point-debounce-ms", type=int, default=250)
     parser.add_argument("--point-debounce-world-m", type=float, default=0.02)
     parser.add_argument("--point-delete-world-m", type=float, default=0.08)
@@ -1680,6 +1684,7 @@ def _load_vlm_config(args: argparse.Namespace) -> dict:
                 "pairing_model": "",
                 "pairing_candidate_limit": 50,
                 "pairing_reasoning_effort": "minimal",
+                "pairing_timeout_seconds": 60.0,
                 "tested_at_ms": 0,
                 "saved_at_ms": 0,
             }
@@ -1695,6 +1700,7 @@ def _load_vlm_config(args: argparse.Namespace) -> dict:
     config.setdefault("pairing_model", str(config.get("model") or ""))
     config.setdefault("pairing_candidate_limit", 50)
     config.setdefault("pairing_reasoning_effort", "minimal")
+    config.setdefault("pairing_timeout_seconds", 60.0)
     config.setdefault("tested_at_ms", 0)
     config.setdefault("saved_at_ms", 0)
     return config
@@ -1709,6 +1715,10 @@ def _save_vlm_config(args: argparse.Namespace, config: dict) -> None:
         "pairing_model": str(config.get("pairing_model") or config.get("model") or "").strip(),
         "pairing_candidate_limit": _pairing_candidate_limit(config.get("pairing_candidate_limit")),
         "pairing_reasoning_effort": str(config.get("pairing_reasoning_effort") or "minimal").strip(),
+        "pairing_timeout_seconds": max(
+            15.0,
+            min(180.0, float(config.get("pairing_timeout_seconds") or 60.0)),
+        ),
         "tested_at_ms": int(config.get("tested_at_ms") or 0),
         "saved_at_ms": _now_ms(),
     }
@@ -1727,21 +1737,29 @@ def _vlm_api_url(base_url: str, suffix: str) -> str:
 
 
 def _vlm_json_request(method: str, url: str, token: str, payload: dict | None = None, timeout: float = 60.0) -> dict:
-    body = None if payload is None else json.dumps(payload).encode("utf-8")
-    request = urllib.request.Request(url, data=body, method=method.upper())
-    request.add_header("Accept", "application/json")
-    if payload is not None:
-        request.add_header("Content-Type", "application/json")
+    headers = {"Accept": "application/json"}
     token = str(token or "").strip()
     if token:
-        request.add_header("Authorization", "Bearer " + token)
+        headers["Authorization"] = "Bearer " + token
+
+    async def perform() -> dict:
+        request_timeout = aiohttp.ClientTimeout(total=max(0.01, float(timeout)))
+        async with aiohttp.ClientSession(timeout=request_timeout, trust_env=True) as session:
+            async with session.request(
+                method.upper(),
+                url,
+                headers=headers,
+                json=payload,
+            ) as response:
+                raw = await response.text()
+                if response.status >= 400:
+                    raise RuntimeError(f"HTTP {response.status}: {raw[:500]}")
+                return json.loads(raw)
+
     try:
-        with urllib.request.urlopen(request, timeout=max(1.0, float(timeout))) as response:
-            raw = response.read()
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"HTTP {exc.code}: {detail[:500]}") from exc
-    return json.loads(raw.decode("utf-8"))
+        return asyncio.run(perform())
+    except (asyncio.TimeoutError, TimeoutError) as exc:
+        raise RuntimeError(f"request total timeout after {float(timeout):.1f}s") from exc
 
 
 def _vlm_list_models(config: dict, timeout: float = 60.0) -> list[str]:
@@ -1877,8 +1895,10 @@ def _compact_point_store_pairing_data(store: dict) -> None:
                 {
                     "batch": int(item.get("batch") or 0),
                     "candidate_count": int(item.get("candidate_count") or 0),
+                    "expected_candidate_count": int(item.get("expected_candidate_count") or 0),
                     "finish_reason": str(item.get("finish_reason") or ""),
                     "status": str(item.get("status") or ""),
+                    "elapsed_ms": int(item.get("elapsed_ms") or 0),
                     "response_preview": str(item.get("response_preview") or "")[:500],
                 }
                 for item in diagnostics
@@ -2170,6 +2190,16 @@ def _append_room_point(
         "timestamp_ms": timestamp_ms,
         "rgb_camera_z_m": float(prompt.get("rgb_camera_z_m", 0.0)),
     }
+    for key in (
+        "projection_source",
+        "projection_delta_px",
+        "rgb_camera_position",
+        "rgb_timestamp_ticks",
+    ):
+        if key in cursor:
+            point[key] = cursor[key]
+    if point.get("projection_source") == "live_pca":
+        point["projection_source"] = "stored_rgb_pose"
     if logical_point_id:
         point["logical_point_id"] = logical_point_id
     if _is_duplicate_point(args, store, point):
@@ -2710,11 +2740,13 @@ def _restore_object_edit_backup(device_dir: Path, edit_session_id: str) -> dict:
     original_image_ids = {str(value) for value in manifest.get("image_ids", [])}
 
     current_store_path = device_dir / "points.json"
+    current_record: dict | None = None
     if object_id and current_store_path.exists():
         try:
             current_store = json.loads(current_store_path.read_text(encoding="utf-8"))
         except Exception:
             current_store = {}
+        current_record = _find_object_record(current_store, object_id)
         for image in _object_images(current_store, object_id):
             image_id = str(image.get("image_id") or "")
             if image_id in original_image_ids:
@@ -2725,6 +2757,44 @@ def _restore_object_edit_backup(device_dir: Path, edit_session_id: str) -> dict:
             capture_dir = image.get("capture_dir")
             if capture_dir:
                 _delete_store_path(device_dir, _resolve_store_path(device_dir, capture_dir))
+
+    restored_record = _find_object_record(backup_store, object_id) if object_id else None
+    if isinstance(restored_record, dict) and isinstance(current_record, dict):
+        for key in (
+            "name",
+            "network_binding",
+            "binding_history",
+            "vlm_status",
+            "vlm_started_at_ms",
+            "vlm_completed_at_ms",
+            "vlm_error",
+            "vlm_model",
+            "vlm_description",
+            "vlm_profile",
+            "vlm_prompt",
+            "pairing_status",
+            "pairing_started_at_ms",
+            "pairing_completed_at_ms",
+            "pairing_heartbeat_at_ms",
+            "pairing_run_id",
+            "pairing_error",
+            "pairing_warning",
+            "pairing_visual_profile",
+            "pairing_candidates",
+            "pairing_llm_model",
+            "pairing_llm_diagnostics",
+            "pairing_evaluated_candidate_count",
+            "pairing_llm_candidate_count",
+            "pairing_batches_completed",
+            "pairing_batches_total",
+            "pairing_valid_llm_candidates",
+        ):
+            if key in current_record:
+                restored_record[key] = copy.deepcopy(current_record[key])
+        for key in ("network_binding", "binding_history"):
+            if key not in current_record:
+                restored_record.pop(key, None)
+        restored_record["updated_at_ms"] = _now_ms()
 
     for entry in manifest.get("file_backups", []):
         rel = str(entry.get("relative_path") or "")
@@ -2879,6 +2949,140 @@ def _compact_network_profile(profile: dict) -> dict:
     }
 
 
+def _control_token(value: object) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").casefold())
+
+
+def _resolve_data_write_operation(profile: dict, data_key: str) -> dict | None:
+    target = _control_token(data_key)
+    if not target:
+        return None
+    best: tuple[int, dict] | None = None
+    for operation in profile.get("operations") or []:
+        if not isinstance(operation, dict) or not str(operation.get("topic") or "").strip():
+            continue
+        topic = str(operation.get("topic") or "")
+        segments = [_control_token(part) for part in topic.split("/") if _control_token(part)]
+        sensor_key = _control_token(operation.get("sensor_key"))
+        action = _control_token(operation.get("action"))
+        score = 0
+        if sensor_key and sensor_key == target:
+            score = 100
+        elif segments and segments[-1] == target:
+            score = 90
+        elif action and action not in {"set", "write", "command", "control"} and action == target:
+            score = 80
+        elif target in segments[-2:]:
+            score = 70
+        if score > 0 and (best is None or score > best[0]):
+            best = (score, operation)
+    return best[1] if best is not None else None
+
+
+def _data_source_publish_topic(profile: dict, data_key: str, reading: dict) -> str:
+    source_topic = str(reading.get("source_topic") or "").strip()
+    if source_topic:
+        return source_topic
+
+    identifiers = profile.get("identifiers") if isinstance(profile.get("identifiers"), dict) else {}
+    prefixes = [
+        str(value).strip()
+        for key in ("mqtt_entity_prefix", "mqtt_topic_prefix")
+        for value in identifiers.get(key) or []
+        if str(value).strip()
+    ]
+    prefixes = list(dict.fromkeys(prefixes))
+    channels = [str(value).strip() for value in identifiers.get("mqtt_channel") or [] if str(value).strip()]
+    target = _control_token(data_key)
+    for channel in channels:
+        if _control_token(channel) and _control_token(channel) in target and prefixes:
+            return prefixes[0].rstrip("/") + "/" + channel.lstrip("/")
+    return prefixes[0] if prefixes else ""
+
+
+def _data_write_payload(reading: dict, data_key: str, value: object) -> object:
+    template = copy.deepcopy(reading.get("source_payload"))
+    if not isinstance(template, dict):
+        return value
+
+    path = [str(part) for part in reading.get("payload_path") or [] if str(part)]
+    if not path:
+        target = _control_token(data_key)
+        path = next(
+            ([str(key)] for key in template if _control_token(key) == target),
+            ["value"] if "value" in template else [str(data_key)],
+        )
+
+    cursor = template
+    for part in path[:-1]:
+        child = cursor.get(part)
+        if not isinstance(child, dict):
+            child = {}
+            cursor[part] = child
+        cursor = child
+    cursor[path[-1]] = value
+    return template
+
+
+def _live_network_profile_payload(profile: dict) -> dict:
+    data_rows: list[dict] = []
+    for key, reading in sorted((profile.get("data") or {}).items()):
+        item = reading if isinstance(reading, dict) else {"value": reading}
+        value = item.get("value")
+        value_text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        write_operation = _resolve_data_write_operation(profile, str(key))
+        write_topic = (
+            str((write_operation or {}).get("topic") or "").strip()
+            or _data_source_publish_topic(profile, str(key), item)
+        )
+        data_rows.append(
+            {
+                "key": str(key),
+                "value_text": str(value_text),
+                "unit": str(item.get("unit") or ""),
+                "timestamp": float(item.get("timestamp") or 0.0),
+                "writable": bool(write_topic),
+                "write_topic": write_topic,
+            }
+        )
+
+    operations: list[dict] = []
+    for operation in profile.get("operations") or []:
+        if not isinstance(operation, dict):
+            continue
+        topic = str(operation.get("topic") or "").strip()
+        if not topic:
+            continue
+        operations.append(
+            {
+                "topic": topic,
+                "action": str(operation.get("action") or "set"),
+                "sensor_key": str(operation.get("sensor_key") or ""),
+                "accepted_values": [str(value) for value in operation.get("accepted_values") or []],
+                "confidence": float(operation.get("confidence") or 0.0),
+            }
+        )
+    return {
+        "canonical_device_id": str(profile.get("canonical_device_id") or ""),
+        "display_name": str(profile.get("display_name") or "Unknown network device"),
+        "summary": str(profile.get("summary") or ""),
+        "online": bool(profile.get("online", False)),
+        "last_seen": float(profile.get("last_seen") or 0.0),
+        "data": data_rows,
+        "operations": operations,
+    }
+
+
+def _parse_control_value(value_text: object) -> object:
+    text = str(value_text if value_text is not None else "").strip()
+    if not text:
+        return ""
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return text
+
+
 def _pairing_candidate_payloads(record: dict, limit: int | None = None, compact_profile: bool = False) -> list[dict]:
     candidates = record.get("pairing_candidates") or []
     if not isinstance(candidates, list):
@@ -2991,6 +3195,10 @@ def _pairing_record_payload(record: dict, candidate_limit: int | None = None, co
         "binding": record.get("network_binding"),
         "started_at_ms": int(record.get("pairing_started_at_ms") or 0),
         "completed_at_ms": int(record.get("pairing_completed_at_ms") or 0),
+        "heartbeat_at_ms": int(record.get("pairing_heartbeat_at_ms") or 0),
+        "batches_completed": int(record.get("pairing_batches_completed") or 0),
+        "batches_total": int(record.get("pairing_batches_total") or 0),
+        "valid_llm_candidates": int(record.get("pairing_valid_llm_candidates") or 0),
         "evaluated_candidate_count": int(record.get("pairing_evaluated_candidate_count") or 0),
         "llm_candidate_count": int(record.get("pairing_llm_candidate_count") or 0),
     }
@@ -3036,6 +3244,28 @@ def _find_binding_conflict(
                     "binding": binding,
                 }
     return None
+
+
+def _network_binding_from_candidate(profile: dict, candidate: dict | None) -> dict:
+    evidence = candidate if isinstance(candidate, dict) else {}
+    relation = str(evidence.get("relation") or "unknown")
+    confidence = int(evidence.get("confidence_percent") or evidence.get("score") or 0)
+    return {
+        "canonical_device_id": str(profile.get("canonical_device_id") or ""),
+        "display_name": str(profile.get("display_name") or profile.get("canonical_device_id") or ""),
+        "method": "provenance_aware_match_manual_confirmation",
+        "relation": relation,
+        "relation_label": str(evidence.get("relation_label") or relation),
+        "confidence_level": str(evidence.get("confidence_level") or "insufficient"),
+        "confidence_percent": confidence,
+        "identity_confidence_percent": int(evidence.get("identity_confidence_percent") or 0),
+        "relationship_confidence_percent": int(evidence.get("relationship_confidence_percent") or 0),
+        # Legacy compatibility for older Viewer and Quest clients.
+        "score": confidence,
+        "evidence_coverage_percent": int(evidence.get("evidence_coverage_percent") or 0),
+        "bound_at_ms": _now_ms(),
+        "profile_snapshot": profile,
+    }
 
 
 def _load_rgb_for_image(viewer: "RgbdViewer", device_dir: Path, image_record: dict) -> np.ndarray:
@@ -3284,25 +3514,19 @@ def _pairing_payload_is_complete(payload: dict | None, profiles: list[dict]) -> 
     candidates = payload.get("candidates")
     if not isinstance(candidates, list):
         return False
+    if len(candidates) != len(expected_ids):
+        return False
     actual_ids: set[str] = set()
-    expected_rules = {
-        "exact_model_match",
-        "model_family_match",
-        "vendor_match",
-        "device_type_match",
-        "core_capability_match",
-        "secondary_capability_match",
-        "visible_identifier_support",
-        "physical_function_consistency",
-    }
     for candidate in candidates:
         if not isinstance(candidate, dict):
             return False
         candidate_id = str(candidate.get("candidate_id") or "")
         if candidate_id not in expected_ids:
             return False
+        if str(candidate.get("relation") or "") not in PAIRING_RELATIONS:
+            return False
         verdicts = candidate.get("verdicts")
-        if not isinstance(verdicts, list) or len(verdicts) != len(expected_rules):
+        if not isinstance(verdicts, list) or len(verdicts) != len(PAIRING_RULES):
             return False
         if any(str(verdict) not in {"match", "conflict", "unknown"} for verdict in verdicts):
             return False
@@ -3316,7 +3540,17 @@ def _normalize_pairing_verdict(value: object) -> str:
         return "match"
     if token in {"conflict", "no", "false", "mismatch", "inconsistent", "different"}:
         return "conflict"
-    if token in {"unknown", "uncertain", "insufficient", "missing", "none", "null", "not_applicable", "n_a"}:
+    if token in {
+        "unknown",
+        "uncertain",
+        "insufficient",
+        "missing",
+        "none",
+        "null",
+        "not_applicable",
+        "n_a",
+        "unrelated",
+    }:
         return "unknown"
     return ""
 
@@ -3329,13 +3563,24 @@ def _normalize_pairing_payload(payload: dict | None) -> dict | None:
         if not isinstance(candidate, dict):
             continue
         candidate_id = str(candidate.get("candidate_id") or "").strip()
+        relation = re.sub(
+            r"[^a-z]+",
+            "_",
+            str(candidate.get("relation") or "unknown").strip().lower(),
+        ).strip("_")
         verdicts = candidate.get("verdicts")
-        if not candidate_id or not isinstance(verdicts, list):
+        if not candidate_id or relation not in PAIRING_RELATIONS or not isinstance(verdicts, list):
             continue
         normalized_verdicts = [_normalize_pairing_verdict(value) for value in verdicts]
         if any(not verdict for verdict in normalized_verdicts):
             continue
-        normalized.append({"candidate_id": candidate_id, "verdicts": normalized_verdicts})
+        normalized.append(
+            {
+                "candidate_id": candidate_id,
+                "relation": relation,
+                "verdicts": normalized_verdicts,
+            }
+        )
     return {"candidates": normalized}
 
 
@@ -3359,53 +3604,53 @@ def _pairing_llm_review(
 ) -> tuple[dict | None, str, str, str]:
     model = str(config.get("pairing_model") or config.get("model") or "").strip()
     max_tokens = max(1000, min(4000, 800 + len(profiles) * 50))
-    response_format = pairing_response_schema()
-    response_format_used = "json_schema"
-    try:
+    is_openrouter = "openrouter.ai" in str(config.get("base_url") or "").lower()
+    use_structured_output = bool(config.get("pairing_structured_output", not is_openrouter))
+    response_format_used = "json_schema" if use_structured_output else "prompt_json"
+
+    if use_structured_output:
+        response_format = pairing_response_schema()
+        try:
+            response, finish_reason = _vlm_chat_completion_detail(
+                config,
+                [{"role": "user", "content": prompt}],
+                timeout=timeout,
+                max_tokens=max_tokens,
+                model_override=model,
+                response_format=response_format,
+                extra_payload=_pairing_request_options(config, structured=True),
+            )
+        except RuntimeError as exc:
+            error_text = str(exc).lower()
+            if "http 400" not in error_text and "http 422" not in error_text and "response_format" not in error_text:
+                raise
+            response_format_used = "prompt_json_fallback"
+            response, finish_reason = _vlm_chat_completion_detail(
+                config,
+                [{"role": "user", "content": prompt}],
+                timeout=timeout,
+                max_tokens=max_tokens,
+                model_override=model,
+                response_format={"type": "json_object"} if is_openrouter else None,
+                extra_payload=_pairing_request_options(config, structured=False),
+            )
+    else:
         response, finish_reason = _vlm_chat_completion_detail(
             config,
             [{"role": "user", "content": prompt}],
             timeout=timeout,
             max_tokens=max_tokens,
             model_override=model,
-            response_format=response_format,
-            extra_payload=_pairing_request_options(config, structured=True),
-        )
-    except RuntimeError as exc:
-        error_text = str(exc).lower()
-        if "http 400" not in error_text and "http 422" not in error_text and "response_format" not in error_text:
-            raise
-        response_format_used = "prompt_json_fallback"
-        response, finish_reason = _vlm_chat_completion_detail(
-            config,
-            [{"role": "user", "content": prompt}],
-            timeout=timeout,
-            max_tokens=max_tokens,
-            model_override=model,
+            response_format={"type": "json_object"} if is_openrouter else None,
             extra_payload=_pairing_request_options(config, structured=False),
         )
 
     payload = _normalize_pairing_payload(parse_json_object(response))
-    if finish_reason == "length" or not _pairing_payload_is_complete(payload, profiles):
-        retry_tokens = min(5000, max_tokens + 1000)
-        response_format_used += "+retry"
-        response, finish_reason = _vlm_chat_completion_detail(
-            config,
-            [{"role": "user", "content": prompt}],
-            timeout=timeout,
-            max_tokens=retry_tokens,
-            model_override=model,
-            response_format=response_format if response_format_used.startswith("json_schema") else None,
-            extra_payload=_pairing_request_options(
-                config,
-                structured=response_format_used.startswith("json_schema"),
-            ),
-        )
-        payload = _normalize_pairing_payload(parse_json_object(response))
-
     if finish_reason == "length":
-        return None, response, finish_reason, "Pairing output reached the model token limit."
+        return payload, response, finish_reason, response_format_used + ": output reached token limit"
     if not _pairing_payload_is_complete(payload, profiles):
+        if payload and payload.get("candidates"):
+            return payload, response, finish_reason, response_format_used + ": partial output"
         return None, response, finish_reason, "Pairing output was incomplete or invalid JSON."
     return payload, response, finish_reason, response_format_used
 
@@ -3416,13 +3661,15 @@ def _pairing_llm_review_batches(
     profiles: list[dict],
     timeout: float,
     batch_size: int = 10,
+    progress_callback=None,
 ) -> tuple[dict | None, list[dict], str]:
     batches = [profiles[index : index + batch_size] for index in range(0, len(profiles), batch_size)]
     diagnostics: list[dict] = []
     valid_candidates: list[dict] = []
 
-    def run_batch(index_and_profiles: tuple[int, list[dict]]) -> tuple[int, dict | None, str, str, str]:
+    def run_batch(index_and_profiles: tuple[int, list[dict]]) -> tuple[int, dict | None, str, str, str, int]:
         index, batch_profiles = index_and_profiles
+        started_at = time.monotonic()
         try:
             prompt = build_pairing_prompt(visual_profile, batch_profiles)
             payload, response, finish_reason, status = _pairing_llm_review(
@@ -3431,35 +3678,116 @@ def _pairing_llm_review_batches(
                 batch_profiles,
                 timeout,
             )
-            return index, payload, response, finish_reason, status
+            return (
+                index,
+                payload,
+                response,
+                finish_reason,
+                status,
+                int((time.monotonic() - started_at) * 1000),
+            )
         except Exception as exc:
-            return index, None, "", "", "request failed: " + str(exc)
+            return (
+                index,
+                None,
+                "",
+                "",
+                "request failed: " + str(exc),
+                int((time.monotonic() - started_at) * 1000),
+            )
 
     indexed_batches = list(enumerate(batches))
-    worker_count = max(1, min(4, len(indexed_batches)))
-    with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
-        futures = [executor.submit(run_batch, item) for item in indexed_batches]
-        results = [future.result() for future in concurrent.futures.as_completed(futures)]
+    worker_count = max(1, min(8, len(indexed_batches)))
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=worker_count)
+    future_to_item = {
+        executor.submit(run_batch, item): item
+        for item in indexed_batches
+    }
+    pending = set(future_to_item)
+    results: list[tuple[int, dict | None, str, str, str, int]] = []
+    hard_timeout = max(0.01, float(timeout))
+    deadline = time.monotonic() + hard_timeout
+    try:
+        while pending:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            done, pending = concurrent.futures.wait(
+                pending,
+                timeout=remaining,
+                return_when=concurrent.futures.FIRST_COMPLETED,
+            )
+            if not done:
+                break
+            for future in done:
+                results.append(future.result())
+                if progress_callback is not None:
+                    partial = [
+                        candidate
+                        for item in results
+                        for candidate in (item[1] or {}).get("candidates") or []
+                    ]
+                    progress_callback(
+                        len(results),
+                        len(indexed_batches),
+                        len(partial),
+                        {"candidates": partial},
+                    )
 
-    for index, payload, response, finish_reason, status in sorted(results, key=lambda item: item[0]):
+        for future in pending:
+            index, _batch_profiles = future_to_item[future]
+            future.cancel()
+            results.append(
+                (
+                    index,
+                    None,
+                    "",
+                    "",
+                    f"batch total timeout after {float(timeout):.1f}s",
+                    int(hard_timeout * 1000),
+                )
+            )
+            if progress_callback is not None:
+                partial = [
+                    candidate
+                    for item in results
+                    for candidate in (item[1] or {}).get("candidates") or []
+                ]
+                progress_callback(
+                    len(results),
+                    len(indexed_batches),
+                    len(partial),
+                    {"candidates": partial},
+                )
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+    for index, payload, response, finish_reason, status, elapsed_ms in sorted(results, key=lambda item: item[0]):
         candidate_count = len((payload or {}).get("candidates") or [])
+        expected_candidate_count = len(batches[index])
         diagnostics.append(
             {
                 "batch": index + 1,
                 "candidate_count": candidate_count,
+                "expected_candidate_count": expected_candidate_count,
                 "finish_reason": finish_reason,
                 "status": status,
+                "elapsed_ms": elapsed_ms,
                 "response_preview": response[:500],
             }
         )
         valid_candidates.extend((payload or {}).get("candidates") or [])
 
-    failed_batches = [item for item in diagnostics if item["candidate_count"] == 0]
+    failed_batches = [
+        item
+        for item in diagnostics
+        if item["candidate_count"] < item["expected_candidate_count"]
+    ]
     warning = ""
     if failed_batches:
         warning = (
-            f"{len(failed_batches)} of {len(batches)} pairing batches failed validation; "
-            "deterministic scoring was used only for those candidates."
+            f"{len(failed_batches)} of {len(batches)} pairing batches timed out or returned unusable output; "
+            "those candidates remain selectable and use local provenance evidence."
         )
     payload = {"candidates": valid_candidates} if valid_candidates else None
     return payload, diagnostics, warning
@@ -3488,6 +3816,7 @@ def _finish_analysis_job(viewer: "RgbdViewer", job_type: str, cursor: dict, obje
 
 
 def _run_object_pairing_analysis(viewer: "RgbdViewer", cursor: dict, object_id: str) -> None:
+    run_id = uuid.uuid4().hex
     runtime = getattr(viewer, "discover_runtime", None)
     if runtime is None:
         try:
@@ -3521,6 +3850,11 @@ def _run_object_pairing_analysis(viewer: "RgbdViewer", cursor: dict, object_id: 
                 return
             record["pairing_status"] = "processing"
             record["pairing_started_at_ms"] = _now_ms()
+            record["pairing_heartbeat_at_ms"] = record["pairing_started_at_ms"]
+            record["pairing_run_id"] = run_id
+            record["pairing_batches_completed"] = 0
+            record["pairing_batches_total"] = 0
+            record["pairing_valid_llm_candidates"] = 0
             record["pairing_error"] = ""
             record["pairing_warning"] = ""
             record["pairing_candidates"] = []
@@ -3535,21 +3869,64 @@ def _run_object_pairing_analysis(viewer: "RgbdViewer", cursor: dict, object_id: 
             profiles,
             llm_limit,
         )
+        baseline_candidates = score_candidates(visual_profile, profiles, None)
+        with viewer._pairing_lock:
+            _ctx, baseline_device_dir, baseline_store = _load_point_store(viewer.args, cursor)
+            baseline_record = _find_object_record(baseline_store, object_id)
+            if baseline_record is not None and str(baseline_record.get("pairing_run_id") or "") == run_id:
+                baseline_record["pairing_candidates"] = baseline_candidates[:result_limit]
+                baseline_record["pairing_evaluated_candidate_count"] = len(baseline_candidates)
+                baseline_record["pairing_llm_candidate_count"] = len(shortlisted_profiles)
+                baseline_record["pairing_heartbeat_at_ms"] = _now_ms()
+                _save_point_store(baseline_device_dir, baseline_store)
 
         llm_payload = None
         llm_warning = ""
         llm_diagnostics: list[dict] = []
         pairing_model = str(config.get("pairing_model") or config.get("model") or "").strip()
         if shortlisted_profiles and str(config.get("base_url") or "").strip() and pairing_model:
+            batch_total = int(math.ceil(len(shortlisted_profiles) / 10.0))
+
+            def update_pairing_progress(
+                completed: int,
+                total: int,
+                valid_count: int,
+                partial_payload: dict,
+            ) -> None:
+                partial_candidates = score_candidates(visual_profile, profiles, partial_payload)
+                with viewer._pairing_lock:
+                    _ctx, progress_device_dir, progress_store = _load_point_store(viewer.args, cursor)
+                    progress_record = _find_object_record(progress_store, object_id)
+                    if progress_record is None or str(progress_record.get("pairing_run_id") or "") != run_id:
+                        return
+                    progress_record["pairing_batches_completed"] = int(completed)
+                    progress_record["pairing_batches_total"] = int(total)
+                    progress_record["pairing_valid_llm_candidates"] = int(valid_count)
+                    progress_record["pairing_candidates"] = partial_candidates[:result_limit]
+                    progress_record["pairing_evaluated_candidate_count"] = len(partial_candidates)
+                    progress_record["pairing_heartbeat_at_ms"] = _now_ms()
+                    _save_point_store(progress_device_dir, progress_store)
+
+            update_pairing_progress(0, batch_total, 0, {"candidates": []})
             try:
                 llm_payload, llm_diagnostics, llm_warning = _pairing_llm_review_batches(
                     config,
                     visual_profile,
                     shortlisted_profiles,
-                    float(getattr(viewer.args, "vlm_timeout_seconds", 120.0)),
+                    max(
+                        15.0,
+                        min(
+                            180.0,
+                            float(
+                                config.get("pairing_timeout_seconds")
+                                or getattr(viewer.args, "pairing_timeout_seconds", 60.0)
+                            ),
+                        ),
+                    ),
+                    progress_callback=update_pairing_progress,
                 )
             except Exception as exc:
-                llm_warning = f"LLM pairing review failed; deterministic scoring was used: {exc}"
+                llm_warning = f"LLM pairing review failed; local provenance evidence was used: {exc}"
                 print(f"[pairing] LLM review failed for {object_id}: {exc}", flush=True)
 
         all_candidates = score_candidates(visual_profile, profiles, llm_payload)
@@ -3557,7 +3934,7 @@ def _run_object_pairing_analysis(viewer: "RgbdViewer", cursor: dict, object_id: 
         with viewer._pairing_lock:
             _ctx, device_dir, store = _load_point_store(viewer.args, cursor)
             record = _find_object_record(store, object_id)
-            if record is not None:
+            if record is not None and str(record.get("pairing_run_id") or "") == run_id:
                 record["pairing_status"] = "done"
                 record["pairing_visual_profile"] = visual_profile
                 record["pairing_candidates"] = candidates
@@ -3569,6 +3946,7 @@ def _run_object_pairing_analysis(viewer: "RgbdViewer", cursor: dict, object_id: 
                 record["pairing_evaluated_candidate_count"] = len(all_candidates)
                 record["pairing_llm_candidate_count"] = len(shortlisted_profiles)
                 record["pairing_completed_at_ms"] = _now_ms()
+                record["pairing_heartbeat_at_ms"] = record["pairing_completed_at_ms"]
                 record["pairing_error"] = ""
                 record["pairing_warning"] = llm_warning
                 _save_point_store(device_dir, store)
@@ -3577,10 +3955,11 @@ def _run_object_pairing_analysis(viewer: "RgbdViewer", cursor: dict, object_id: 
             with viewer._pairing_lock:
                 _ctx, device_dir, store = _load_point_store(viewer.args, cursor)
                 record = _find_object_record(store, object_id)
-                if record is not None:
+                if record is not None and str(record.get("pairing_run_id") or "") == run_id:
                     record["pairing_status"] = "error"
                     record["pairing_error"] = str(exc)
                     record["pairing_completed_at_ms"] = _now_ms()
+                    record["pairing_heartbeat_at_ms"] = record["pairing_completed_at_ms"]
                     _save_point_store(device_dir, store)
         except Exception:
             pass
@@ -3654,7 +4033,12 @@ def _vlm_processing_stale(args: argparse.Namespace, record: dict) -> bool:
     return _now_ms() - started_at > timeout_ms
 
 
-def _mark_stale_vlm_records(args: argparse.Namespace, device_dir: Path, store: dict) -> bool:
+def _mark_stale_vlm_records(
+    args: argparse.Namespace,
+    device_dir: Path,
+    store: dict,
+    viewer: "RgbdViewer | None" = None,
+) -> bool:
     changed = False
     for record in _object_records(store):
         if _vlm_processing_stale(args, record):
@@ -3663,9 +4047,21 @@ def _mark_stale_vlm_records(args: argparse.Namespace, device_dir: Path, store: d
             record["vlm_completed_at_ms"] = _now_ms()
             changed = True
         if str(record.get("pairing_status") or "") == "processing":
+            object_id = str(record.get("object_id") or "")
+            key = (str(store.get("room_id") or ""), str(store.get("device_id") or ""), object_id)
+            if viewer is not None:
+                with viewer._analysis_jobs_lock:
+                    if key in viewer._pairing_jobs:
+                        continue
             started_at = int(record.get("pairing_started_at_ms") or 0)
-            timeout_ms = int(max(90_000, float(getattr(args, "vlm_timeout_seconds", 120.0)) * 2000.0))
-            if started_at <= 0 or _now_ms() - started_at > timeout_ms:
+            heartbeat_at = int(record.get("pairing_heartbeat_at_ms") or started_at)
+            timeout_ms = int(
+                max(
+                    90_000,
+                    float(getattr(args, "pairing_timeout_seconds", 60.0)) * 1500.0,
+                )
+            )
+            if heartbeat_at <= 0 or _now_ms() - heartbeat_at > timeout_ms:
                 record["pairing_status"] = "error"
                 record["pairing_error"] = "Previous pairing analysis timed out or was interrupted. Refresh Match to retry."
                 record["pairing_completed_at_ms"] = _now_ms()
@@ -3923,6 +4319,9 @@ class _PayloadHandler(http.server.BaseHTTPRequestHandler):
         if parsed.path == "/api/room/object/pairing/candidates":
             self._handle_room_object_pairing_candidates(parsed)
             return
+        if parsed.path == "/api/room/object/device/live":
+            self._handle_room_object_device_live(parsed)
+            return
         if parsed.path == "/api/discover/status":
             self._handle_discover_status()
             return
@@ -3974,6 +4373,10 @@ class _PayloadHandler(http.server.BaseHTTPRequestHandler):
 
         if self.path == "/api/room/object/pairing/unbind":
             self._handle_room_object_pairing_unbind()
+            return
+
+        if self.path == "/api/room/object/device/control":
+            self._handle_room_object_device_control()
             return
 
         if self.path == "/api/room/point/delete":
@@ -4711,6 +5114,157 @@ class _PayloadHandler(http.server.BaseHTTPRequestHandler):
             return
         self._send_json(200, {"ok": True, "devices": runtime.profiles()})
 
+    def _handle_room_object_device_live(self, parsed: urllib.parse.ParseResult) -> None:
+        viewer = self.viewer_ref
+        if viewer is None:
+            self._send_json(503, {"ok": False, "reason": "viewer_not_ready", "devices": []})
+            return
+        runtime = getattr(viewer, "discover_runtime", None)
+        if runtime is None:
+            self._send_json(503, {"ok": False, "reason": "discovery_not_running", "devices": []})
+            return
+
+        query = urllib.parse.parse_qs(parsed.query)
+        cursor = _preview_query_to_cursor(query)
+        try:
+            _ctx, _device_dir, store = _load_point_store(viewer.args, cursor)
+            profiles = {
+                str(profile.get("canonical_device_id") or ""): profile
+                for profile in runtime.profiles()
+            }
+            devices: list[dict] = []
+            for record in _object_records(store):
+                object_id = str(record.get("object_id") or "")
+                if not object_id or str(record.get("status") or "") != "completed":
+                    continue
+                binding = record.get("network_binding")
+                canonical_id = (
+                    str(binding.get("canonical_device_id") or "")
+                    if isinstance(binding, dict)
+                    else ""
+                )
+                profile = profiles.get(canonical_id)
+                devices.append(
+                    {
+                        "object_id": object_id,
+                        "bound": bool(canonical_id),
+                        "canonical_device_id": canonical_id,
+                        "binding_name": (
+                            str(binding.get("display_name") or "")
+                            if isinstance(binding, dict)
+                            else ""
+                        ),
+                        "profile": _live_network_profile_payload(profile) if isinstance(profile, dict) else None,
+                    }
+                )
+        except Exception as exc:
+            self._send_json(500, {"ok": False, "reason": str(exc), "devices": []})
+            return
+        self._send_json(200, {"ok": True, "devices": devices, "server_time_ms": _now_ms()})
+
+    def _handle_room_object_device_control(self) -> None:
+        viewer = self.viewer_ref
+        if viewer is None:
+            self._send_json(503, {"ok": False, "reason": "viewer_not_ready"})
+            return
+        runtime = getattr(viewer, "discover_runtime", None)
+        if runtime is None:
+            self._send_json(503, {"ok": False, "reason": "discovery_not_running"})
+            return
+        payload, error = self._read_json_payload()
+        if error is not None:
+            self._send_json(400, {"ok": False, "reason": error})
+            return
+
+        object_id = _safe_path_component(
+            payload.get("object_id") or payload.get("object_session_id"),
+            "",
+        )
+        if not object_id:
+            self._send_json(400, {"ok": False, "reason": "missing_object_id"})
+            return
+        try:
+            _ctx, _device_dir, store = _load_point_store(viewer.args, payload)
+            record = _find_object_record(store, object_id)
+            if record is None:
+                self._send_json(404, {"ok": False, "reason": "object_not_found"})
+                return
+            binding = record.get("network_binding")
+            canonical_id = (
+                str(binding.get("canonical_device_id") or "")
+                if isinstance(binding, dict)
+                else ""
+            )
+            if not canonical_id:
+                self._send_json(409, {"ok": False, "reason": "object_not_bound"})
+                return
+            profile = next(
+                (
+                    item
+                    for item in runtime.profiles()
+                    if str(item.get("canonical_device_id") or "") == canonical_id
+                ),
+                None,
+            )
+            if not isinstance(profile, dict):
+                self._send_json(404, {"ok": False, "reason": "bound_network_device_not_found"})
+                return
+
+            data_key = str(payload.get("data_key") or "").strip()
+            requested_topic = str(payload.get("operation_topic") or "").strip()
+            allowed_operations = [
+                operation
+                for operation in profile.get("operations") or []
+                if isinstance(operation, dict) and str(operation.get("topic") or "").strip()
+            ]
+            if data_key:
+                operation = _resolve_data_write_operation(profile, data_key)
+                reading = (profile.get("data") or {}).get(data_key)
+                if not isinstance(reading, dict):
+                    self._send_json(404, {"ok": False, "reason": "data_key_not_found"})
+                    return
+                topic = (
+                    str((operation or {}).get("topic") or "").strip()
+                    or _data_source_publish_topic(profile, data_key, reading)
+                )
+                if not topic:
+                    self._send_json(409, {"ok": False, "reason": "data_mqtt_topic_unavailable"})
+                    return
+            else:
+                operation = next(
+                    (
+                        item
+                        for item in allowed_operations
+                        if str(item.get("topic") or "") == requested_topic
+                    ),
+                    None,
+                )
+                if operation is None:
+                    self._send_json(400, {"ok": False, "reason": "operation_not_allowed"})
+                    return
+                topic = requested_topic
+
+            value = _parse_control_value(payload.get("value_text"))
+            if data_key and operation is None:
+                value = _data_write_payload(reading, data_key, value)
+            if not runtime.publish_mqtt(topic, value):
+                self._send_json(503, {"ok": False, "reason": "mqtt_publish_failed"})
+                return
+        except Exception as exc:
+            self._send_json(500, {"ok": False, "reason": str(exc)})
+            return
+
+        self._send_json(
+            200,
+            {
+                "ok": True,
+                "object_id": object_id,
+                "canonical_device_id": canonical_id,
+                "topic": topic,
+                "value": value,
+            },
+        )
+
     def _handle_room_object_pairing_candidates(self, parsed: urllib.parse.ParseResult) -> None:
         viewer = self.viewer_ref
         if viewer is None:
@@ -4796,13 +5350,17 @@ class _PayloadHandler(http.server.BaseHTTPRequestHandler):
                         {"ok": False, "object_id": object_id, "reason": "vlm_not_configured"},
                     )
                 return
-            record["pairing_status"] = "processing"
-            record["pairing_started_at_ms"] = _now_ms()
-            record["pairing_error"] = ""
-            record["pairing_warning"] = ""
-            record["pairing_candidates"] = []
-            _save_point_store(device_dir, store)
-            _schedule_object_pairing_analysis(viewer, payload, object_id)
+            if not _schedule_object_pairing_analysis(viewer, payload, object_id):
+                self._send_json(
+                    202,
+                    {
+                        "ok": True,
+                        "object_id": object_id,
+                        "pairing_status": "processing",
+                        "reason": "pairing_already_running",
+                    },
+                )
+                return
         except Exception as exc:
             self._send_json(500, {"ok": False, "reason": str(exc)})
             return
@@ -4861,15 +5419,9 @@ class _PayloadHandler(http.server.BaseHTTPRequestHandler):
             if not isinstance(profile, dict):
                 self._send_json(404, {"ok": False, "reason": "network_device_not_found"})
                 return
-            binding = {
-                "canonical_device_id": canonical_id,
-                "display_name": str(profile.get("display_name") or canonical_id),
-                "method": "semantic_match_manual_confirmation",
-                "score": int((candidate or {}).get("score") or 0),
-                "evidence_coverage_percent": int((candidate or {}).get("evidence_coverage_percent") or 0),
-                "bound_at_ms": _now_ms(),
-                "profile_snapshot": profile,
-            }
+            profile = dict(profile)
+            profile["canonical_device_id"] = canonical_id
+            binding = _network_binding_from_candidate(profile, candidate)
             history = record.setdefault("binding_history", [])
             if isinstance(history, list):
                 previous = record.get("network_binding")
@@ -4915,19 +5467,33 @@ class _PayloadHandler(http.server.BaseHTTPRequestHandler):
 
     def _send_json(self, status: int, payload: dict) -> None:
         body = json.dumps(payload).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            self.close_connection = True
+            print(
+                f"[server] client disconnected before response completed: "
+                f"peer={getattr(self, 'client_address', ('unknown', 0))[0]} status={status}",
+                flush=True,
+            )
 
     def log_message(self, format: str, *args: object) -> None:
         print(f"[server] {format % args}", flush=True)
 
 
+class _ViewerHttpServer(http.server.ThreadingHTTPServer):
+    daemon_threads = True
+    block_on_close = False
+    allow_reuse_address = True
+
+
 def _start_server(viewer: "RgbdViewer", host: str = "0.0.0.0", port: int = 8500) -> threading.Thread:
     _PayloadHandler.viewer_ref = viewer
-    server = http.server.HTTPServer((host, port), _PayloadHandler)
+    server = _ViewerHttpServer((host, port), _PayloadHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     print(f"[server] listening on {host}:{port}", flush=True)
@@ -4964,6 +5530,7 @@ class RgbdViewer:
         self._pairing_jobs: set[tuple[str, str, str]] = set()
         self._device_tree_item_context: dict[str, dict] = {}
         self._network_tree_item_context: dict[str, dict] = {}
+        self._network_tree_item_by_device: dict[str, str] = {}
         self._network_operation_context: dict[str, dict] = {}
         self._network_profile_item_context: dict[str, dict] = {}
         self._discover_configs: list[SourceConfig] = []
@@ -5183,6 +5750,9 @@ class RgbdViewer:
         self.vlm_pairing_reasoning_var = tk.StringVar(
             value=str(config.get("pairing_reasoning_effort") or "minimal")
         )
+        self.vlm_pairing_timeout_var = tk.DoubleVar(
+            value=max(15.0, min(180.0, float(config.get("pairing_timeout_seconds") or 60.0)))
+        )
         self.vlm_status_var = tk.StringVar(value="VLM config loaded" if config.get("model") else "Configure VLM endpoint")
 
         form = ttk.Frame(parent)
@@ -5218,6 +5788,15 @@ class RgbdViewer:
             state="readonly",
             width=12,
         ).grid(row=5, column=1, sticky=tk.W, pady=6)
+        ttk.Label(form, text="Pairing request timeout").grid(row=6, column=0, sticky=tk.W, padx=(0, 8), pady=6)
+        ttk.Spinbox(
+            form,
+            from_=15,
+            to=180,
+            increment=5,
+            textvariable=self.vlm_pairing_timeout_var,
+            width=8,
+        ).grid(row=6, column=1, sticky=tk.W, pady=6)
         form.columnconfigure(1, weight=1)
 
         actions = ttk.Frame(parent)
@@ -5797,9 +6376,12 @@ class RgbdViewer:
         if should_render:
             profiles = runtime.profiles() if runtime is not None else []
             self._network_profiles_snapshot = profiles
-            self.network_device_tree.delete(*self.network_device_tree.get_children())
-            self._network_tree_item_context.clear()
-            for profile in profiles:
+            current_ids: set[str] = set()
+            for index, profile in enumerate(profiles):
+                canonical_id = str(profile.get("canonical_device_id") or "")
+                if not canonical_id:
+                    continue
+                current_ids.add(canonical_id)
                 connections = profile.get("connections") or {}
                 addresses = [*(connections.get("ip") or []), *(connections.get("mac") or [])]
                 identifiers = profile.get("identifiers") or {}
@@ -5808,23 +6390,39 @@ class RgbdViewer:
                 identity = profile.get("identity") or {}
                 classification = profile.get("classification") or {}
                 classification_confidence = float(classification.get("confidence") or 0.0)
-                item = self.network_device_tree.insert(
-                    "",
-                    tk.END,
-                    text=str(profile.get("display_name") or "Unknown network device"),
-                    values=(
-                        ", ".join(str(value) for value in entities),
-                        ", ".join(str(value) for value in channels) or "-",
-                        int(identity.get("observed_topic_count") or len(identifiers.get("mqtt_topic_prefix") or [])),
-                        f"{profile.get('device_type') or ''} ({classification_confidence:.0%})",
-                        len(profile.get("data") or {}),
-                        len(profile.get("operations") or []),
-                        ", ".join(str(value) for value in addresses),
-                        int(profile.get("evidence_count") or 0),
-                        "online" if profile.get("online", False) else "stored",
-                    ),
+                values = (
+                    ", ".join(str(value) for value in entities),
+                    ", ".join(str(value) for value in channels) or "-",
+                    int(identity.get("observed_topic_count") or len(identifiers.get("mqtt_topic_prefix") or [])),
+                    f"{profile.get('device_type') or ''} ({classification_confidence:.0%})",
+                    len(profile.get("data") or {}),
+                    len(profile.get("operations") or []),
+                    ", ".join(str(value) for value in addresses),
+                    int(profile.get("evidence_count") or 0),
+                    "online" if profile.get("online", False) else "stored",
                 )
+                item = self._network_tree_item_by_device.get(canonical_id)
+                if not item or not self.network_device_tree.exists(item):
+                    item = self.network_device_tree.insert("", tk.END)
+                    self._network_tree_item_by_device[canonical_id] = item
+                self.network_device_tree.item(
+                    item,
+                    text=str(profile.get("display_name") or "Unknown network device"),
+                    values=values,
+                )
+                self.network_device_tree.move(item, "", index)
                 self._network_tree_item_context[item] = profile
+
+            stale_ids = [
+                canonical_id
+                for canonical_id in self._network_tree_item_by_device
+                if canonical_id not in current_ids
+            ]
+            for canonical_id in stale_ids:
+                item = self._network_tree_item_by_device.pop(canonical_id)
+                self._network_tree_item_context.pop(item, None)
+                if self.network_device_tree.exists(item):
+                    self.network_device_tree.delete(item)
             self._refresh_visible_network_secondary_view()
             self._last_network_profile_revision = revision
             self._network_profiles_pending.clear()
@@ -5876,10 +6474,37 @@ class RgbdViewer:
             for profile in self._network_profiles_snapshot:
                 self._append_network_operation_rows(profile)
         elif selected == str(self._network_profiles_tab):
+            open_device_ids = {
+                str(context.get("canonical_device_id") or "")
+                for item, context in self._network_profile_item_context.items()
+                if isinstance(context, dict)
+                and "operation" not in context
+                and self.network_profile_tree.exists(item)
+                and bool(self.network_profile_tree.item(item, "open"))
+            }
+            selected_device_id = ""
+            selected_items = self.network_profile_tree.selection()
+            if selected_items:
+                selected_context = self._network_profile_item_context.get(selected_items[0])
+                if isinstance(selected_context, dict):
+                    selected_profile = selected_context.get("profile") if "operation" in selected_context else selected_context
+                    if isinstance(selected_profile, dict):
+                        selected_device_id = str(selected_profile.get("canonical_device_id") or "")
+            scroll_position = self.network_profile_tree.yview()
             self.network_profile_tree.delete(*self.network_profile_tree.get_children())
             self._network_profile_item_context.clear()
+            selected_item = ""
             for profile in self._network_profiles_snapshot:
-                self._append_network_profile_rows(profile)
+                parent = self._append_network_profile_rows(profile)
+                canonical_id = str(profile.get("canonical_device_id") or "")
+                if canonical_id in open_device_ids:
+                    self.network_profile_tree.item(parent, open=True)
+                if canonical_id and canonical_id == selected_device_id:
+                    selected_item = parent
+            if selected_item:
+                self.network_profile_tree.selection_set(selected_item)
+            if scroll_position:
+                self.network_profile_tree.yview_moveto(scroll_position[0])
 
     def copy_selected_network_rows(self, _event: tk.Event | None = None) -> str:
         selected = self.network_device_tree.selection()
@@ -5955,9 +6580,9 @@ class RgbdViewer:
             )
             self._network_operation_context[item] = operation
 
-    def _append_network_profile_rows(self, profile: dict) -> None:
+    def _append_network_profile_rows(self, profile: dict) -> str:
         if not hasattr(self, "network_profile_tree"):
-            return
+            return ""
         identity = profile.get("identity") or {}
         classification = profile.get("classification") or {}
         parent = self.network_profile_tree.insert(
@@ -6015,6 +6640,7 @@ class RgbdViewer:
                 ),
             )
             self._network_profile_item_context[child] = {"profile": profile, "operation": operation}
+        return parent
 
     def on_network_operation_selected(self, _event: tk.Event) -> None:
         selected = self.network_operation_tree.selection()
@@ -6164,6 +6790,10 @@ class RgbdViewer:
             "pairing_model": self.vlm_pairing_model_var.get().strip() or self.vlm_model_var.get().strip(),
             "pairing_candidate_limit": _pairing_candidate_limit(self.vlm_pairing_candidate_limit_var.get()),
             "pairing_reasoning_effort": self.vlm_pairing_reasoning_var.get().strip() or "minimal",
+            "pairing_timeout_seconds": max(
+                15.0,
+                min(180.0, float(self.vlm_pairing_timeout_var.get())),
+            ),
         }
 
     def _vlm_form_signature(self) -> str:
@@ -6176,6 +6806,7 @@ class RgbdViewer:
                 "pairing_model": config["pairing_model"],
                 "pairing_candidate_limit": config["pairing_candidate_limit"],
                 "pairing_reasoning_effort": config["pairing_reasoning_effort"],
+                "pairing_timeout_seconds": config["pairing_timeout_seconds"],
             },
             sort_keys=True,
         )
@@ -6249,7 +6880,7 @@ class RgbdViewer:
                     config,
                     build_pairing_prompt(pairing_test_visual, pairing_test_profiles),
                     pairing_test_profiles,
-                    float(getattr(self.args, "vlm_timeout_seconds", 120.0)),
+                    float(config.get("pairing_timeout_seconds") or 60.0),
                 )
                 if pairing_payload is None:
                     raise RuntimeError("Pairing model schema test failed: " + pairing_status)
@@ -6304,7 +6935,7 @@ class RgbdViewer:
                     continue
                 if int(store.get("storage_schema_version") or 0) < 2:
                     _save_point_store(device_dir, store)
-                _mark_stale_vlm_records(self.args, device_dir, store)
+                _mark_stale_vlm_records(self.args, device_dir, store, self)
                 for record in _object_records(store):
                     if str(record.get("status") or "") != "completed":
                         continue
@@ -6595,20 +7226,22 @@ class RgbdViewer:
         pairing_candidates: dict[str, dict] = {}
         pairing_tree = ttk.Treeview(
             pairing_group,
-            columns=("score", "coverage", "type", "address"),
+            columns=("relation", "confidence", "coverage", "type", "address"),
             show="tree headings",
             height=6,
         )
         pairing_tree.heading("#0", text="Candidate")
-        pairing_tree.heading("score", text="Score")
-        pairing_tree.heading("coverage", text="Evidence")
+        pairing_tree.heading("relation", text="Relationship")
+        pairing_tree.heading("confidence", text="Evidence")
+        pairing_tree.heading("coverage", text="Coverage")
         pairing_tree.heading("type", text="Type")
         pairing_tree.heading("address", text="IP / MAC")
-        pairing_tree.column("#0", width=260, anchor=tk.W)
-        pairing_tree.column("score", width=70, anchor=tk.CENTER)
-        pairing_tree.column("coverage", width=80, anchor=tk.CENTER)
-        pairing_tree.column("type", width=150, anchor=tk.W)
-        pairing_tree.column("address", width=190, anchor=tk.W)
+        pairing_tree.column("#0", width=230, anchor=tk.W)
+        pairing_tree.column("relation", width=150, anchor=tk.W)
+        pairing_tree.column("confidence", width=90, anchor=tk.CENTER)
+        pairing_tree.column("coverage", width=75, anchor=tk.CENTER)
+        pairing_tree.column("type", width=130, anchor=tk.W)
+        pairing_tree.column("address", width=170, anchor=tk.W)
         pairing_tree.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
         def start_pairing_refresh() -> None:
@@ -6651,15 +7284,9 @@ class RgbdViewer:
                     )
                     return
                 profile = candidate.get("profile") or {}
-                current_record["network_binding"] = {
-                    "canonical_device_id": canonical_id,
-                    "display_name": str(candidate.get("display_name") or canonical_id),
-                    "method": "semantic_match_manual_confirmation",
-                    "score": int(candidate.get("score") or 0),
-                    "evidence_coverage_percent": int(candidate.get("evidence_coverage_percent") or 0),
-                    "bound_at_ms": _now_ms(),
-                    "profile_snapshot": profile,
-                }
+                profile = dict(profile)
+                profile["canonical_device_id"] = canonical_id
+                current_record["network_binding"] = _network_binding_from_candidate(profile, candidate)
                 current_record["updated_at_ms"] = _now_ms()
                 _save_point_store(device_dir, current_store)
                 pairing_status_var.set("Bound to " + str(candidate.get("display_name") or canonical_id))
@@ -6695,7 +7322,7 @@ class RgbdViewer:
                 current_store = json.loads((device_dir / "points.json").read_text(encoding="utf-8"))
             except Exception:
                 current_store = store
-            _mark_stale_vlm_records(self.args, device_dir, current_store)
+            _mark_stale_vlm_records(self.args, device_dir, current_store, self)
             current_record = _find_object_record(current_store, object_id) or record
             lines = [
                 f"Object: {object_id}",
@@ -6716,7 +7343,10 @@ class RgbdViewer:
                 lines.append(f"User note: {current_record.get('user_note')}")
             binding = current_record.get("network_binding")
             if isinstance(binding, dict):
-                lines.append(f"Network: {binding.get('display_name') or binding.get('canonical_device_id')}")
+                relation = binding.get("relation_label") or binding.get("relation") or "unknown"
+                lines.append(
+                    f"Network: {binding.get('display_name') or binding.get('canonical_device_id')} ({relation})"
+                )
             meta_var.set("\n".join(lines))
 
             pairing_tree.delete(*pairing_tree.get_children())
@@ -6731,7 +7361,9 @@ class RgbdViewer:
                     tk.END,
                     text=str(candidate.get("display_name") or candidate.get("canonical_device_id") or ""),
                     values=(
-                        f"{int(candidate.get('score') or 0)}%",
+                        str(candidate.get("relation_label") or candidate.get("relation") or "unknown"),
+                        f"{candidate.get('confidence_level') or 'insufficient'} "
+                        f"{int(candidate.get('confidence_percent') or candidate.get('score') or 0)}",
                         f"{int(candidate.get('evidence_coverage_percent') or 0)}%",
                         str(profile.get("device_type") or ""),
                         address_text,

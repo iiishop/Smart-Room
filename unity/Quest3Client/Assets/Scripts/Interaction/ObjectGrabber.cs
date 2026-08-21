@@ -22,7 +22,6 @@ namespace SmartRoom.Interaction
         [SerializeField] private DepthCursor depthCursor;
         [SerializeField] private PixelProjector pixelProjector;
         [SerializeField] private BackendCommunicationManager backendManager;
-        [SerializeField] private RgbStreamModule rgbStreamModule;
         [SerializeField] private TrackingManager trackingManager;
 
         [Header("Input")]
@@ -59,9 +58,6 @@ namespace SmartRoom.Interaction
 
             if (backendManager == null)
                 backendManager = FindFirstObjectByType<BackendCommunicationManager>();
-
-            if (rgbStreamModule == null)
-                rgbStreamModule = FindFirstObjectByType<RgbStreamModule>();
 
             if (trackingManager == null)
                 trackingManager = FindFirstObjectByType<TrackingManager>();
@@ -222,8 +218,8 @@ namespace SmartRoom.Interaction
 
             int label = depthCursor.CurrentMode == DepthCursor.ProbeEditMode.Add ? 1 : 0;
             string mode = label > 0 ? "add" : "del";
-            int frameWidth = rgbStreamModule != null ? rgbStreamModule.LatestFrameWidth : 0;
-            int frameHeight = rgbStreamModule != null ? rgbStreamModule.LatestFrameHeight : 0;
+            int frameWidth = pixelProjector != null ? pixelProjector.ImageWidth : 0;
+            int frameHeight = pixelProjector != null ? pixelProjector.ImageHeight : 0;
             PromptPointMarkerManager.MarkerHandle marker = PromptPointMarkerManager.AddMarker(hitPoint, label);
 
             if (trackingManager != null)
@@ -280,8 +276,8 @@ namespace SmartRoom.Interaction
                 hit_world_x = hitPoint.x,
                 hit_world_y = hitPoint.y,
                 hit_world_z = hitPoint.z,
-                frame_width = rgbStreamModule != null ? rgbStreamModule.LatestFrameWidth : 640,
-                frame_height = rgbStreamModule != null ? rgbStreamModule.LatestFrameHeight : 480,
+                frame_width = pixelProjector != null ? pixelProjector.ImageWidth : 0,
+                frame_height = pixelProjector != null ? pixelProjector.ImageHeight : 0,
                 timestamp_ms = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                 room_id = RoomCoordinateSystemPanel.CurrentRoomId,
                 room_name = RoomCoordinateSystemPanel.CurrentRoomName,

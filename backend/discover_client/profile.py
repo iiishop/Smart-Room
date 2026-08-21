@@ -277,6 +277,9 @@ def _latest_data(device_ids: list[str], snapshot: DataSnapshot | None) -> dict[s
                 "unit": reading.unit,
                 "timestamp": reading.timestamp,
                 "runtime_device_id": device_id,
+                "source_topic": reading.source_topic,
+                "source_payload": reading.source_payload,
+                "payload_path": list(reading.payload_path),
             }
     return result
 

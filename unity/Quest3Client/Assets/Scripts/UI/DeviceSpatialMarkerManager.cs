@@ -95,6 +95,11 @@ namespace SmartRoom.UI
         public static bool UpdateHoverAndConsumeTrigger(Ray ray, bool triggerPressedDown)
         {
             DeviceSpatialMarkerManager manager = EnsureExists(Camera.main);
+            if (DevicePlaceholderBoardManager.UpdateHoverAndConsumeTrigger(ray, triggerPressedDown))
+            {
+                manager.SetHovered(null);
+                return true;
+            }
             manager.UpdateHover(ray);
             if (!triggerPressedDown || manager._hoveredMarker == null)
                 return false;

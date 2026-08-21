@@ -24,7 +24,6 @@ namespace SmartRoom.UI
         [SerializeField] private float rotationLerp = 12f;
 
         [Header("Display")]
-        [SerializeField] private bool showCaptionText = false;
         [SerializeField] private float panelWidthMeters = 0.36f;
         [SerializeField] private float minScale = 0.65f;
         [SerializeField] private float maxScale = 1.8f;
@@ -40,6 +39,7 @@ namespace SmartRoom.UI
         private Material _screenMaterial;
         private TextMeshPro _titleText;
         private TextMeshPro _statusText;
+        private TextMeshPro _feedbackText;
         private Texture2D _texture;
 
         private PreviewImageRecord[] _images = Array.Empty<PreviewImageRecord>();
@@ -50,6 +50,9 @@ namespace SmartRoom.UI
         private float _nextRefreshAt;
         private float _nextStickAt;
         private float _displayScale = 1f;
+        private float _feedbackUntil = -1f;
+        private int _imageLoadVersion;
+        private Coroutine _hapticRoutine;
 
         private static RoomPreviewPanel _instance;
         private static readonly int BaseMapId = Shader.PropertyToID("_BaseMap");
@@ -103,6 +106,7 @@ namespace SmartRoom.UI
         {
             if (_instance == this)
                 _instance = null;
+            OVRInput.SetControllerVibration(0f, 0f, OVRInput.Controller.LTouch);
             if (_screenMaterial != null)
                 Destroy(_screenMaterial);
             if (_texture != null)
@@ -123,6 +127,7 @@ namespace SmartRoom.UI
 
             UpdatePose();
             HandleStick();
+            UpdateTransientFeedback();
 
             if (!_requestInFlight && Time.time >= _nextRefreshAt)
             {
@@ -189,11 +194,29 @@ namespace SmartRoom.UI
             _screenMaterial = CreateTextureMaterial();
             _screenRenderer.sharedMaterial = _screenMaterial;
 
-            if (showCaptionText)
-            {
-                _titleText = CreateLabel("Title", "Preview", new Vector3(-0.48f, 0.355f, -0.002f), 0.09f, TextAlignmentOptions.Left);
-                _statusText = CreateLabel("Status", "Waiting", new Vector3(-0.48f, -0.365f, -0.002f), 0.08f, TextAlignmentOptions.Left);
-            }
+            _titleText = CreateLabel(
+                "Title",
+                "0/0  Waiting for images",
+                new Vector3(-0.48f, 0.355f, -0.002f),
+                0.12f,
+                TextAlignmentOptions.Left);
+            _statusText = CreateLabel(
+                "Status",
+                "No preview images yet",
+                new Vector3(-0.48f, -0.365f, -0.002f),
+                0.10f,
+                TextAlignmentOptions.Left);
+            _feedbackText = CreateLabel(
+                "InteractionFeedback",
+                string.Empty,
+                new Vector3(0f, 0f, -0.004f),
+                0.16f,
+                TextAlignmentOptions.Center);
+            RectTransform feedbackRect = _feedbackText.GetComponent<RectTransform>();
+            if (feedbackRect != null)
+                feedbackRect.sizeDelta = new Vector2(0.82f, 0.18f);
+            _feedbackText.fontStyle = FontStyles.Bold;
+            _feedbackText.gameObject.SetActive(false);
             UpdateAspectLayout(AspectRatio);
 
             ApplyPanelScale();
@@ -310,16 +333,29 @@ namespace SmartRoom.UI
             }
             else if (stick.y >= stickThreshold)
             {
-                _displayScale = Mathf.Min(maxScale, _displayScale + scaleStep);
-                ApplyPanelScale();
+                SetDisplayScale(_displayScale + scaleStep);
                 _nextStickAt = Time.time + stickRepeatSeconds;
             }
             else if (stick.y <= -stickThreshold)
             {
-                _displayScale = Mathf.Max(minScale, _displayScale - scaleStep);
-                ApplyPanelScale();
+                SetDisplayScale(_displayScale - scaleStep);
                 _nextStickAt = Time.time + stickRepeatSeconds;
             }
+        }
+
+        private void SetDisplayScale(float requestedScale)
+        {
+            float next = Mathf.Clamp(requestedScale, minScale, maxScale);
+            if (Mathf.Approximately(next, _displayScale))
+            {
+                string boundary = next >= maxScale ? "Maximum zoom" : "Minimum zoom";
+                ShowFeedback($"{boundary}  {Mathf.RoundToInt(next * 100f)}%", new Color(1f, 0.78f, 0.24f), 0.12f);
+                return;
+            }
+
+            _displayScale = next;
+            ApplyPanelScale();
+            ShowFeedback($"Zoom  {Mathf.RoundToInt(_displayScale * 100f)}%", Color.white, 0.2f);
         }
 
         private void ApplyPanelScale()
@@ -333,12 +369,38 @@ namespace SmartRoom.UI
         private void SelectRelativeImage(int delta)
         {
             if (_images == null || _images.Length == 0)
+            {
+                SetTitle("0/0  No images");
+                SetStatus("Place a point to create the first image");
+                ShowFeedback("No images yet", new Color(1f, 0.78f, 0.24f), 0.12f);
                 return;
+            }
 
             int current = Array.FindIndex(_images, image => image.image_id == _activeImageId);
             if (current < 0)
                 current = Mathf.Clamp(_images.Length - 1, 0, _images.Length - 1);
-            int next = (current + delta + _images.Length) % _images.Length;
+
+            if (_images.Length == 1)
+            {
+                SetTitle($"1/1  {_images[0].image_id}");
+                ShowFeedback("Only one image", new Color(1f, 0.78f, 0.24f), 0.12f);
+                return;
+            }
+
+            int next = current + delta;
+            if (next < 0 || next >= _images.Length)
+            {
+                string boundary = next < 0 ? "Oldest image" : "Newest image";
+                ShowFeedback(
+                    $"{boundary}  {current + 1}/{_images.Length}",
+                    new Color(1f, 0.78f, 0.24f),
+                    0.12f);
+                return;
+            }
+
+            SetTitle($"{next + 1}/{_images.Length}  {_images[next].image_id}");
+            SetStatus("Loading selected image...");
+            ShowFeedback($"Image  {next + 1} / {_images.Length}", Color.white, 0.28f);
             SetActiveImage(_images[next], force: true);
         }
 
@@ -347,6 +409,7 @@ namespace SmartRoom.UI
             if (trackingManager == null)
                 yield break;
 
+            int previousCount = _images != null ? _images.Length : 0;
             _requestInFlight = true;
             string url = trackingManager.BuildViewerUrl(
                 "/api/room/preview/list?room_id=" + UnityWebRequest.EscapeURL(RoomCoordinateSystemPanel.CurrentRoomId) +
@@ -362,6 +425,7 @@ namespace SmartRoom.UI
                 if (request.result != UnityWebRequest.Result.Success)
                 {
                     SetStatus("Preview list error: " + request.error);
+                    ShowFeedback("Image list unavailable", new Color(1f, 0.3f, 0.25f), 0.4f);
                     _requestInFlight = false;
                     yield break;
                 }
@@ -374,6 +438,7 @@ namespace SmartRoom.UI
                 catch (Exception ex)
                 {
                     SetStatus("Preview JSON error: " + ex.Message);
+                    ShowFeedback("Invalid image list", new Color(1f, 0.3f, 0.25f), 0.4f);
                     _requestInFlight = false;
                     yield break;
                 }
@@ -387,12 +452,23 @@ namespace SmartRoom.UI
             {
                 _activeImageId = string.Empty;
                 _activeSignature = string.Empty;
-                SetStatus("No preview images");
-                SetTitle("Room preview");
+                SetStatus("Place a point to create the first image");
+                SetTitle("0/0  No images");
                 yield break;
             }
 
-            PreviewImageRecord selected = FindCurrentOrLatestImage();
+            bool hasNewImage = _images.Length > previousCount;
+            if (hasNewImage)
+            {
+                string message = previousCount == 0
+                    ? "First image ready"
+                    : $"New image ready  {_images.Length}/{_images.Length}";
+                ShowFeedback(message, new Color(0.3f, 1f, 0.55f), 0.35f);
+            }
+
+            PreviewImageRecord selected = hasNewImage
+                ? _images[_images.Length - 1]
+                : FindCurrentOrLatestImage();
             SetActiveImage(selected, force: false);
         }
 
@@ -420,10 +496,11 @@ namespace SmartRoom.UI
 
             _activeImageId = image.image_id;
             _activeSignature = signature;
-            StartCoroutine(LoadImageAsync(image));
+            int loadVersion = ++_imageLoadVersion;
+            StartCoroutine(LoadImageAsync(image, loadVersion));
         }
 
-        private IEnumerator LoadImageAsync(PreviewImageRecord image)
+        private IEnumerator LoadImageAsync(PreviewImageRecord image, int loadVersion)
         {
             if (trackingManager == null)
                 yield break;
@@ -444,13 +521,24 @@ namespace SmartRoom.UI
                 yield return request.SendWebRequest();
                 if (request.result != UnityWebRequest.Result.Success)
                 {
-                    SetStatus("Preview image error: " + request.error);
+                    if (loadVersion == _imageLoadVersion)
+                    {
+                        SetStatus("Preview image error: " + request.error);
+                        ShowFeedback("Image load failed", new Color(1f, 0.3f, 0.25f), 0.5f);
+                    }
                     yield break;
                 }
+
+                if (loadVersion != _imageLoadVersion || _activeImageId != image.image_id)
+                    yield break;
 
                 Texture2D texture = DownloadHandlerTexture.GetContent(request);
                 ApplyTexture(texture);
                 SetStatus($"+{image.positive_point_count}/-{image.negative_point_count}  {(image.segmented ? "mask" : "no mask")}");
+                ShowFeedback(
+                    $"Image  {Mathf.Max(index + 1, 1)} / {Mathf.Max(_images.Length, 1)}  ready",
+                    new Color(0.3f, 1f, 0.55f),
+                    0.18f);
             }
         }
 
@@ -487,6 +575,8 @@ namespace SmartRoom.UI
                 _titleText.transform.localPosition = new Vector3(-0.48f, titleY, -0.002f);
             if (_statusText != null)
                 _statusText.transform.localPosition = new Vector3(-0.48f, statusY, -0.002f);
+            if (_feedbackText != null)
+                _feedbackText.transform.localPosition = new Vector3(0f, 0f, -0.004f);
         }
 
         private void SetTitle(string text)
@@ -498,7 +588,43 @@ namespace SmartRoom.UI
         private void SetStatus(string text)
         {
             if (_statusText != null)
-                _statusText.text = ShortText(text, 42);
+                _statusText.text = ShortText(text, 54);
+        }
+
+        private void ShowFeedback(string text, Color color, float hapticAmplitude)
+        {
+            if (_feedbackText != null)
+            {
+                _feedbackText.text = ShortText(text, 38);
+                _feedbackText.color = color;
+                _feedbackText.gameObject.SetActive(true);
+                _feedbackUntil = Time.unscaledTime + 0.9f;
+            }
+
+            if (hapticAmplitude > 0f)
+            {
+                if (_hapticRoutine != null)
+                    StopCoroutine(_hapticRoutine);
+                _hapticRoutine = StartCoroutine(PulseLeftController(hapticAmplitude));
+            }
+        }
+
+        private void UpdateTransientFeedback()
+        {
+            if (_feedbackText != null &&
+                _feedbackText.gameObject.activeSelf &&
+                Time.unscaledTime >= _feedbackUntil)
+            {
+                _feedbackText.gameObject.SetActive(false);
+            }
+        }
+
+        private IEnumerator PulseLeftController(float amplitude)
+        {
+            OVRInput.SetControllerVibration(0.12f, Mathf.Clamp01(amplitude), OVRInput.Controller.LTouch);
+            yield return new WaitForSecondsRealtime(0.045f);
+            OVRInput.SetControllerVibration(0f, 0f, OVRInput.Controller.LTouch);
+            _hapticRoutine = null;
         }
 
         private static string ShortText(string text, int maxLength)

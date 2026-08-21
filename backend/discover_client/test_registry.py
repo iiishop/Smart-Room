@@ -43,6 +43,25 @@ def test_registry_does_not_use_ip_as_identity(tmp_path: Path) -> None:
     assert first != second
 
 
+def test_stored_profile_exposes_stable_discovery_time(tmp_path: Path) -> None:
+    registry = PersistentDeviceRegistry(tmp_path / "registry.json")
+    canonical_id = registry.resolve(
+        _device(ip="192.168.1.30", mac="AA:BB:CC:00:00:03", topic="lab/sensor/three")
+    )
+    registry.update_profile(
+        canonical_id,
+        {
+            "canonical_device_id": canonical_id,
+            "display_name": "Sensor three",
+            "last_seen": 100.0,
+        },
+    )
+
+    profile = registry.stored_profiles()[0]
+    assert profile["discovered_at"] == registry.created_at(canonical_id)
+    assert profile["discovered_at"] > 0
+
+
 def test_registry_compacts_channel_profiles_into_physical_devices(tmp_path: Path) -> None:
     path = tmp_path / "registry.json"
     registry = PersistentDeviceRegistry(path)

@@ -561,14 +561,39 @@ namespace SmartRoom.UI
             if (!string.IsNullOrWhiteSpace(response.vlm_error))
                 return "VLM: " + ShortText(response.vlm_error, 92);
             if (pairing == "processing")
-                return "Matching visual profile with network devices...";
+            {
+                if (response.batches_total > 0)
+                {
+                    return
+                        $"Matching batch {Mathf.Clamp(response.batches_completed, 0, response.batches_total)}" +
+                        $"/{response.batches_total} | {response.valid_llm_candidates}/{response.llm_candidate_count} reviewed";
+                }
+                return "Preparing network candidate matching...";
+            }
             if (!string.IsNullOrWhiteSpace(response.pairing_error))
                 return "Matching: " + ShortText(response.pairing_error, 92);
-            if (!string.IsNullOrWhiteSpace(response.pairing_warning))
-                return "Matching fallback: " + ShortText(response.pairing_warning, 88);
             int count = response.candidates != null ? response.candidates.Length : 0;
             if (count == 0)
                 return "No candidates. Check discovery runtime or refresh.";
+            bool hasConfidentCandidate = false;
+            for (int i = 0; i < count; i++)
+            {
+                TrackingManager.PairingCandidateRecord candidate = response.candidates[i];
+                if (candidate != null &&
+                    Mathf.Max(candidate.confidence_percent, candidate.identity_confidence_percent) > 0)
+                {
+                    hasConfidentCandidate = true;
+                    break;
+                }
+            }
+            if (!hasConfidentCandidate)
+            {
+                return string.IsNullOrWhiteSpace(response.pairing_warning)
+                    ? "No confident automatic match. Select from the list or search all network devices."
+                    : "No confident automatic match; one or more review batches were unavailable. Select or search manually.";
+            }
+            if (!string.IsNullOrWhiteSpace(response.pairing_warning))
+                return "Partial LLM review: " + ShortText(response.pairing_warning, 88);
             return response.evaluated_candidate_count > 0
                 ? $"Top {count} of {response.evaluated_candidate_count} evaluated network device(s)"
                 : $"Top {count} network candidate(s)";
@@ -577,8 +602,14 @@ namespace SmartRoom.UI
         private void SetBinding(TrackingManager.NetworkBindingRecord binding)
         {
             bool hasBinding = binding != null && !string.IsNullOrWhiteSpace(binding.canonical_device_id);
+            string relation = hasBinding
+                ? (!string.IsNullOrWhiteSpace(binding.relation_label) ? binding.relation_label : binding.relation)
+                : string.Empty;
+            int confidence = hasBinding && binding.confidence_percent > 0
+                ? binding.confidence_percent
+                : (hasBinding ? binding.score : 0);
             _bindingText.text = hasBinding
-                ? $"Binding: {ShortText(binding.display_name, 62)}  ({binding.score}%)"
+                ? $"Binding: {ShortText(binding.display_name, 45)} | {ShortText(relation, 22)} | evidence {confidence}"
                 : "Binding: none";
             if (_unbindButton != null)
                 _unbindButton.interactable = hasBinding;
@@ -620,6 +651,9 @@ namespace SmartRoom.UI
         private void CreateCandidateRow(TrackingManager.PairingCandidateRecord candidate, float y)
         {
             string candidateId = candidate.canonical_device_id;
+            int confidence = candidate.confidence_percent > 0
+                ? candidate.confidence_percent
+                : candidate.score;
             _candidateById[candidateId] = candidate;
 
             GameObject rowObject = new GameObject("Candidate_" + candidate.rank, typeof(RectTransform), typeof(Image), typeof(Button));
@@ -649,11 +683,11 @@ namespace SmartRoom.UI
             TextMeshProUGUI scoreText = CreateText(
                 rowRect,
                 "Score",
-                $"{candidate.score}%",
+                $"{confidence}",
                 22f,
                 FontStyles.Bold,
                 TextAlignmentOptions.Center);
-            scoreText.color = ScoreColor(candidate.score);
+            scoreText.color = ScoreColor(confidence);
             SetTopRight(scoreText.rectTransform, 10f, 9f, 74f, 26f);
 
             string details = BuildCandidateDetails(candidate);
@@ -673,9 +707,18 @@ namespace SmartRoom.UI
                 : "";
             string address = profile != null ? profile.address_summary : "";
             string ids = profile != null ? profile.identifier_summary : "";
-            string evidence = $"evidence {candidate.evidence_coverage_percent}%";
+            string relation = !string.IsNullOrWhiteSpace(candidate.relation_label)
+                ? candidate.relation_label
+                : (!string.IsNullOrWhiteSpace(candidate.relation) ? candidate.relation : "relationship unknown");
+            string level = !string.IsNullOrWhiteSpace(candidate.confidence_level)
+                ? candidate.confidence_level
+                : "insufficient";
+            int confidence = candidate.confidence_percent > 0
+                ? candidate.confidence_percent
+                : candidate.score;
+            string evidence = $"{level} evidence {confidence}";
             string right = !string.IsNullOrWhiteSpace(address) ? address : ids;
-            return ShortText($"{type} | {caps} | {evidence} | {right}", 96);
+            return ShortText($"{relation} | {evidence} | {type} | {caps} | {right}", 96);
         }
 
         private IEnumerator BindCandidateAsync(string canonicalId)
@@ -719,6 +762,7 @@ namespace SmartRoom.UI
 
                 SetBinding(response.binding);
                 SetStatus("Bound. You can change it later from this panel.");
+                DevicePlaceholderBoardManager.RequestImmediateRefresh();
                 _refreshRequested = true;
             }
         }
@@ -742,6 +786,7 @@ namespace SmartRoom.UI
 
                 SetBinding(null);
                 SetStatus("Binding removed.");
+                DevicePlaceholderBoardManager.RequestImmediateRefresh();
                 _refreshRequested = true;
             }
         }
@@ -984,6 +1029,10 @@ namespace SmartRoom.UI
             public TrackingManager.NetworkBindingRecord binding = new TrackingManager.NetworkBindingRecord();
             public long started_at_ms = 0;
             public long completed_at_ms = 0;
+            public long heartbeat_at_ms = 0;
+            public int batches_completed = 0;
+            public int batches_total = 0;
+            public int valid_llm_candidates = 0;
             public int evaluated_candidate_count = 0;
             public int llm_candidate_count = 0;
         }

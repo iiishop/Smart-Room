@@ -84,7 +84,12 @@ class DiscoverRuntime:
     def profiles(self) -> list[dict[str, Any]]:
         with self._lock:
             values = [dict(item) for item in self._profiles.values()]
-        values.sort(key=lambda item: float(item.get("last_seen") or 0.0), reverse=True)
+        values.sort(
+            key=lambda item: (
+                float(item.get("discovered_at") or 0.0),
+                str(item.get("canonical_device_id") or ""),
+            )
+        )
         return values
 
     def status(self) -> dict[str, Any]:
@@ -111,7 +116,21 @@ class DiscoverRuntime:
             mqtt_client = getattr(source, "_client", None)
             if mqtt_client is None:
                 continue
-            mqtt_client.publish(topic, encoded)
+            try:
+                result = mqtt_client.publish(topic, encoded)
+            except Exception:
+                continue
+            if int(getattr(result, "rc", 0)) != 0:
+                continue
+            wait_for_publish = getattr(result, "wait_for_publish", None)
+            if callable(wait_for_publish):
+                try:
+                    wait_for_publish(timeout=2.0)
+                except (RuntimeError, ValueError):
+                    continue
+                is_published = getattr(result, "is_published", None)
+                if callable(is_published) and not bool(is_published()):
+                    continue
             return True
         return False
 
@@ -229,7 +248,13 @@ class DiscoverRuntime:
                     for operation in aggregated.operations:
                         self.operations_tracker.ingest_structured(device.device_id, operation)
                     for sensor in aggregated.sensor_readings:
-                        self.data_snapshot.ingest_structured(device.device_id, sensor, timestamp=event.timestamp)
+                        self.data_snapshot.ingest_structured(
+                            device.device_id,
+                            sensor,
+                            timestamp=event.timestamp,
+                            source_topic=topic,
+                            source_payload=value,
+                        )
                     self._mark_profiles_dirty()
                 except Exception as exc:
                     with self._lock:
@@ -310,6 +335,11 @@ class DiscoverRuntime:
     def _refresh_profiles(self) -> None:
         started = time.perf_counter()
         fresh: dict[str, dict[str, Any]] = {}
+        with self._lock:
+            previous_profiles = {
+                canonical_id: dict(profile)
+                for canonical_id, profile in self._profiles.items()
+            }
         physical_devices = group_physical_devices(self.deduplicator.get_devices())
         for device in physical_devices:
             canonical_id = self.registry.resolve(device, save=False)
@@ -319,6 +349,8 @@ class DiscoverRuntime:
                 self.data_snapshot,
                 self.operations_tracker,
             ).to_dict()
+            profile = _merge_profile_live_state(previous_profiles.get(canonical_id), profile)
+            profile["discovered_at"] = self.registry.created_at(canonical_id)
             self.registry.update_profile(canonical_id, profile, save=False)
             fresh[canonical_id] = profile
         try:
@@ -381,3 +413,40 @@ def _status_state(message: str) -> str:
     if "reconnect" in lowered:
         return "reconnecting"
     return "starting"
+
+
+def _merge_profile_live_state(previous: dict[str, Any] | None, current: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(previous, dict):
+        return current
+
+    old_data = previous.get("data") if isinstance(previous.get("data"), dict) else {}
+    new_data = current.get("data") if isinstance(current.get("data"), dict) else {}
+    merged_data = {
+        str(key): dict(value)
+        for key, value in old_data.items()
+        if isinstance(value, dict)
+    }
+    for key, value in new_data.items():
+        if not isinstance(value, dict):
+            continue
+        old = merged_data.get(str(key))
+        old_timestamp = float((old or {}).get("timestamp") or 0.0)
+        new_timestamp = float(value.get("timestamp") or 0.0)
+        if old is None or new_timestamp >= old_timestamp:
+            merged_data[str(key)] = dict(value)
+    current["data"] = merged_data
+
+    old_operations = previous.get("operations") if isinstance(previous.get("operations"), list) else []
+    new_operations = current.get("operations") if isinstance(current.get("operations"), list) else []
+    merged_operations: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for operation in [*old_operations, *new_operations]:
+        if not isinstance(operation, dict):
+            continue
+        key = (
+            str(operation.get("topic") or ""),
+            str(operation.get("action") or ""),
+            str(operation.get("sensor_key") or ""),
+        )
+        merged_operations[key] = dict(operation)
+    current["operations"] = list(merged_operations.values())
+    return current

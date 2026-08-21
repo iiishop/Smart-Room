@@ -2,7 +2,7 @@ from pathlib import Path
 import time
 
 from discover_client.registry import PersistentDeviceRegistry
-from discover_client.runtime import DiscoverRuntime
+from discover_client.runtime import DiscoverRuntime, _merge_profile_live_state
 from discover_client.source import SourceEvent
 
 
@@ -27,6 +27,81 @@ def test_runtime_builds_profile_without_starting_gui_or_network(tmp_path: Path) 
     assert profiles[0]["canonical_device_id"].startswith("urn:smartroom:device:")
     assert "H5179" in profiles[0]["model_candidates"]
     assert "temperature" in profiles[0]["capabilities"]
+
+
+def test_runtime_profiles_keep_first_discovery_order_when_last_seen_changes(tmp_path: Path) -> None:
+    runtime = DiscoverRuntime(registry_path=tmp_path / "registry.json")
+    runtime._profiles = {
+        "older": {
+            "canonical_device_id": "older",
+            "discovered_at": 10.0,
+            "last_seen": 999.0,
+        },
+        "newer": {
+            "canonical_device_id": "newer",
+            "discovered_at": 20.0,
+            "last_seen": 1.0,
+        },
+    }
+
+    assert [item["canonical_device_id"] for item in runtime.profiles()] == ["older", "newer"]
+
+    runtime._profiles["newer"]["last_seen"] = 2000.0
+    runtime._profiles["older"]["last_seen"] = 3000.0
+    assert [item["canonical_device_id"] for item in runtime.profiles()] == ["older", "newer"]
+
+
+def test_runtime_publish_mqtt_checks_publish_result(tmp_path: Path) -> None:
+    class Result:
+        def __init__(self, rc: int) -> None:
+            self.rc = rc
+
+    class MqttClient:
+        def __init__(self, rc: int) -> None:
+            self.rc = rc
+
+        def publish(self, _topic: str, _payload: str) -> Result:
+            return Result(self.rc)
+
+    class Source:
+        source_type = "mqtt"
+
+        def __init__(self, rc: int) -> None:
+            self._client = MqttClient(rc)
+
+    class Client:
+        def __init__(self, rc: int) -> None:
+            self._sources = {"mqtt": Source(rc)}
+
+    runtime = DiscoverRuntime(registry_path=tmp_path / "registry.json")
+    runtime.client = Client(4)
+    assert runtime.publish_mqtt("test/set", "ON") is False
+    runtime.client = Client(0)
+    assert runtime.publish_mqtt("test/set", "ON") is True
+
+
+def test_runtime_profile_merge_retains_missing_data_and_operations() -> None:
+    previous = {
+        "data": {
+            "temperature": {"value": 21.0, "timestamp": 100.0},
+            "humidity": {"value": 45.0, "timestamp": 100.0},
+        },
+        "operations": [
+            {"topic": "device/set", "action": "set", "sensor_key": "power"},
+        ],
+    }
+    current = {
+        "data": {
+            "temperature": {"value": 22.0, "timestamp": 101.0},
+        },
+        "operations": [],
+    }
+
+    merged = _merge_profile_live_state(previous, current)
+
+    assert merged["data"]["temperature"]["value"] == 22.0
+    assert merged["data"]["humidity"]["value"] == 45.0
+    assert merged["operations"][0]["topic"] == "device/set"
 
 
 def test_runtime_uses_home_assistant_device_metadata(tmp_path: Path) -> None:

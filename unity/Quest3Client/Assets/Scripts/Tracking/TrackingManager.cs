@@ -175,6 +175,33 @@ namespace SmartRoom.Tracking
                     return false;
                 }
 
+                if (!Quest3RgbdCaptureFinal.TryProjectWorldPointToCapturedRgb(
+                        capture,
+                        worldPoint,
+                        out Vector2Int capturedPixel,
+                        out float capturedCameraDepth))
+                {
+                    FailOperationStatus("Point left the captured RGB view. Hold the view steady and retry.");
+                    return false;
+                }
+
+                int projectionDelta = Mathf.RoundToInt(Vector2Int.Distance(pixel, capturedPixel));
+                cursorJson = BuildCursorJson(
+                    worldPoint,
+                    capturedPixel,
+                    label,
+                    mode,
+                    capture.rgbWidth,
+                    capture.rgbHeight,
+                    "captured_rgb_pose",
+                    capture.rgbCameraPosition,
+                    capture.rgbTimestampTicks,
+                    projectionDelta);
+                Debug.Log(
+                    $"[TrackingManager] Captured-frame projection camera={capture.rgbCameraPosition} " +
+                    $"pixel={capturedPixel} prior={pixel} delta={projectionDelta}px " +
+                    $"cameraZ={capturedCameraDepth:F3}m timestamp={capture.rgbTimestampTicks}");
+
                 UpdateOperationStatus("Uploading RGB-D and running segmentation...");
                 bool ok = await UploadCaptureAsync(capture, cursorJson);
                 if (ok)
@@ -510,7 +537,11 @@ namespace SmartRoom.Tracking
             int label,
             string mode,
             int frameWidth,
-            int frameHeight)
+            int frameHeight,
+            string projectionSource = "live_pca",
+            string rgbCameraPosition = "",
+            long rgbTimestampTicks = 0,
+            int projectionDeltaPx = 0)
         {
             Vector3 roomPoint = RoomSpatialAnchorManager.WorldToRoomPoint(worldPoint);
             var payload = new CursorPointPayload
@@ -529,6 +560,10 @@ namespace SmartRoom.Tracking
                 mode = string.IsNullOrWhiteSpace(mode) ? (label > 0 ? "add" : "del") : mode,
                 frame_width = frameWidth > 0 ? frameWidth : 0,
                 frame_height = frameHeight > 0 ? frameHeight : 0,
+                projection_source = projectionSource,
+                projection_delta_px = projectionDeltaPx,
+                rgb_camera_position = rgbCameraPosition,
+                rgb_timestamp_ticks = rgbTimestampTicks,
                 timestamp_ms = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                 room_id = RoomCoordinateSystemPanel.CurrentRoomId,
                 room_name = RoomCoordinateSystemPanel.CurrentRoomName,
@@ -784,6 +819,10 @@ namespace SmartRoom.Tracking
             public string mode;
             public int frame_width;
             public int frame_height;
+            public string projection_source;
+            public int projection_delta_px;
+            public string rgb_camera_position;
+            public long rgb_timestamp_ticks;
             public long timestamp_ms;
             public string room_id;
             public string room_name;
@@ -897,6 +936,10 @@ namespace SmartRoom.Tracking
             public NetworkBindingRecord binding = new NetworkBindingRecord();
             public long started_at_ms = 0;
             public long completed_at_ms = 0;
+            public long heartbeat_at_ms = 0;
+            public int batches_completed = 0;
+            public int batches_total = 0;
+            public int valid_llm_candidates = 0;
         }
 
         [Serializable]
@@ -905,10 +948,18 @@ namespace SmartRoom.Tracking
             public string canonical_device_id = string.Empty;
             public string display_name = string.Empty;
             public string summary = string.Empty;
+            public string relation = string.Empty;
+            public string relation_label = string.Empty;
+            public string confidence_level = string.Empty;
+            public int identity_confidence_percent = 0;
+            public int relationship_confidence_percent = 0;
+            public int retrieval_relevance = 0;
             public int score = 0;
             public int confidence_percent = 0;
             public int evidence_coverage_percent = 0;
             public int rank = 0;
+            public string[] evidence_summary = Array.Empty<string>();
+            public string[] conflict_summary = Array.Empty<string>();
             public PairingRuleRecord[] rules = Array.Empty<PairingRuleRecord>();
             public NetworkProfileRecord profile = new NetworkProfileRecord();
         }
@@ -952,6 +1003,12 @@ namespace SmartRoom.Tracking
             public string canonical_device_id = string.Empty;
             public string display_name = string.Empty;
             public string method = string.Empty;
+            public string relation = string.Empty;
+            public string relation_label = string.Empty;
+            public string confidence_level = string.Empty;
+            public int confidence_percent = 0;
+            public int identity_confidence_percent = 0;
+            public int relationship_confidence_percent = 0;
             public int score = 0;
             public int evidence_coverage_percent = 0;
             public long bound_at_ms = 0;
