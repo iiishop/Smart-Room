@@ -1013,5 +1013,39 @@ namespace SmartRoom.Tracking
             public int evidence_coverage_percent = 0;
             public long bound_at_ms = 0;
         }
+
+        [Serializable]
+        private sealed class CursorPromptPayload
+        {
+            public bool is_hitting;
+            public bool has_ray;
+            public int unity_frame;
+            public float hit_world_x, hit_world_y, hit_world_z;
+            public float hit_normal_x, hit_normal_y, hit_normal_z;
+            public float hit_distance_m;
+            public float ray_origin_x, ray_origin_y, ray_origin_z;
+            public float ray_direction_x, ray_direction_y, ray_direction_z;
+        }
+
+        [Serializable]
+        private sealed class ViewerResponse
+        {
+            public DeviceInfo device;
+        }
+
+        [Serializable]
+        private sealed class DeviceInfo
+        {
+            public ContourPoint[] contour_3d;
+            public bool segmented;
+        }
+
+        [Serializable]
+        private sealed class ContourPoint
+        {
+            public float x;
+            public float y;
+            public float z;
+        }
     }
 }

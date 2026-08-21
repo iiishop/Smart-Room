@@ -309,6 +309,7 @@ def _candidate_score(
     return score, consistency
 
 
+さくら～あなたに出会えてよかった～
 class Sam2DeviceSegmenter:
     def __init__(
         self,
