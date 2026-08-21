@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RSAD — Registration-Free Spatial AR Dashboard</title>
+<style>
+  :root { color-scheme: dark; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0d1117;
+    color: #e6edf3;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 32px 16px;
+  }
+  main { width: 100%; max-width: 960px; }
+  h1 { font-size: 1.5rem; font-weight: 600; margin-bottom: 6px; }
+  p.sub { color: #8b949e; font-size: 0.95rem; margin-bottom: 24px; }
+  video {
+    width: 100%;
+    border-radius: 10px;
+    background: #000;
+    display: block;
+  }
+  a.repo {
+    display: inline-block;
+    margin-top: 24px;
+    color: #58a6ff;
+    text-decoration: none;
+    font-size: 0.9rem;
+  }
+  a.repo:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Registration-Free Spatial AR Dashboard</h1>
+  <p class="sub">Quest 3 passthrough demo — trigger-to-bind interaction with live telemetry anchoring</p>
+  <video src="Video_compressed.mp4" controls playsinline></video>
+  <a class="repo" href="https://github.com/iiishop/Smart-Room">Source &amp; documentation on GitHub →</a>
+</main>
+</body>
+</html>
