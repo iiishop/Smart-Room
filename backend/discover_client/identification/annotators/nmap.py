@@ -5,6 +5,7 @@ from __future__ import annotations
 from discover_client.identification.annotator import Annotator, register_annotator
 from discover_client.identification.evidence import SignalEvidence
 from discover_client.source import SourceEvent
+from discover_client.identification.tokens import extract_identity_tokens
 
 
 @register_annotator("nmap")
@@ -45,6 +46,7 @@ class NmapAnnotator(Annotator):
             ip_address=ip,
             hostname=primary_hostname,
             mac_prefix=mac_prefix,
+            identity_tokens=extract_identity_tokens(mac, primary_hostname),
             timestamp=event.timestamp,
         )
 

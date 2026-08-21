@@ -11,6 +11,7 @@ class SignalEvidence:
     source_id: str
     source_type: str
     mqtt_topic: str | None = None
+    mqtt_client_id: str | None = None
     mqtt_payload_keys: set[str] | None = None
     mqtt_payload: Any = None
     topic_prefix: str | None = None    # govee/H5179/a1b2c3d4e5f6 (trim last segment)
@@ -28,6 +29,7 @@ class SignalEvidence:
     event_type: str = "data"
     dialect: str | None = None
     dialect_confidence: float = 0.0
+    identity_tokens: set[str] | None = None
 
     def summarize(self) -> str:
         parts: list[str] = []
@@ -45,6 +47,8 @@ class SignalEvidence:
             parts.append(f"os={self.nmap_os_guess}")
         if self.mqtt_topic:
             parts.append(f"topic={self.mqtt_topic}")
+        if self.mqtt_client_id:
+            parts.append(f"client_id={self.mqtt_client_id}")
         if self.mqtt_payload_keys:
             keys = ",".join(sorted(self.mqtt_payload_keys))
             parts.append(f"keys={{{keys}}}")
@@ -57,4 +61,6 @@ class SignalEvidence:
             parts.append(f"usn={self.ssdp_usn[:60]}")
         if self.ssdp_server:
             parts.append(f"srv={self.ssdp_server}")
+        if self.identity_tokens:
+            parts.append("ids={" + ",".join(sorted(self.identity_tokens)) + "}")
         return "  ".join(parts) if parts else "(no clues)"

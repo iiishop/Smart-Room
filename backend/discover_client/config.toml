@@ -1,6 +1,5 @@
 # discover_client/config.toml
 
-
 [[sources]]
 source_id = "1"
 source_type = "mqtt"
@@ -13,3 +12,16 @@ port = 1884
 topic_blacklist = []
 topic_whitelist = []
 username = "student"
+
+[[sources]]
+source_id = "2"
+source_type = "mqtt"
+enabled = true
+
+[sources.settings]
+host = "localhost"
+password = ""
+port = 1883
+topic_blacklist = []
+topic_whitelist = []
+username = ""

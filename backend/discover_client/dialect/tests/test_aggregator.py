@@ -38,7 +38,7 @@ def test_zigbee2mqtt_aggregated_normalized() -> None:
     result = aggregate("zigbee2mqtt/bulb/set", {"state": "ON"})
     assert result is not None
     assert result.primary_dialect == "zigbee2mqtt"
-    sensor_keys = {s.sensor_type for s in result.sensor_readings}
+    sensor_keys = {operation.sensor_key for operation in result.operations}
     assert "power" in sensor_keys  # "state" → canonical "power"
 
 

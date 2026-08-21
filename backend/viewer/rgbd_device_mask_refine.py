@@ -44,6 +44,33 @@ def _seed_xy(prompt: dict) -> tuple[int, int] | None:
     return None
 
 
+def _normalized_point_pairs(prompt: dict) -> tuple[list[tuple[int, int]], list[int]]:
+    coords = prompt.get("user_point_coords") or prompt.get("point_coords") or []
+    labels = prompt.get("user_point_labels") or prompt.get("point_labels") or []
+    if not isinstance(coords, list) or not isinstance(labels, list) or len(coords) != len(labels):
+        return [], []
+
+    out_coords: list[tuple[int, int]] = []
+    out_labels: list[int] = []
+    seen: set[tuple[int, int, int]] = set()
+    for coord, label in zip(coords, labels):
+        if not isinstance(coord, (list, tuple)) or len(coord) != 2:
+            continue
+        try:
+            x = int(round(float(coord[0])))
+            y = int(round(float(coord[1])))
+            lbl = 1 if int(label) > 0 else 0
+        except (TypeError, ValueError):
+            continue
+        key = (x, y, lbl)
+        if key in seen:
+            continue
+        seen.add(key)
+        out_coords.append((x, y))
+        out_labels.append(lbl)
+    return out_coords, out_labels
+
+
 def _seed_depth(prompt: dict, depth: np.ndarray, x: int, y: int) -> float | None:
     for key in ("depth_sample_m", "rgb_camera_z_m"):
         value = prompt.get(key)
@@ -81,6 +108,42 @@ def _component_containing_or_nearest(mask: np.ndarray, x: int, y: int) -> np.nda
     return labels == best_label if best_label > 0 else mask.astype(bool)
 
 
+def _components_for_prompt_points(mask: np.ndarray, prompt: dict) -> np.ndarray:
+    coords, point_labels = _normalized_point_pairs(prompt)
+    positive_points = [coord for coord, label in zip(coords, point_labels) if label > 0]
+    if not positive_points:
+        seed = _seed_xy(prompt)
+        if seed is None:
+            return mask.astype(bool)
+        return _component_containing_or_nearest(mask, seed[0], seed[1])
+
+    mask_u8 = mask.astype(np.uint8)
+    num_labels, labels_img = cv2.connectedComponents(mask_u8, connectivity=8)
+    if num_labels <= 1:
+        return mask.astype(bool)
+
+    h, w = mask.shape
+    keep_labels: set[int] = set()
+    for x, y in positive_points:
+        if 0 <= x < w and 0 <= y < h:
+            label = int(labels_img[y, x])
+            if label > 0:
+                keep_labels.add(label)
+
+    if not keep_labels:
+        x, y = positive_points[-1]
+        return _component_containing_or_nearest(mask, x, y)
+
+    constrained = np.isin(labels_img, list(keep_labels))
+    negative_points = [coord for coord, label in zip(coords, point_labels) if label <= 0]
+    for x, y in negative_points:
+        if 0 <= x < w and 0 <= y < h:
+            label = int(labels_img[y, x])
+            if label > 0 and label not in keep_labels:
+                constrained[labels_img == label] = False
+    return constrained.astype(bool)
+
+
 def _fill_holes(mask: np.ndarray) -> np.ndarray:
     h, w = mask.shape
     flood = mask.astype(np.uint8).copy()
@@ -110,8 +173,7 @@ def refine_device_mask(
         raise ValueError(f"mask/depth shape mismatch: {mask.shape} vs {depth.shape}")
 
     seed = _seed_xy(prompt)
-    if seed is not None:
-        mask = _component_containing_or_nearest(mask, seed[0], seed[1])
+    mask = _components_for_prompt_points(mask, prompt)
 
     original_area = int(np.count_nonzero(mask))
     if original_area == 0:
@@ -151,20 +213,18 @@ def refine_device_mask(
             keep_ratio = np.count_nonzero(depth_filtered) / max(original_area, 1)
             if keep_ratio >= float(config.min_depth_keep_ratio):
                 mask = depth_filtered
-                mask = _component_containing_or_nearest(mask, seed[0], seed[1])
+                mask = _components_for_prompt_points(mask, prompt)
 
     if config.open_px > 0:
         mask = cv2.morphologyEx(mask.astype(np.uint8), cv2.MORPH_OPEN, _kernel(config.open_px)).astype(bool)
     if config.close_px > 0:
         mask = cv2.morphologyEx(mask.astype(np.uint8), cv2.MORPH_CLOSE, _kernel(config.close_px)).astype(bool)
     mask = _fill_holes(mask)
-    if seed is not None:
-        mask = _component_containing_or_nearest(mask, seed[0], seed[1])
+    mask = _components_for_prompt_points(mask, prompt)
 
     if np.count_nonzero(mask) < int(config.min_area_px):
         mask = raw_mask.astype(bool)
-        if seed is not None:
-            mask = _component_containing_or_nearest(mask, seed[0], seed[1])
+        mask = _components_for_prompt_points(mask, prompt)
 
     valid_values = depth[mask & np.isfinite(depth) & (depth > 0)]
     if valid_values.size:

@@ -54,4 +54,9 @@ unity/**/Assets/TextMesh Pro/Examples & Extras/
 archive_code/
 backend/checkpoints/
 backend/viewer_any2full_cache/
+backend/viewer_device_segments/
+backend/viewer_room_store/
 .codegraph/
+backend/viewer/viewer_any2full_cache/
+backend/viewer/viewer_room_store/
+unity/Quest3Client/Assets/_Recovery/

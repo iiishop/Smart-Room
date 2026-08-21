@@ -1,5 +1,7 @@
+using System.Globalization;
 using Meta.XR;
 using Meta.XR.MRUtilityKit;
+using TMPro;
 using UnityEngine;
 
 namespace SmartRoom.Interaction
@@ -14,15 +16,32 @@ namespace SmartRoom.Interaction
     /// </summary>
     public sealed class DepthCursor : MonoBehaviour
     {
+        public enum ProbeEditMode
+        {
+            Add,
+            Del
+        }
+
         [Header("References")]
         [SerializeField] private EnvironmentRaycastManager raycastManager;
         [SerializeField] private ControllerRaycaster controllerRaycaster;
         [SerializeField] private Material cursorMaterial;
 
         [Header("Cursor Visuals")]
+        [SerializeField] private bool interactionEnabledAtStartup;
         [SerializeField] private float baseRadius = 0.02f; // 2cm
-        [SerializeField] private Color hitColor = Color.green;
+        [SerializeField] private Color addHitColor = Color.green;
+        [SerializeField] private Color delHitColor = Color.red;
         [SerializeField] private Color missColor = Color.red;
+
+        [Header("World Coordinate Label")]
+        [SerializeField] private bool showWorldCoordinateLabel = true;
+        [SerializeField] private Vector3 coordinateLabelOffset = new Vector3(0f, 0.055f, 0f);
+        [SerializeField] private Vector2 coordinateLabelSize = new Vector2(0.7f, 0.24f);
+        [SerializeField] private float coordinateLabelFontSize = 0.055f;
+        [SerializeField] private Color coordinateLabelColor = Color.white;
+        [SerializeField] private Color coordinateLabelOutlineColor = new Color(0f, 0f, 0f, 0.9f);
+        [SerializeField, Range(0f, 1f)] private float coordinateLabelOutlineWidth = 0.25f;
 
         [Header("Ray Settings")]
         [SerializeField] private float maxDistance = 10f;
@@ -37,12 +56,17 @@ namespace SmartRoom.Interaction
         public Vector3 HitPoint { get; private set; }
         public Vector3 HitNormal { get; private set; }
         public float HitDistance { get; private set; }
+        public ProbeEditMode CurrentMode { get; private set; } = ProbeEditMode.Add;
 
         public event System.Action<bool, Vector3, Vector3> OnHitChanged;
+        public event System.Action<ProbeEditMode> OnModeChanged;
 
         private Transform _cursorTransform;
         private MeshRenderer _cursorRenderer;
         private Material _cursorMaterialInstance;
+        private Transform _coordinateLabelTransform;
+        private TextMeshPro _coordinateLabelText;
+        private Camera _labelCamera;
         private static readonly int BaseColorId = Shader.PropertyToID("_BaseColor");
         private static readonly int ColorId = Shader.PropertyToID("_Color");
 
@@ -52,9 +76,12 @@ namespace SmartRoom.Interaction
         private Color _smoothColor;
         private int _consecutiveMisses;
         private bool _initialized;
+        private bool _interactionEnabled;
 
         private void Awake()
         {
+            _interactionEnabled = interactionEnabledAtStartup;
+
             if (raycastManager == null)
                 raycastManager = FindFirstObjectByType<EnvironmentRaycastManager>();
 
@@ -97,7 +124,37 @@ namespace SmartRoom.Interaction
             _cursorTransform = sphereGo.transform;
             sphereGo.SetActive(false);
 
+            CreateCoordinateLabel();
+
             Debug.Log("[DepthCursor] Sphere created as child of " + gameObject.name);
+        }
+
+        private void CreateCoordinateLabel()
+        {
+            var labelGo = new GameObject("CursorWorldCoordinateLabel", typeof(TextMeshPro));
+            labelGo.transform.SetParent(transform, false);
+            labelGo.transform.localPosition = Vector3.zero;
+            labelGo.transform.localRotation = Quaternion.identity;
+            labelGo.transform.localScale = Vector3.one;
+
+            _coordinateLabelTransform = labelGo.transform;
+            _coordinateLabelText = labelGo.GetComponent<TextMeshPro>();
+            _coordinateLabelText.text = string.Empty;
+            _coordinateLabelText.fontSize = coordinateLabelFontSize;
+            _coordinateLabelText.color = coordinateLabelColor;
+            _coordinateLabelText.alignment = TextAlignmentOptions.Center;
+            _coordinateLabelText.textWrappingMode = TextWrappingModes.NoWrap;
+            _coordinateLabelText.overflowMode = TextOverflowModes.Overflow;
+            _coordinateLabelText.outlineColor = coordinateLabelOutlineColor;
+            _coordinateLabelText.outlineWidth = coordinateLabelOutlineWidth;
+
+            RectTransform rectTransform = labelGo.GetComponent<RectTransform>();
+            if (rectTransform != null)
+            {
+                rectTransform.sizeDelta = coordinateLabelSize;
+            }
+
+            labelGo.SetActive(false);
         }
 
         private void OnEnable()
@@ -117,6 +174,12 @@ namespace SmartRoom.Interaction
             UpdateCursor(ray);
         }
 
+        private void Update()
+        {
+            if (OVRInput.GetDown(OVRInput.Button.One, OVRInput.Controller.RTouch))
+                ToggleMode();
+        }
+
         /// <summary>
         /// 时序平滑 + 丢失容忍的射线更新。
         /// - 命中时：指数平滑位置，防止微小抖动
@@ -125,6 +188,12 @@ namespace SmartRoom.Interaction
         /// </summary>
         public bool UpdateCursor(Ray ray)
         {
+            if (!_interactionEnabled)
+            {
+                Hide();
+                return false;
+            }
+
             if (raycastManager == null || _cursorTransform == null) return false;
 
             bool rawHit = raycastManager.Raycast(ray, out var hit, maxDistance);
@@ -137,7 +206,7 @@ namespace SmartRoom.Interaction
             {
                 targetPos = hit.point;
                 targetNormal = hit.normal != Vector3.zero ? hit.normal : Vector3.up;
-                targetColor = hitColor;
+                targetColor = GetActiveHitColor();
                 targetHitting = true;
                 _consecutiveMisses = 0;
             }
@@ -194,11 +263,60 @@ namespace SmartRoom.Interaction
 
             SetCursorColor(_smoothColor);
             _cursorTransform.gameObject.SetActive(true);
+            UpdateCoordinateLabel(IsHitting, HitPoint);
 
             if (wasHitting != IsHitting)
                 OnHitChanged?.Invoke(IsHitting, HitPoint, HitNormal);
 
             return IsHitting;
+        }
+
+        private void LateUpdate()
+        {
+            BillboardCoordinateLabel();
+        }
+
+        private void UpdateCoordinateLabel(bool visible, Vector3 worldPoint)
+        {
+            if (_coordinateLabelText == null || _coordinateLabelTransform == null) return;
+
+            bool shouldShow = showWorldCoordinateLabel && visible;
+            _coordinateLabelTransform.gameObject.SetActive(shouldShow);
+            if (!shouldShow) return;
+
+            _coordinateLabelTransform.position = worldPoint + coordinateLabelOffset;
+            _coordinateLabelText.text = FormatCoordinateLabel(worldPoint);
+            BillboardCoordinateLabel();
+        }
+
+        private void BillboardCoordinateLabel()
+        {
+            if (_coordinateLabelTransform == null || !_coordinateLabelTransform.gameObject.activeSelf) return;
+
+            Camera camera = ResolveLabelCamera();
+            if (camera == null) return;
+
+            _coordinateLabelTransform.LookAt(
+                _coordinateLabelTransform.position + camera.transform.forward,
+                camera.transform.up);
+        }
+
+        private Camera ResolveLabelCamera()
+        {
+            if (_labelCamera == null)
+                _labelCamera = Camera.main;
+            return _labelCamera;
+        }
+
+        private static string FormatCoordinateLabel(Vector3 worldPoint)
+        {
+            Vector3 roomPoint = RoomSpatialAnchorManager.WorldToRoomPoint(worldPoint);
+            return string.Format(
+                CultureInfo.InvariantCulture,
+                "X: {0:+0.000;-0.000;0.000} m\nY: {1:+0.000;-0.000;0.000} m\nZ: {2:+0.000;-0.000;0.000} m",
+                roomPoint.x,
+                roomPoint.y,
+                roomPoint.z);
         }
 
         private void SetCursorColor(Color color)
@@ -212,17 +330,52 @@ namespace SmartRoom.Interaction
 
         public void Show()
         {
+            if (!_interactionEnabled) return;
+
             if (_cursorTransform != null) _cursorTransform.gameObject.SetActive(true);
+            UpdateCoordinateLabel(IsHitting, HitPoint);
         }
 
         public void Hide()
         {
             if (_cursorTransform != null) _cursorTransform.gameObject.SetActive(false);
+            if (_coordinateLabelTransform != null) _coordinateLabelTransform.gameObject.SetActive(false);
+        }
+
+        public void ToggleMode()
+        {
+            SetMode(CurrentMode == ProbeEditMode.Add ? ProbeEditMode.Del : ProbeEditMode.Add);
+        }
+
+        public void SetMode(ProbeEditMode mode)
+        {
+            if (CurrentMode == mode) return;
+
+            CurrentMode = mode;
+            _smoothColor = IsHitting ? GetActiveHitColor() : missColor;
+            SetCursorColor(_smoothColor);
+            OnModeChanged?.Invoke(CurrentMode);
+            Debug.Log("[DepthCursor] Mode switched to " + CurrentMode);
+        }
+
+        public void SetInteractionEnabled(bool isEnabled)
+        {
+            _interactionEnabled = isEnabled;
+            if (isEnabled) return;
+
+            IsHitting = false;
+            _consecutiveMisses = 0;
+            Hide();
         }
 
         public Vector3 GetHitPoint()
         {
             return HitPoint;
+        }
+
+        private Color GetActiveHitColor()
+        {
+            return CurrentMode == ProbeEditMode.Add ? addHitColor : delHitColor;
         }
 
         private void OnDestroy()

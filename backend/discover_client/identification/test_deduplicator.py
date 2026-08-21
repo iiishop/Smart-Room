@@ -128,3 +128,53 @@ def test_deduplicator_merges_by_topic_prefix() -> None:
     assert second.total_evidence_count == 2
     assert second.topic_prefixes == {'govee/H5179/abc'}
     assert second.payload_keys == {'unit', 'value'}
+
+
+def test_deduplicator_scopes_topic_identity_to_mqtt_source() -> None:
+    deduplicator = Deduplicator()
+
+    first = deduplicator.ingest(
+        SignalEvidence(
+            source_id="mqtt-a",
+            source_type="mqtt",
+            mqtt_topic="sensor/device-1/temperature",
+            topic_prefix="sensor/device-1",
+            timestamp=1.0,
+        )
+    )
+    second = deduplicator.ingest(
+        SignalEvidence(
+            source_id="mqtt-b",
+            source_type="mqtt",
+            mqtt_topic="sensor/device-1/temperature",
+            topic_prefix="sensor/device-1",
+            timestamp=2.0,
+        )
+    )
+
+    assert first.device_id != second.device_id
+
+
+def test_deduplicator_merges_channels_with_same_strong_identity_token() -> None:
+    deduplicator = Deduplicator()
+
+    first = deduplicator.ingest(
+        SignalEvidence(
+            source_id="mqtt-a",
+            source_type="mqtt",
+            topic_prefix="UCL/OPSEBO/206/2ByDoorToCommonArea2C2/LMS",
+            identity_tokens={"2bydoortocommonarea2c2"},
+            timestamp=1.0,
+        )
+    )
+    second = deduplicator.ingest(
+        SignalEvidence(
+            source_id="mqtt-a",
+            source_type="mqtt",
+            topic_prefix="UCL/OPSEBO/206/2ByDoorToCommonArea2C2/TPS",
+            identity_tokens={"2bydoortocommonarea2c2"},
+            timestamp=2.0,
+        )
+    )
+
+    assert second.device_id == first.device_id

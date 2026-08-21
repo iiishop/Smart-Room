@@ -23,6 +23,7 @@ class EvidencePage(QWidget):
         "mdns": ["Time", "Source", "Service Type", "Hostname", "IP"],
         "ssdp": ["Time", "Source", "USN", "Server", "IP"],
         "nmap": ["Time", "Source", "IP", "Hostname", "MAC", "Vendor", "OS"],
+        "packet_sniff": ["Time", "Source", "Client ID", "Topic", "IP", "MAC"],
     }
 
     def __init__(self, parent=None):
@@ -122,5 +123,14 @@ class EvidencePage(QWidget):
                 evidence.nmap_mac or "",
                 evidence.nmap_vendor or "",
                 evidence.nmap_os_guess or "",
+            ]
+        if source_type == "packet_sniff":
+            return [
+                ts,
+                evidence.source_id,
+                evidence.mqtt_client_id or "",
+                evidence.mqtt_topic or "",
+                evidence.ip_address or "",
+                evidence.nmap_mac or "",
             ]
         return [ts, evidence.source_id, evidence.summarize()]

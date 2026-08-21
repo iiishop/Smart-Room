@@ -47,7 +47,7 @@ def test_ingest_records_command_values_from_string_payload() -> None:
     assert capability is not None
     assert capability.action == "set"
     assert capability.accepted_values == ["ON"]
-    assert capability.confidence == 0.9
+    assert capability.confidence == 0.85
 
 
 def test_ingest_merges_duplicate_topics_and_accumulates_values() -> None:

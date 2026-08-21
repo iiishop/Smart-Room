@@ -15,8 +15,12 @@ class Deduplicator:
 
     def ingest(self, evidence: SignalEvidence) -> Device:
         for device in self._devices:
-            if self._match_score(device, evidence) >= 50:
+            score, reason = self._match(device, evidence)
+            if score >= 50:
                 self._merge(device, evidence)
+                explanation = f"evidence merged at score {score}: {reason}"
+                if reason and explanation not in device.identity_reasons:
+                    device.identity_reasons.append(explanation)
                 return device
 
         device = Device(device_id=f"device-{self._next_id}")
@@ -29,21 +33,45 @@ class Deduplicator:
         return sorted(self._devices, key=lambda device: device.last_seen, reverse=True)
 
     def _match_score(self, device: Device, evidence: SignalEvidence) -> int:
+        return self._match(device, evidence)[0]
+
+    def _match(self, device: Device, evidence: SignalEvidence) -> tuple[int, str]:
         if evidence.nmap_mac and evidence.nmap_mac in device.mac_addresses:
-            return 100
+            return 100, "exact MAC address"
+        if evidence.identity_tokens and device.identity_tokens.intersection(evidence.identity_tokens):
+            shared = sorted(device.identity_tokens.intersection(evidence.identity_tokens))
+            return 88, "shared high-specificity identifier " + ", ".join(shared[:3])
+        mqtt_client_identity = (
+            f"{evidence.source_id}|{evidence.mqtt_client_id.strip()}"
+            if evidence.mqtt_client_id and evidence.mqtt_client_id.strip()
+            else ""
+        )
+        if mqtt_client_identity and mqtt_client_identity in device.mqtt_client_ids:
+            return 75, "same source-scoped MQTT client id"
         if self._mac_prefix_hostname_ip_match(device, evidence):
-            return 95
+            return 95, "hostname embeds the observed MAC prefix on the same IP"
         if evidence.ip_address and evidence.mdns_service_type:
             if evidence.ip_address in device.ip_addresses and evidence.mdns_service_type in device.service_types:
-                return 70
-        # Topic-prefix match: same deviceID publishes to govee/H5179/a1b2c3d4e5f6/{temperature,humidity}
-        if evidence.topic_prefix and evidence.topic_prefix in device.topic_prefixes:
-            return 60
+                return 70, "same IP address and mDNS service type"
+        # Topic identities are scoped to their source/broker.
+        mqtt_identity = (
+            f"{evidence.source_id}|{evidence.topic_prefix}"
+            if evidence.source_type == "mqtt" and evidence.topic_prefix
+            else ""
+        )
+        if mqtt_identity and mqtt_identity in device.mqtt_identities:
+            return 60, "same source-scoped MQTT entity identity"
+        if (
+            evidence.source_type == "packet_sniff"
+            and evidence.topic_prefix
+            and evidence.topic_prefix in device.topic_prefixes
+        ):
+            return 58, "same observed MQTT topic prefix"
         if evidence.ip_address and evidence.ip_address in device.ip_addresses:
-            return 50
+            return 50, "same currently observed IP address"
         if self._hostname_prefix_subnet_match(device, evidence):
-            return 30
-        return 0
+            return 30, "weak hostname-prefix and subnet similarity"
+        return 0, "no shared stable or connection identity"
 
     def _merge(self, device: Device, evidence: SignalEvidence) -> None:
         device.total_evidence_count += 1
@@ -64,10 +92,18 @@ class Deduplicator:
             device.os_guess = evidence.nmap_os_guess
         if evidence.mdns_service_type:
             device.service_types.add(evidence.mdns_service_type)
+        if evidence.ssdp_usn:
+            device.ssdp_usns.add(evidence.ssdp_usn.strip())
         if evidence.mqtt_payload_keys:
             device.payload_keys.update(evidence.mqtt_payload_keys)
+        if evidence.mqtt_client_id and evidence.mqtt_client_id.strip():
+            device.mqtt_client_ids.add(f"{evidence.source_id}|{evidence.mqtt_client_id.strip()}")
         if evidence.topic_prefix:
             device.topic_prefixes.add(evidence.topic_prefix)
+            if evidence.source_type == "mqtt":
+                device.mqtt_identities.add(f"{evidence.source_id}|{evidence.topic_prefix}")
+        if evidence.identity_tokens:
+            device.identity_tokens.update(evidence.identity_tokens)
 
     def _mac_prefix_hostname_ip_match(self, device: Device, evidence: SignalEvidence) -> bool:
         if evidence.ip_address and evidence.hostname:

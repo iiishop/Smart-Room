@@ -47,11 +47,9 @@ def test_evidence_page_creates_expected_tabs() -> None:
     _get_app()
     page = EvidencePage()
 
-    assert page._tabs.count() == 4
-    assert page._tabs.tabText(0) == "MQTT"
-    assert page._tabs.tabText(1) == "MDNS"
-    assert page._tabs.tabText(2) == "SSDP"
-    assert page._tabs.tabText(3) == "NMAP"
+    tab_names = [page._tabs.tabText(index) for index in range(page._tabs.count())]
+
+    assert tab_names == ["MQTT", "MDNS", "SSDP", "NMAP", "PACKET_SNIFF"]
 
 
 def test_main_window_routes_worker_evidence_to_evidence_page() -> None:

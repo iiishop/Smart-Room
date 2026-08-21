@@ -17,6 +17,9 @@ def test_data_snapshot_extracts_latest_sensor_readings() -> None:
     assert readings[0].sensor_type == "temperature"
     assert readings[0].value == 23.5
     assert readings[0].unit == "C"
+    assert readings[0].source_topic == "govee/H5179/a1b2c3d4e5f6/temperature"
+    assert readings[0].source_payload == {"unit": "C", "value": 23.5}
+    assert readings[0].payload_path == ("value",)
 
     ds.ingest(
         "device-1",
@@ -61,6 +64,7 @@ def test_data_snapshot_supports_alternative_payload_shapes() -> None:
     assert nested is not None
     assert nested[0].sensor_type == "temp_c"
     assert nested[0].value == 21.2
+    assert nested[0].payload_path == ("data", "temp_c")
 
 
 def test_data_snapshot_extracts_text_values() -> None:

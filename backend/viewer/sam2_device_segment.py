@@ -56,6 +56,57 @@ def _seed_xy(prompt: dict) -> tuple[int, int]:
     return int(coords[0][0]), int(coords[0][1])
 
 
+def _normalized_point_pairs(coords: object, labels: object) -> tuple[np.ndarray, np.ndarray]:
+    if not isinstance(coords, list) or not isinstance(labels, list) or len(coords) != len(labels):
+        return np.zeros((0, 2), dtype=np.float32), np.zeros((0,), dtype=np.int32)
+
+    out_coords: list[list[float]] = []
+    out_labels: list[int] = []
+    seen: set[tuple[int, int, int]] = set()
+    for coord, label in zip(coords, labels):
+        if not isinstance(coord, (list, tuple)) or len(coord) != 2:
+            continue
+        try:
+            x = int(round(float(coord[0])))
+            y = int(round(float(coord[1])))
+            lbl = 1 if int(label) > 0 else 0
+        except (TypeError, ValueError):
+            continue
+        key = (x, y, lbl)
+        if key in seen:
+            continue
+        seen.add(key)
+        out_coords.append([float(x), float(y)])
+        out_labels.append(lbl)
+    if not out_coords:
+        return np.zeros((0, 2), dtype=np.float32), np.zeros((0,), dtype=np.int32)
+    return np.asarray(out_coords, dtype=np.float32), np.asarray(out_labels, dtype=np.int32)
+
+
+def _user_prompt_points(prompt: dict) -> tuple[np.ndarray, np.ndarray]:
+    coords, labels = _normalized_point_pairs(
+        prompt.get("user_point_coords"),
+        prompt.get("user_point_labels"),
+    )
+    if coords.shape[0] > 0:
+        return coords, labels
+    return _normalized_point_pairs(prompt.get("point_coords"), prompt.get("point_labels"))
+
+
+def _mask_contains_point(mask: np.ndarray, point: np.ndarray, radius_px: int = 3) -> bool:
+    h, w = mask.shape
+    x = int(round(float(point[0])))
+    y = int(round(float(point[1])))
+    if x < 0 or x >= w or y < 0 or y >= h:
+        return False
+    radius = max(0, int(radius_px))
+    x0 = max(0, x - radius)
+    x1 = min(w, x + radius + 1)
+    y0 = max(0, y - radius)
+    y1 = min(h, y + radius + 1)
+    return bool(np.any(mask[y0:y1, x0:x1]))
+
+
 def _seed_depth(prompt: dict, depth: np.ndarray, x: int, y: int) -> float | None:
     for key in ("depth_sample_m", "rgb_camera_z_m"):
         value = prompt.get(key)
@@ -162,6 +213,9 @@ def build_depth_guided_sam_points(
 def build_depth_guided_sam_box(prompt: dict, config: Sam2PromptConfig = Sam2PromptConfig()) -> np.ndarray | None:
     if not config.use_box_prompt:
         return None
+    user_points, user_labels = _user_prompt_points(prompt)
+    if user_points.shape[0] > 1 or np.any(user_labels <= 0):
+        return None
     box = prompt.get("sam_box_xyxy")
     if box is None:
         return None
@@ -220,13 +274,33 @@ def _candidate_score(
 ) -> tuple[float, float | None]:
     seed_x, seed_y = _seed_xy(prompt)
     h, w = mask.shape
-    if not (0 <= seed_x < w and 0 <= seed_y < h) or not mask[seed_y, seed_x]:
+    if not (0 <= seed_x < w and 0 <= seed_y < h) or not _mask_contains_point(mask, np.asarray([seed_x, seed_y], dtype=np.float32)):
         return -1e9, None
+    user_points, user_labels = _user_prompt_points(prompt)
+    if user_points.shape[0] > 0:
+        positive_points = user_points[user_labels > 0]
+        negative_points = user_points[user_labels <= 0]
+        positive_hits = sum(1 for point in positive_points if _mask_contains_point(mask, point, radius_px=3))
+        negative_hits = sum(1 for point in negative_points if _mask_contains_point(mask, point, radius_px=1))
+        positive_hit_ratio = positive_hits / max(int(positive_points.shape[0]), 1)
+        negative_hit_ratio = negative_hits / max(int(negative_points.shape[0]), 1)
+    else:
+        positive_points = np.zeros((0, 2), dtype=np.float32)
+        negative_points = np.zeros((0, 2), dtype=np.float32)
+        negative_hits = 0
+        positive_hit_ratio = 0.0
+        negative_hit_ratio = 0.0
     area_ratio = float(np.count_nonzero(mask)) / float(h * w)
     if area_ratio < config.min_mask_area_ratio or area_ratio > config.max_mask_area_ratio:
         return -1e9, None
     consistency = _mask_depth_consistency(mask, depth, prompt)
     score = float(sam_score)
+    if user_points.shape[0] > 0:
+        score += 0.75 * float(positive_hit_ratio)
+        score -= 0.55 * float(1.0 - positive_hit_ratio)
+        score -= 1.25 * float(negative_hit_ratio)
+        if negative_hits == 0 and negative_points.shape[0] > 0:
+            score += 0.25
     if consistency is not None:
         score += 0.35 * consistency
     component_support = _mask_component_support(mask, prompt)
@@ -235,6 +309,7 @@ def _candidate_score(
     return score, consistency
 
 
+さくら～あなたに出会えてよかった～
 class Sam2DeviceSegmenter:
     def __init__(
         self,
@@ -244,7 +319,6 @@ class Sam2DeviceSegmenter:
         self.runtime = runtime
         self.prompt_config = prompt_config
         self.predictor = None
-        self._current_rgb_hash: int | None = None
 
     @property
     def ready(self) -> bool:
@@ -327,45 +401,6 @@ class Sam2DeviceSegmenter:
             point_coords=points,
             point_labels=labels,
         )
-
-    def reset_for_image(self, rgb: np.ndarray) -> None:
-        """Encode a new RGB frame once so later point updates are cheap."""
-        self.load()
-        assert self.predictor is not None
-        self.predictor.set_image(rgb.astype(np.uint8))
-        self._current_rgb_hash = hash(rgb.tobytes())
-
-    def re_predict(
-        self,
-        point_coords: np.ndarray,
-        point_labels: np.ndarray,
-        box: np.ndarray | None = None,
-    ) -> np.ndarray | None:
-        assert self.predictor is not None
-        use_cuda_amp = str(self.runtime.device).startswith("cuda") and torch.cuda.is_available()
-        with torch.inference_mode():
-            if use_cuda_amp:
-                with torch.autocast("cuda", dtype=torch.bfloat16):
-                    masks, scores, _ = self.predictor.predict(
-                        point_coords=point_coords,
-                        point_labels=point_labels,
-                        box=box,
-                        multimask_output=True,
-                        return_logits=False,
-                    )
-            else:
-                masks, scores, _ = self.predictor.predict(
-                    point_coords=point_coords,
-                    point_labels=point_labels,
-                    box=box,
-                    multimask_output=True,
-                    return_logits=False,
-                )
-        masks = masks.astype(bool)
-        scores = np.asarray(scores, dtype=np.float32)
-        if masks.size == 0:
-            return None
-        return masks[int(np.argmax(scores))]
 
 
 def mask_overlay(rgb: np.ndarray, mask: np.ndarray) -> np.ndarray:

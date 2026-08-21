@@ -5,6 +5,7 @@ from __future__ import annotations
 from discover_client.identification.annotator import Annotator, register_annotator
 from discover_client.identification.evidence import SignalEvidence
 from discover_client.source import SourceEvent
+from discover_client.identification.tokens import extract_identity_tokens
 
 
 @register_annotator("mqtt")
@@ -30,5 +31,6 @@ class MqttAnnotator(Annotator):
             mqtt_payload_keys=payload_keys,
             mqtt_payload=payload_value,
             topic_prefix=topic_prefix,
+            identity_tokens=extract_identity_tokens(topic, payload_value),
             timestamp=event.timestamp,
         )

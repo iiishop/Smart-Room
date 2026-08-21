@@ -22,10 +22,7 @@ def test_barevalue_extracts_enum_payload() -> None:
     """Enum string payload: sensor_key=None, sensor_readings[0].value='ON'."""
     rec = BareValueRecognizer()
     result = rec.extract("any/topic", "ON")
-    assert len(result.operations) == 1
-    op = result.operations[0]
-    assert op.action == "command"
-    assert op.sensor_key is None
+    assert result.operations == []
     assert len(result.sensor_readings) == 1
     assert result.sensor_readings[0].sensor_type == "value"
     assert result.sensor_readings[0].value == "ON"

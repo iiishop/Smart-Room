@@ -33,6 +33,11 @@ namespace SmartRoom.Capture
             public int depthHeight;
             public long timestampUnixMs;
             public int unityFrame;
+            public long rgbTimestampTicks;
+            public Pose rgbCameraPose;
+            public Vector2 rgbFocalPixels;
+            public Vector2 rgbPrincipalPoint;
+            public string rgbCameraPosition;
             public bool rgbOk;
             public bool depthOk;
             public bool descriptorOk;
@@ -227,6 +232,20 @@ namespace SmartRoom.Capture
                 depthHeight = meta.depth.resolution_h,
                 timestampUnixMs = timestampUnixMs,
                 unityFrame = Time.frameCount,
+                rgbTimestampTicks = rgbMeta.timestamp_ticks,
+                rgbCameraPose = new Pose(
+                    new Vector3(
+                        rgbMeta.pose_position_x,
+                        rgbMeta.pose_position_y,
+                        rgbMeta.pose_position_z),
+                    new Quaternion(
+                        rgbMeta.pose_rotation_x,
+                        rgbMeta.pose_rotation_y,
+                        rgbMeta.pose_rotation_z,
+                        rgbMeta.pose_rotation_w)),
+                rgbFocalPixels = new Vector2(rgbMeta.focal_length_x, rgbMeta.focal_length_y),
+                rgbPrincipalPoint = new Vector2(rgbMeta.principal_point_x, rgbMeta.principal_point_y),
+                rgbCameraPosition = rgbMeta.camera_position,
                 rgbOk = rgbOk,
                 depthOk = depthOk,
                 descriptorOk = descriptorOk,
@@ -234,6 +253,44 @@ namespace SmartRoom.Capture
 
             Debug.Log($"[Quest3RgbdCaptureFinal] captured rgb={rgbOk} depth={depthOk} descriptor={descriptorOk} rgb={payload.rgbWidth}x{payload.rgbHeight} depth={payload.depthWidth}x{payload.depthHeight}");
             return rgbOk && depthOk && descriptorOk;
+        }
+
+        public static bool TryProjectWorldPointToCapturedRgb(
+            CapturePayload payload,
+            Vector3 worldPoint,
+            out Vector2Int pixel,
+            out float cameraDepthMeters)
+        {
+            pixel = default;
+            cameraDepthMeters = 0f;
+            if (payload == null || !payload.rgbOk ||
+                payload.rgbWidth <= 0 || payload.rgbHeight <= 0 ||
+                payload.rgbFocalPixels.x <= 0f || payload.rgbFocalPixels.y <= 0f)
+            {
+                return false;
+            }
+
+            Vector3 cameraPoint =
+                Quaternion.Inverse(payload.rgbCameraPose.rotation) *
+                (worldPoint - payload.rgbCameraPose.position);
+            cameraDepthMeters = cameraPoint.z;
+            if (cameraPoint.z <= 1e-4f)
+                return false;
+
+            float px =
+                payload.rgbFocalPixels.x * cameraPoint.x / cameraPoint.z +
+                payload.rgbPrincipalPoint.x;
+            float sensorY =
+                payload.rgbFocalPixels.y * cameraPoint.y / cameraPoint.z +
+                payload.rgbPrincipalPoint.y;
+            float py = (payload.rgbHeight - 1f) - sensorY;
+            int x = Mathf.RoundToInt(px);
+            int y = Mathf.RoundToInt(py);
+            if (x < 0 || x >= payload.rgbWidth || y < 0 || y >= payload.rgbHeight)
+                return false;
+
+            pixel = new Vector2Int(x, y);
+            return true;
         }
 
         private bool TryCaptureRgb(out byte[] jpegBytes, out byte[] rawRgbBytes, out RgbMeta meta)
@@ -257,6 +314,13 @@ namespace SmartRoom.Capture
 
             EnsureRgbBuffers(captureWidth, captureHeight);
 
+            // Freeze metadata before the synchronous GPU readback and JPEG encode.
+            // GetCameraPose() is tied to the PCA Timestamp; sampling it afterwards can
+            // associate a newer head pose with the image copied above.
+            var intrinsics = passthroughCamera.Intrinsics;
+            Pose camPose = passthroughCamera.GetCameraPose();
+            long cameraTimestampTicks = passthroughCamera.Timestamp.Ticks;
+
             RenderTexture previous = RenderTexture.active;
             try
             {
@@ -277,14 +341,15 @@ namespace SmartRoom.Capture
                 RenderTexture.active = previous;
             }
 
-            var intrinsics = passthroughCamera.Intrinsics;
-            Pose camPose = passthroughCamera.GetCameraPose();
-            float scaleX = intrinsics.SensorResolution.x > 0 ? (float)captureWidth / intrinsics.SensorResolution.x : 1f;
-            float scaleY = intrinsics.SensorResolution.y > 0 ? (float)captureHeight / intrinsics.SensorResolution.y : 1f;
+            Rect sensorCrop = CalculateSensorCropRegion(
+                intrinsics.SensorResolution,
+                currentResolution);
+            float scaleX = sensorCrop.width > 0f ? captureWidth / sensorCrop.width : 1f;
+            float scaleY = sensorCrop.height > 0f ? captureHeight / sensorCrop.height : 1f;
 
             meta = new RgbMeta
             {
-                timestamp_ticks = passthroughCamera.Timestamp.Ticks,
+                timestamp_ticks = cameraTimestampTicks,
                 resolution_w = captureWidth,
                 resolution_h = captureHeight,
                 requested_resolution_w = rgbOutputWidth,
@@ -294,14 +359,17 @@ namespace SmartRoom.Capture
                 source_resolution_w = captureWidth,
                 source_resolution_h = captureHeight,
                 raw_format = "rgb24_interleaved",
+                projection_metadata_version = 2,
+                image_origin = "top_left",
+                pose_sampled_before_readback = true,
                 camera_position = passthroughCamera.CameraPosition.ToString(),
                 selected_depth_eye = GetSelectedDepthEyeIndex(),
                 sensor_resolution_w = intrinsics.SensorResolution.x,
                 sensor_resolution_h = intrinsics.SensorResolution.y,
                 focal_length_x = intrinsics.FocalLength.x * scaleX,
                 focal_length_y = intrinsics.FocalLength.y * scaleY,
-                principal_point_x = intrinsics.PrincipalPoint.x * scaleX,
-                principal_point_y = intrinsics.PrincipalPoint.y * scaleY,
+                principal_point_x = (intrinsics.PrincipalPoint.x - sensorCrop.x) * scaleX,
+                principal_point_y = (intrinsics.PrincipalPoint.y - sensorCrop.y) * scaleY,
                 sensor_focal_length_x = intrinsics.FocalLength.x,
                 sensor_focal_length_y = intrinsics.FocalLength.y,
                 sensor_principal_point_x = intrinsics.PrincipalPoint.x,
@@ -315,6 +383,23 @@ namespace SmartRoom.Capture
                 pose_rotation_w = camPose.rotation.w,
             };
             return rawRgbBytes != null && rawRgbBytes.Length == captureWidth * captureHeight * 3;
+        }
+
+        private static Rect CalculateSensorCropRegion(Vector2Int sensorResolution, Vector2Int currentResolution)
+        {
+            if (sensorResolution.x <= 0 || sensorResolution.y <= 0 ||
+                currentResolution.x <= 0 || currentResolution.y <= 0)
+            {
+                return new Rect(0f, 0f, sensorResolution.x, sensorResolution.y);
+            }
+
+            Vector2 sensor = sensorResolution;
+            Vector2 current = currentResolution;
+            Vector2 scale = new Vector2(current.x / sensor.x, current.y / sensor.y);
+            scale /= Mathf.Max(scale.x, scale.y);
+            Vector2 cropSize = Vector2.Scale(sensor, scale);
+            Vector2 cropOrigin = (sensor - cropSize) * 0.5f;
+            return new Rect(cropOrigin, cropSize);
         }
 
         private bool TryCaptureDepthRaw(out byte[] depthRaw)
@@ -587,6 +672,9 @@ namespace SmartRoom.Capture
             public int current_resolution_w, current_resolution_h;
             public int source_resolution_w, source_resolution_h;
             public string raw_format;
+            public int projection_metadata_version;
+            public string image_origin;
+            public bool pose_sampled_before_readback;
             public string camera_position;
             public int selected_depth_eye;
             public int sensor_resolution_w, sensor_resolution_h;

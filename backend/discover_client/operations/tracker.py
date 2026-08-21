@@ -147,8 +147,6 @@ def _classify(evidence: SignalEvidence) -> tuple[str, float]:
         scores.append(("telemetry", TELEMETRY_SUFFIX_CONFIDENCE))
     if any(word in (evidence.mqtt_topic or "").lower().split("/") for word in SENSOR_WORDS):
         scores.append(("telemetry", SENSOR_WORD_CONFIDENCE))
-    if _extract_values(evidence.mqtt_payload):
-        scores.append(("command", ENUM_PAYLOAD_CONFIDENCE))
     if _has_numeric_value_with_unit(evidence.mqtt_payload):
         scores.append(("telemetry", UNIT_PAYLOAD_CONFIDENCE))
 

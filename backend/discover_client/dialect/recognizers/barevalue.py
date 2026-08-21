@@ -21,13 +21,7 @@ class BareValueRecognizer(DialectRecognizer):
 
     def extract(self, topic: str, payload: Any) -> RecognizerOutput:
         return RecognizerOutput(
-            operations=[
-                RecognizedOperation(
-                    topic=topic,
-                    action="command",
-                    sensor_key=None,
-                )
-            ],
+            operations=[],
             sensor_readings=[
                 RecognizedSensor(
                     sensor_type="value",
